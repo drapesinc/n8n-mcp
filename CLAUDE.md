@@ -2,6 +2,47 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Fork Information
+
+- **Fork:** https://github.com/jyoansah/n8n-mcp
+- **Upstream:** https://github.com/czlonkowski/n8n-mcp
+
+### Syncing with Upstream
+
+Regularly pull updates from upstream to stay current:
+
+```bash
+git fetch upstream
+git merge upstream/main
+# Resolve any conflicts, then:
+npm install && npm run build
+```
+
+### Fork Additions: Multi-Workspace Support
+
+This fork adds multi-workspace support following the Notion MCP pattern:
+
+- `src/config/workspace-config.ts` - Scans `N8N_URL_*` and `N8N_TOKEN_*` env vars
+- `src/services/workspace-api-client.ts` - Manages one API client per workspace
+- All n8n management tools accept optional `workspace` parameter
+
+**Environment Variables (Multi-Workspace Mode):**
+```bash
+N8N_URL_PERSONAL=https://n8n.jyoansah.me
+N8N_TOKEN_PERSONAL=<api-key>
+N8N_URL_DRAPES=https://n8n.drapesinc.com
+N8N_TOKEN_DRAPES=<api-key>
+N8N_DEFAULT_WORKSPACE=personal
+```
+
+**Single-Instance Fallback (Backward Compatible):**
+```bash
+N8N_API_URL=https://n8n.example.com
+N8N_API_KEY=<api-key>
+```
+
+---
+
 ## Project Overview
 
 n8n-mcp is a comprehensive documentation and knowledge server that provides AI assistants with complete access to n8n node information through the Model Context Protocol (MCP). It serves as a bridge between n8n's workflow automation platform and AI models, enabling them to understand and work with n8n nodes effectively.
