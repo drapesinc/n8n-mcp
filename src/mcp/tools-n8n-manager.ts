@@ -1,11 +1,48 @@
 import { ToolDefinition } from '../types';
+import { getWorkspaceParamSchema, shouldShowWorkspaceParam } from '../services/workspace-api-client';
 
 /**
  * n8n Management Tools
- * 
+ *
  * These tools enable AI agents to manage n8n workflows through the n8n API.
  * They require N8N_API_URL and N8N_API_KEY to be configured.
+ *
+ * In multi-workspace mode, tools accept an optional 'workspace' parameter.
  */
+
+/**
+ * Add workspace parameter to a tool's input schema if multi-workspace mode is enabled
+ */
+function addWorkspaceParam(inputSchema: ToolDefinition['inputSchema']): ToolDefinition['inputSchema'] {
+  const workspaceSchema = getWorkspaceParamSchema();
+  if (!workspaceSchema) {
+    return inputSchema;
+  }
+
+  // Clone the schema and add workspace property at the beginning
+  return {
+    ...inputSchema,
+    properties: {
+      workspace: workspaceSchema,
+      ...(inputSchema.properties || {}),
+    },
+  };
+}
+
+/**
+ * Get n8n management tools with workspace parameter injected if needed
+ */
+export function getN8nManagementToolsWithWorkspace(): ToolDefinition[] {
+  if (!shouldShowWorkspaceParam()) {
+    return n8nManagementTools;
+  }
+
+  return n8nManagementTools.map(tool => ({
+    ...tool,
+    inputSchema: addWorkspaceParam(tool.inputSchema),
+  }));
+}
+
 export const n8nManagementTools: ToolDefinition[] = [
   // Workflow Management Tools
   {

@@ -11,7 +11,7 @@ import { existsSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
 import { UIAppRegistry } from './ui';
-import { n8nManagementTools } from './tools-n8n-manager';
+import { n8nManagementTools, getN8nManagementToolsWithWorkspace } from './tools-n8n-manager';
 import { makeToolsN8nFriendly } from './tools-n8n-friendly';
 import { getWorkflowExampleString } from './workflow-examples';
 import { logger } from '../utils/logger';
@@ -28,6 +28,7 @@ import { SimpleCache } from '../utils/simple-cache';
 import { TemplateService } from '../templates/template-service';
 import { WorkflowValidator } from '../services/workflow-validator';
 import { isN8nApiConfigured } from '../config/n8n-api';
+import { getWorkspaceConfig } from '../config/workspace-config';
 import * as n8nHandlers from './handlers-n8n-manager';
 import { handleUpdatePartialWorkflow } from './handlers-workflow-diff';
 import { getToolDocumentation, getToolsOverview } from './tools-documentation';
@@ -604,15 +605,19 @@ export class N8NDocumentationMCPServer {
       // 1. Environment variables (backward compatibility)
       // 2. Instance context (multi-tenant support)
       // 3. Multi-tenant mode enabled (always show tools, runtime checks will handle auth)
+      // 4. Multi-workspace mode (N8N_URL_* + N8N_TOKEN_* env vars)
       const hasEnvConfig = isN8nApiConfigured();
       const hasInstanceConfig = !!(this.instanceContext?.n8nApiUrl && this.instanceContext?.n8nApiKey);
       const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
+      const hasWorkspaceConfig = getWorkspaceConfig().workspaces.size > 0;
 
-      const shouldIncludeManagementTools = hasEnvConfig || hasInstanceConfig || isMultiTenantEnabled;
+      const shouldIncludeManagementTools = hasEnvConfig || hasInstanceConfig || isMultiTenantEnabled || hasWorkspaceConfig;
 
       if (shouldIncludeManagementTools) {
+        // Get management tools with workspace parameter if multi-workspace mode
+        const mgmtToolsWithWorkspace = getN8nManagementToolsWithWorkspace();
         // Filter management tools based on disabled list
-        const enabledMgmtTools = n8nManagementTools.filter(
+        const enabledMgmtTools = mgmtToolsWithWorkspace.filter(
           tool => !disabledTools.has(tool.name)
         );
         tools.push(...enabledMgmtTools);
@@ -620,6 +625,7 @@ export class N8NDocumentationMCPServer {
           hasEnvConfig,
           hasInstanceConfig,
           isMultiTenantEnabled,
+          hasWorkspaceConfig,
           disabledToolsCount: disabledTools.size
         });
       } else {
@@ -627,6 +633,7 @@ export class N8NDocumentationMCPServer {
           hasEnvConfig,
           hasInstanceConfig,
           isMultiTenantEnabled,
+          hasWorkspaceConfig,
           disabledToolsCount: disabledTools.size
         });
       }
