@@ -25,6 +25,7 @@ import { TemplateService } from '../templates/template-service';
 import { WorkflowValidator } from '../services/workflow-validator';
 import { isN8nApiConfigured } from '../config/n8n-api';
 import { getWorkspaceConfig } from '../config/workspace-config';
+import { resolveWorkspaceContext, getWorkspaceApiClientManager } from '../services/workspace-api-client';
 import * as n8nHandlers from './handlers-n8n-manager';
 import { handleUpdatePartialWorkflow } from './handlers-workflow-diff';
 import { getToolDocumentation, getToolsOverview } from './tools-documentation';
@@ -975,6 +976,44 @@ export class N8NDocumentationMCPServer {
   }
 
   /**
+   * Resolve context from workspace parameter in args
+   *
+   * In multi-workspace mode, extracts 'workspace' from args and resolves it
+   * to an InstanceContext. Falls back to this.instanceContext if no workspace
+   * is specified or in single-workspace mode.
+   *
+   * @param args - Tool arguments that may contain a 'workspace' parameter
+   * @returns Resolved InstanceContext for the target workspace
+   * @throws Error if specified workspace is not found
+   */
+  private resolveContextFromArgs(args: any): InstanceContext | undefined {
+    const manager = getWorkspaceApiClientManager();
+
+    // If no workspace specified or single-workspace mode, use default context
+    if (!args?.workspace || !manager.isMultiWorkspace()) {
+      // In multi-workspace mode with no workspace specified, use default
+      if (manager.isMultiWorkspace() && !args?.workspace) {
+        const defaultWorkspace = manager.getDefaultWorkspace();
+        if (defaultWorkspace) {
+          const resolvedContext = resolveWorkspaceContext(defaultWorkspace);
+          if (resolvedContext) {
+            return resolvedContext;
+          }
+        }
+      }
+      return this.instanceContext;
+    }
+
+    // Resolve workspace to context
+    const workspaceContext = resolveWorkspaceContext(args.workspace);
+    if (!workspaceContext) {
+      throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
+    }
+
+    return workspaceContext;
+  }
+
+  /**
    * Validate extracted arguments match expected tool schema
    */
   private validateExtractedArgs(toolName: string, args: any): boolean {
@@ -1196,65 +1235,68 @@ export class N8NDocumentationMCPServer {
         return this.validateWorkflow(args.workflow, args.options);
 
       // n8n Management Tools (if API is configured)
+      // All handlers use resolveContextFromArgs to support multi-workspace routing
       case 'n8n_create_workflow':
         this.validateToolParams(name, args, ['name', 'nodes', 'connections']);
-        return n8nHandlers.handleCreateWorkflow(args, this.instanceContext);
+        return n8nHandlers.handleCreateWorkflow(args, this.resolveContextFromArgs(args));
       case 'n8n_get_workflow': {
         this.validateToolParams(name, args, ['id']);
+        const ctx = this.resolveContextFromArgs(args);
         const workflowMode = args.mode || 'full';
         switch (workflowMode) {
           case 'details':
-            return n8nHandlers.handleGetWorkflowDetails(args, this.instanceContext);
+            return n8nHandlers.handleGetWorkflowDetails(args, ctx);
           case 'structure':
-            return n8nHandlers.handleGetWorkflowStructure(args, this.instanceContext);
+            return n8nHandlers.handleGetWorkflowStructure(args, ctx);
           case 'minimal':
-            return n8nHandlers.handleGetWorkflowMinimal(args, this.instanceContext);
+            return n8nHandlers.handleGetWorkflowMinimal(args, ctx);
           case 'full':
           default:
-            return n8nHandlers.handleGetWorkflow(args, this.instanceContext);
+            return n8nHandlers.handleGetWorkflow(args, ctx);
         }
       }
       case 'n8n_update_full_workflow':
         this.validateToolParams(name, args, ['id']);
-        return n8nHandlers.handleUpdateWorkflow(args, this.repository!, this.instanceContext);
+        return n8nHandlers.handleUpdateWorkflow(args, this.repository!, this.resolveContextFromArgs(args));
       case 'n8n_update_partial_workflow':
         this.validateToolParams(name, args, ['id', 'operations']);
-        return handleUpdatePartialWorkflow(args, this.repository!, this.instanceContext);
+        return handleUpdatePartialWorkflow(args, this.repository!, this.resolveContextFromArgs(args));
       case 'n8n_delete_workflow':
         this.validateToolParams(name, args, ['id']);
-        return n8nHandlers.handleDeleteWorkflow(args, this.instanceContext);
+        return n8nHandlers.handleDeleteWorkflow(args, this.resolveContextFromArgs(args));
       case 'n8n_list_workflows':
         // No required parameters
-        return n8nHandlers.handleListWorkflows(args, this.instanceContext);
+        return n8nHandlers.handleListWorkflows(args, this.resolveContextFromArgs(args));
       case 'n8n_validate_workflow':
         this.validateToolParams(name, args, ['id']);
         await this.ensureInitialized();
         if (!this.repository) throw new Error('Repository not initialized');
-        return n8nHandlers.handleValidateWorkflow(args, this.repository, this.instanceContext);
+        return n8nHandlers.handleValidateWorkflow(args, this.repository, this.resolveContextFromArgs(args));
       case 'n8n_autofix_workflow':
         this.validateToolParams(name, args, ['id']);
         await this.ensureInitialized();
         if (!this.repository) throw new Error('Repository not initialized');
-        return n8nHandlers.handleAutofixWorkflow(args, this.repository, this.instanceContext);
+        return n8nHandlers.handleAutofixWorkflow(args, this.repository, this.resolveContextFromArgs(args));
       case 'n8n_test_workflow':
         this.validateToolParams(name, args, ['workflowId']);
-        return n8nHandlers.handleTestWorkflow(args, this.instanceContext);
+        return n8nHandlers.handleTestWorkflow(args, this.resolveContextFromArgs(args));
       case 'n8n_executions': {
         this.validateToolParams(name, args, ['action']);
+        const execCtx = this.resolveContextFromArgs(args);
         const execAction = args.action;
         switch (execAction) {
           case 'get':
             if (!args.id) {
               throw new Error('id is required for action=get');
             }
-            return n8nHandlers.handleGetExecution(args, this.instanceContext);
+            return n8nHandlers.handleGetExecution(args, execCtx);
           case 'list':
-            return n8nHandlers.handleListExecutions(args, this.instanceContext);
+            return n8nHandlers.handleListExecutions(args, execCtx);
           case 'delete':
             if (!args.id) {
               throw new Error('id is required for action=delete');
             }
-            return n8nHandlers.handleDeleteExecution(args, this.instanceContext);
+            return n8nHandlers.handleDeleteExecution(args, execCtx);
           default:
             throw new Error(`Unknown action: ${execAction}. Valid actions: get, list, delete`);
         }
@@ -1262,19 +1304,19 @@ export class N8NDocumentationMCPServer {
       case 'n8n_health_check':
         // No required parameters - supports mode='status' (default) or mode='diagnostic'
         if (args.mode === 'diagnostic') {
-          return n8nHandlers.handleDiagnostic({ params: { arguments: args } }, this.instanceContext);
+          return n8nHandlers.handleDiagnostic({ params: { arguments: args } }, this.resolveContextFromArgs(args));
         }
-        return n8nHandlers.handleHealthCheck(this.instanceContext);
+        return n8nHandlers.handleHealthCheck(this.resolveContextFromArgs(args));
       case 'n8n_workflow_versions':
         this.validateToolParams(name, args, ['mode']);
-        return n8nHandlers.handleWorkflowVersions(args, this.repository!, this.instanceContext);
+        return n8nHandlers.handleWorkflowVersions(args, this.repository!, this.resolveContextFromArgs(args));
 
       case 'n8n_deploy_template':
         this.validateToolParams(name, args, ['templateId']);
         await this.ensureInitialized();
         if (!this.templateService) throw new Error('Template service not initialized');
         if (!this.repository) throw new Error('Repository not initialized');
-        return n8nHandlers.handleDeployTemplate(args, this.templateService, this.repository, this.instanceContext);
+        return n8nHandlers.handleDeployTemplate(args, this.templateService, this.repository, this.resolveContextFromArgs(args));
 
       default:
         throw new Error(`Unknown tool: ${name}`);
