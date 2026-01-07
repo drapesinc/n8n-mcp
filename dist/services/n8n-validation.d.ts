@@ -25,15 +25,15 @@ export declare const workflowNodeSchema: z.ZodObject<{
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
+    disabled?: boolean | undefined;
+    notes?: string | undefined;
+    notesInFlow?: boolean | undefined;
+    continueOnFail?: boolean | undefined;
     retryOnFail?: boolean | undefined;
     maxTries?: number | undefined;
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
-    continueOnFail?: boolean | undefined;
     executeOnce?: boolean | undefined;
-    disabled?: boolean | undefined;
-    notes?: string | undefined;
-    notesInFlow?: boolean | undefined;
 }, {
     type: string;
     id: string;
@@ -42,15 +42,15 @@ export declare const workflowNodeSchema: z.ZodObject<{
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
+    disabled?: boolean | undefined;
+    notes?: string | undefined;
+    notesInFlow?: boolean | undefined;
+    continueOnFail?: boolean | undefined;
     retryOnFail?: boolean | undefined;
     maxTries?: number | undefined;
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
-    continueOnFail?: boolean | undefined;
     executeOnce?: boolean | undefined;
-    disabled?: boolean | undefined;
-    notes?: string | undefined;
-    notesInFlow?: boolean | undefined;
 }>;
 export declare const workflowConnectionSchema: z.ZodRecord<z.ZodString, z.ZodObject<{
     main: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
@@ -155,17 +155,17 @@ export declare const workflowConnectionSchema: z.ZodRecord<z.ZodString, z.ZodObj
         node: string;
         index: number;
     }[][] | undefined;
+    ai_tool?: {
+        type: string;
+        node: string;
+        index: number;
+    }[][] | undefined;
     ai_languageModel?: {
         type: string;
         node: string;
         index: number;
     }[][] | undefined;
     ai_memory?: {
-        type: string;
-        node: string;
-        index: number;
-    }[][] | undefined;
-    ai_tool?: {
         type: string;
         node: string;
         index: number;
@@ -191,17 +191,17 @@ export declare const workflowConnectionSchema: z.ZodRecord<z.ZodString, z.ZodObj
         node: string;
         index: number;
     }[][] | undefined;
+    ai_tool?: {
+        type: string;
+        node: string;
+        index: number;
+    }[][] | undefined;
     ai_languageModel?: {
         type: string;
         node: string;
         index: number;
     }[][] | undefined;
     ai_memory?: {
-        type: string;
-        node: string;
-        index: number;
-    }[][] | undefined;
-    ai_tool?: {
         type: string;
         node: string;
         index: number;
@@ -240,8 +240,8 @@ export declare const workflowSettingsSchema: z.ZodObject<{
     callerPolicy?: "any" | "workflowsFromSameOwner" | "workflowsFromAList" | undefined;
     availableInMCP?: boolean | undefined;
 }, {
-    timezone?: string | undefined;
     executionOrder?: "v0" | "v1" | undefined;
+    timezone?: string | undefined;
     saveDataErrorExecution?: "all" | "none" | undefined;
     saveDataSuccessExecution?: "all" | "none" | undefined;
     saveManualExecutions?: boolean | undefined;

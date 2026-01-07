@@ -26,6 +26,7 @@ export declare class N8NDocumentationMCPServer {
     private sanitizeValidationResult;
     private validateToolParams;
     private validateToolParamsBasic;
+    private resolveContextFromArgs;
     private validateExtractedArgs;
     private listNodes;
     private getNodeInfo;
