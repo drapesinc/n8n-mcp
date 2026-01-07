@@ -17,21 +17,21 @@ export declare class WebhookHandler extends BaseTriggerHandler<WebhookTriggerInp
     }, "strip", z.ZodTypeAny, {
         workflowId: string;
         triggerType: "webhook";
-        httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
-        webhookPath?: string | undefined;
         data?: Record<string, unknown> | undefined;
-        headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
+        headers?: Record<string, string> | undefined;
+        httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
         waitForResponse?: boolean | undefined;
+        webhookPath?: string | undefined;
     }, {
         workflowId: string;
         triggerType: "webhook";
-        httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
-        webhookPath?: string | undefined;
         data?: Record<string, unknown> | undefined;
-        headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
+        headers?: Record<string, string> | undefined;
+        httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
         waitForResponse?: boolean | undefined;
+        webhookPath?: string | undefined;
     }>;
     execute(input: WebhookTriggerInput, workflow: Workflow, triggerInfo?: DetectedTrigger): Promise<TriggerResponse>;
 }

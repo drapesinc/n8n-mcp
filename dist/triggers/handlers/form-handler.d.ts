@@ -17,16 +17,16 @@ export declare class FormHandler extends BaseTriggerHandler<FormTriggerInput> {
         workflowId: string;
         triggerType: "form";
         data?: Record<string, unknown> | undefined;
-        headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
+        headers?: Record<string, string> | undefined;
         waitForResponse?: boolean | undefined;
         formData?: Record<string, unknown> | undefined;
     }, {
         workflowId: string;
         triggerType: "form";
         data?: Record<string, unknown> | undefined;
-        headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
+        headers?: Record<string, string> | undefined;
         waitForResponse?: boolean | undefined;
         formData?: Record<string, unknown> | undefined;
     }>;

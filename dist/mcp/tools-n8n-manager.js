@@ -1,6 +1,30 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.n8nManagementTools = void 0;
+exports.getN8nManagementToolsWithWorkspace = getN8nManagementToolsWithWorkspace;
+const workspace_api_client_1 = require("../services/workspace-api-client");
+function addWorkspaceParam(inputSchema) {
+    const workspaceSchema = (0, workspace_api_client_1.getWorkspaceParamSchema)();
+    if (!workspaceSchema) {
+        return inputSchema;
+    }
+    return {
+        ...inputSchema,
+        properties: {
+            workspace: workspaceSchema,
+            ...(inputSchema.properties || {}),
+        },
+    };
+}
+function getN8nManagementToolsWithWorkspace() {
+    if (!(0, workspace_api_client_1.shouldShowWorkspaceParam)()) {
+        return exports.n8nManagementTools;
+    }
+    return exports.n8nManagementTools.map(tool => ({
+        ...tool,
+        inputSchema: addWorkspaceParam(tool.inputSchema),
+    }));
+}
 exports.n8nManagementTools = [
     {
         name: 'n8n_create_workflow',

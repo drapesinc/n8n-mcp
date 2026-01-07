@@ -41,6 +41,22 @@ N8N_API_URL=https://n8n.example.com
 N8N_API_KEY=<api-key>
 ```
 
+### Configured Workspaces
+
+| Workspace | n8n URL | Workflows | Notion DB ID | Notion Workspace |
+|-----------|---------|-----------|--------------|------------------|
+| personal | n8n.jyoansah.me | 65 | `0713a7983b5b4311ba75d889890f16b3` | personal |
+| drapes | n8n.drapesinc.com | 65 | `db0bc2b8bc4a44fe89137932cfa793fb` | drapes |
+| fourall | n8n.fourall.ca | 55 | `25424f67124181ba8600c66e1e285b24` | fourall |
+| mini | n8n.mini.jyoansah.me | 2 | - | - |
+
+**Workspace Details:**
+
+- **personal**: Primary instance for personal automations - Wave accounting, Notion sync, AI assistants, Gmail/Slack integrations
+- **drapes**: Drapes Inc client management - Helm CRM, accounting workflows, MainWP website sync
+- **fourall**: Four All Ice Cream operations - Shopify, Recipal recipes, Push Operations HR, Tally forms, Production runs
+- **mini**: New lightweight instance - WhatsApp Chat Assistant, Task Assistant
+
 ---
 
 ## Project Overview
