@@ -46,6 +46,7 @@ import {
 } from '../utils/cache-utils';
 import { processExecution } from '../services/execution-processor';
 import { checkNpmVersion, formatVersionMessage } from '../utils/npm-version-checker';
+import { getWorkspaceApiClientManager } from '../services/workspace-api-client';
 
 // ========================================================================
 // TypeScript Interfaces for Type Safety
@@ -171,6 +172,17 @@ interface DiagnosticResponseData {
       timeout: number;
       maxRetries: number;
     } | null;
+    // Multi-workspace configuration
+    workspaceMode?: 'multi' | 'single' | 'none';
+    workspaces?: {
+      available: string[];
+      default: string | null;
+      count: number;
+    } | null;
+    activeContext?: {
+      url?: string;
+      instanceId?: string;
+    } | string;
   };
   versionInfo: {
     current: string;
@@ -1932,9 +1944,16 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
     platform: process.platform
   };
 
-  // Check API configuration
+  // Check workspace configuration (multi-workspace mode)
+  const workspaceManager = getWorkspaceApiClientManager();
+  const availableWorkspaces = workspaceManager.getAvailableWorkspaces();
+  const defaultWorkspace = workspaceManager.getDefaultWorkspace();
+  const isMultiWorkspace = workspaceManager.isMultiWorkspace();
+
+  // Check API configuration (single-instance fallback)
   const apiConfig = getN8nApiConfig();
-  const apiConfigured = apiConfig !== null;
+  // In multi-workspace mode, API is considered configured if we have at least one workspace
+  const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
   const apiClient = getN8nApiClient(context);
 
   // Test API connectivity if configured
@@ -1978,7 +1997,22 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
         baseUrl: apiConfig.baseUrl,
         timeout: apiConfig.timeout,
         maxRetries: apiConfig.maxRetries
-      } : null
+      } : null,
+      // Multi-workspace configuration
+      workspaceMode: availableWorkspaces.length === 0 ? 'none'
+                   : availableWorkspaces.length === 1 ? 'single'
+                   : 'multi',
+      workspaces: availableWorkspaces.length > 0 ? {
+        available: availableWorkspaces,
+        default: defaultWorkspace,
+        count: availableWorkspaces.length
+      } : null,
+      // Context being used for this request
+      activeContext: context ? {
+        // Extract base URL (host only) to avoid exposing full API paths
+        url: context.n8nApiUrl?.replace(/^(https?:\/\/[^\/]+).*/, '$1'),
+        instanceId: context.instanceId
+      } : (defaultWorkspace ? `Using default workspace: ${defaultWorkspace}` : 'No context available')
     },
     versionInfo: {
       current: versionCheck.currentVersion,
@@ -1997,8 +2031,10 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
         count: managementTools,
         enabled: apiConfigured,
         description: apiConfigured ?
-          'Management tools are ENABLED - create, update, execute workflows' :
-          'Management tools are DISABLED - configure N8N_API_URL and N8N_API_KEY to enable'
+          (isMultiWorkspace
+            ? `Management tools are ENABLED - using ${availableWorkspaces.length} workspaces${defaultWorkspace ? ` (default: ${defaultWorkspace})` : ''}`
+            : 'Management tools are ENABLED - create, update, execute workflows')
+          : 'Management tools are DISABLED - configure N8N_URL_* and N8N_TOKEN_* env vars (or N8N_API_URL + N8N_API_KEY for single instance)'
       },
       totalAvailable: totalTools
     },

@@ -6,7 +6,13 @@
  * Following the pattern from notion-mcp-server
  */
 
+import dotenv from 'dotenv';
 import { logger } from '../utils/logger';
+
+// Ensure environment variables are loaded before scanning for workspace config
+// This is critical because getWorkspaceConfig() may be called during module initialization
+// before any other code has a chance to call dotenv.config()
+dotenv.config();
 
 export interface WorkspaceConfig {
   name: string;
