@@ -74,6 +74,7 @@ const telemetry_1 = require("../telemetry");
 const cache_utils_1 = require("../utils/cache-utils");
 const execution_processor_1 = require("../services/execution-processor");
 const npm_version_checker_1 = require("../utils/npm-version-checker");
+const workspace_api_client_1 = require("../services/workspace-api-client");
 let defaultApiClient = null;
 let lastDefaultConfigUrl = null;
 const cacheMutex = new cache_utils_1.CacheMutex();
@@ -1450,8 +1451,12 @@ async function handleDiagnostic(request, context) {
         nodeVersion: process.version,
         platform: process.platform
     };
+    const workspaceManager = (0, workspace_api_client_1.getWorkspaceApiClientManager)();
+    const availableWorkspaces = workspaceManager.getAvailableWorkspaces();
+    const defaultWorkspace = workspaceManager.getDefaultWorkspace();
+    const isMultiWorkspace = workspaceManager.isMultiWorkspace();
     const apiConfig = (0, n8n_api_1.getN8nApiConfig)();
-    const apiConfigured = apiConfig !== null;
+    const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
     const apiClient = getN8nApiClient(context);
     let apiStatus = {
         configured: apiConfigured,
@@ -1485,7 +1490,19 @@ async function handleDiagnostic(request, context) {
                 baseUrl: apiConfig.baseUrl,
                 timeout: apiConfig.timeout,
                 maxRetries: apiConfig.maxRetries
-            } : null
+            } : null,
+            workspaceMode: availableWorkspaces.length === 0 ? 'none'
+                : availableWorkspaces.length === 1 ? 'single'
+                    : 'multi',
+            workspaces: availableWorkspaces.length > 0 ? {
+                available: availableWorkspaces,
+                default: defaultWorkspace,
+                count: availableWorkspaces.length
+            } : null,
+            activeContext: context ? {
+                url: context.n8nApiUrl?.replace(/^(https?:\/\/[^\/]+).*/, '$1'),
+                instanceId: context.instanceId
+            } : (defaultWorkspace ? `Using default workspace: ${defaultWorkspace}` : 'No context available')
         },
         versionInfo: {
             current: versionCheck.currentVersion,
@@ -1504,8 +1521,10 @@ async function handleDiagnostic(request, context) {
                 count: managementTools,
                 enabled: apiConfigured,
                 description: apiConfigured ?
-                    'Management tools are ENABLED - create, update, execute workflows' :
-                    'Management tools are DISABLED - configure N8N_API_URL and N8N_API_KEY to enable'
+                    (isMultiWorkspace
+                        ? `Management tools are ENABLED - using ${availableWorkspaces.length} workspaces${defaultWorkspace ? ` (default: ${defaultWorkspace})` : ''}`
+                        : 'Management tools are ENABLED - create, update, execute workflows')
+                    : 'Management tools are DISABLED - configure N8N_URL_* and N8N_TOKEN_* env vars (or N8N_API_URL + N8N_API_KEY for single instance)'
             },
             totalAvailable: totalTools
         },

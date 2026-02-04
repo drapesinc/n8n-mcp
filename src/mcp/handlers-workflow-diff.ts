@@ -104,18 +104,63 @@ export async function handleUpdatePartialWorkflow(
   let validationAfter: any = null;
 
   try {
+    // Pre-process args to handle various input formats
+    // MCP clients may serialize arrays as JSON strings at different levels
+    let processedArgs = args;
+
+    // Step 1: If args itself is a string, try to parse it
+    if (typeof args === 'string') {
+      try {
+        processedArgs = JSON.parse(args);
+        logger.debug('Parsed args from JSON string');
+      } catch (e) {
+        logger.debug('Failed to parse args as JSON string', { error: e });
+      }
+    }
+
+    // Step 2: If operations is a string, try to parse it
+    if (processedArgs && typeof processedArgs === 'object') {
+      const argsObj = processedArgs as Record<string, unknown>;
+      if (typeof argsObj.operations === 'string') {
+        try {
+          let parsedOperations = JSON.parse(argsObj.operations);
+
+          // Handle double-encoded JSON (operations might be a string of a string)
+          if (typeof parsedOperations === 'string') {
+            try {
+              parsedOperations = JSON.parse(parsedOperations);
+              logger.debug('Parsed double-encoded operations');
+            } catch (e) {
+              // Not double-encoded, continue with first parse result
+            }
+          }
+
+          if (Array.isArray(parsedOperations)) {
+            processedArgs = { ...argsObj, operations: parsedOperations };
+            logger.debug('Parsed operations from JSON string', {
+              originalLength: (argsObj.operations as string).length,
+              parsedCount: parsedOperations.length
+            });
+          }
+        } catch (parseError) {
+          // If JSON parsing fails, let Zod validation handle the error
+          logger.debug('Failed to parse operations as JSON string', { error: parseError });
+        }
+      }
+    }
+
     // Debug logging (only in debug mode)
     if (process.env.DEBUG_MCP === 'true') {
       logger.debug('Workflow diff request received', {
-        argsType: typeof args,
-        hasWorkflowId: args && typeof args === 'object' && 'workflowId' in args,
-        operationCount: args && typeof args === 'object' && 'operations' in args ?
-          (args as any).operations?.length : 0
+        argsType: typeof processedArgs,
+        hasWorkflowId: processedArgs && typeof processedArgs === 'object' && 'workflowId' in processedArgs,
+        operationCount: processedArgs && typeof processedArgs === 'object' && 'operations' in processedArgs ?
+          (processedArgs as any).operations?.length : 0
       });
     }
 
     // Validate input
-    const input = workflowDiffSchema.parse(args);
+    const input = workflowDiffSchema.parse(processedArgs);
 
     // Get API client
     const client = getN8nApiClient(context);

@@ -105,15 +105,51 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
     let validationBefore = null;
     let validationAfter = null;
     try {
+        let processedArgs = args;
+        if (typeof args === 'string') {
+            try {
+                processedArgs = JSON.parse(args);
+                logger_1.logger.debug('Parsed args from JSON string');
+            }
+            catch (e) {
+                logger_1.logger.debug('Failed to parse args as JSON string', { error: e });
+            }
+        }
+        if (processedArgs && typeof processedArgs === 'object') {
+            const argsObj = processedArgs;
+            if (typeof argsObj.operations === 'string') {
+                try {
+                    let parsedOperations = JSON.parse(argsObj.operations);
+                    if (typeof parsedOperations === 'string') {
+                        try {
+                            parsedOperations = JSON.parse(parsedOperations);
+                            logger_1.logger.debug('Parsed double-encoded operations');
+                        }
+                        catch (e) {
+                        }
+                    }
+                    if (Array.isArray(parsedOperations)) {
+                        processedArgs = { ...argsObj, operations: parsedOperations };
+                        logger_1.logger.debug('Parsed operations from JSON string', {
+                            originalLength: argsObj.operations.length,
+                            parsedCount: parsedOperations.length
+                        });
+                    }
+                }
+                catch (parseError) {
+                    logger_1.logger.debug('Failed to parse operations as JSON string', { error: parseError });
+                }
+            }
+        }
         if (process.env.DEBUG_MCP === 'true') {
             logger_1.logger.debug('Workflow diff request received', {
-                argsType: typeof args,
-                hasWorkflowId: args && typeof args === 'object' && 'workflowId' in args,
-                operationCount: args && typeof args === 'object' && 'operations' in args ?
-                    args.operations?.length : 0
+                argsType: typeof processedArgs,
+                hasWorkflowId: processedArgs && typeof processedArgs === 'object' && 'workflowId' in processedArgs,
+                operationCount: processedArgs && typeof processedArgs === 'object' && 'operations' in processedArgs ?
+                    processedArgs.operations?.length : 0
             });
         }
-        const input = workflowDiffSchema.parse(args);
+        const input = workflowDiffSchema.parse(processedArgs);
         const client = (0, handlers_n8n_manager_1.getN8nApiClient)(context);
         if (!client) {
             return {

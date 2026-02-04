@@ -14,8 +14,7 @@ lerna-debug.log*
 .env.production.local
 .env*.local
 
-# Build output
-dist/
+# Build output (dist/ committed for GitHub-based MCP loading)
 build/
 out/
 .next/
