@@ -218,7 +218,8 @@ The MCP server exposes tools in several categories:
 2. **Configuration Tools**: Getting node details and examples
 3. **Validation Tools**: Validating configurations before deployment
 4. **Workflow Tools**: Complete workflow validation
-5. **Management Tools**: Creating and updating workflows (requires API config)
+5. **Management Tools**: Creating, updating, and activating/deactivating workflows (requires API config)
+   - `n8n_activate_workflow`: Toggle workflow active state (`active: true/false`)
 
 ## Memories and Notes for Development
 
