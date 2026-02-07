@@ -1029,6 +1029,7 @@ export class N8NDocumentationMCPServer {
       case 'n8n_delete_workflow':
       case 'n8n_validate_workflow':
       case 'n8n_autofix_workflow':
+      case 'n8n_activate_workflow':
         validationResult = ToolValidation.validateWorkflowId(args);
         break;
       case 'n8n_executions':
@@ -1491,6 +1492,9 @@ export class N8NDocumentationMCPServer {
       case 'n8n_delete_workflow':
         this.validateToolParams(name, args, ['id']);
         return n8nHandlers.handleDeleteWorkflow(args, this.resolveContextFromArgs(args));
+      case 'n8n_activate_workflow':
+        this.validateToolParams(name, args, ['id', 'active']);
+        return n8nHandlers.handleActivateWorkflow(args, this.resolveContextFromArgs(args));
       case 'n8n_list_workflows':
         // No required parameters
         return n8nHandlers.handleListWorkflows(args, this.resolveContextFromArgs(args));

@@ -950,6 +950,48 @@ export async function handleDeleteWorkflow(args: unknown, context?: InstanceCont
   }
 }
 
+export async function handleActivateWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id, active } = z.object({ id: z.string(), active: z.boolean() }).parse(args);
+
+    const workflow = active
+      ? await client.activateWorkflow(id)
+      : await client.deactivateWorkflow(id);
+
+    return {
+      success: true,
+      data: {
+        id: workflow.id,
+        name: workflow.name,
+        active: workflow.active,
+      },
+      message: `Workflow "${workflow.name || id}" ${active ? 'activated' : 'deactivated'} successfully.`
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
 export async function handleListWorkflows(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
   try {
     const client = ensureApiConfigured(context);
@@ -1993,7 +2035,7 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
 
   // Check which tools are available
   const documentationTools = 7; // Base documentation tools (after v2.26.0 consolidation)
-  const managementTools = apiConfigured ? 13 : 0; // Management tools requiring API (includes n8n_deploy_template)
+  const managementTools = apiConfigured ? 14 : 0; // Management tools requiring API (includes n8n_deploy_template, n8n_activate_workflow)
   const totalTools = documentationTools + managementTools;
 
   // Check npm version

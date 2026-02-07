@@ -3,6 +3,7 @@ export { n8nGetWorkflowDoc } from './n8n-get-workflow';
 export { n8nUpdateFullWorkflowDoc } from './n8n-update-full-workflow';
 export { n8nUpdatePartialWorkflowDoc } from './n8n-update-partial-workflow';
 export { n8nDeleteWorkflowDoc } from './n8n-delete-workflow';
+export { n8nActivateWorkflowDoc } from './n8n-activate-workflow';
 export { n8nListWorkflowsDoc } from './n8n-list-workflows';
 export { n8nValidateWorkflowDoc } from './n8n-validate-workflow';
 export { n8nAutofixWorkflowDoc } from './n8n-autofix-workflow';

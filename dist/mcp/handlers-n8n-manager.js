@@ -44,6 +44,7 @@ exports.handleGetWorkflowStructure = handleGetWorkflowStructure;
 exports.handleGetWorkflowMinimal = handleGetWorkflowMinimal;
 exports.handleUpdateWorkflow = handleUpdateWorkflow;
 exports.handleDeleteWorkflow = handleDeleteWorkflow;
+exports.handleActivateWorkflow = handleActivateWorkflow;
 exports.handleListWorkflows = handleListWorkflows;
 exports.handleValidateWorkflow = handleValidateWorkflow;
 exports.handleAutofixWorkflow = handleAutofixWorkflow;
@@ -626,6 +627,44 @@ async function handleDeleteWorkflow(args, context) {
                 deleted: true
             },
             message: `Workflow "${deleted?.name || id}" deleted successfully.`
+        };
+    }
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError) {
+            return {
+                success: false,
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+                code: error.code
+            };
+        }
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+async function handleActivateWorkflow(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id, active } = zod_1.z.object({ id: zod_1.z.string(), active: zod_1.z.boolean() }).parse(args);
+        const workflow = active
+            ? await client.activateWorkflow(id)
+            : await client.deactivateWorkflow(id);
+        return {
+            success: true,
+            data: {
+                id: workflow.id,
+                name: workflow.name,
+                active: workflow.active,
+            },
+            message: `Workflow "${workflow.name || id}" ${active ? 'activated' : 'deactivated'} successfully.`
         };
     }
     catch (error) {
@@ -1475,7 +1514,7 @@ async function handleDiagnostic(request, context) {
         }
     }
     const documentationTools = 7;
-    const managementTools = apiConfigured ? 13 : 0;
+    const managementTools = apiConfigured ? 14 : 0;
     const totalTools = documentationTools + managementTools;
     const versionCheck = await (0, npm_version_checker_1.checkNpmVersion)();
     const cacheMetricsData = getInstanceCacheMetrics();

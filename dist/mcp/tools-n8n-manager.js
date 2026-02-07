@@ -218,6 +218,31 @@ exports.n8nManagementTools = [
         },
     },
     {
+        name: 'n8n_activate_workflow',
+        description: `Activate or deactivate a workflow. Use active=true to activate (enable triggers), active=false to deactivate (stop triggers).`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    description: 'Workflow ID to activate or deactivate'
+                },
+                active: {
+                    type: 'boolean',
+                    description: 'true to activate the workflow, false to deactivate it'
+                }
+            },
+            required: ['id', 'active']
+        },
+        annotations: {
+            title: 'Activate/Deactivate Workflow',
+            readOnlyHint: false,
+            destructiveHint: false,
+            idempotentHint: true,
+            openWorldHint: true,
+        },
+    },
+    {
         name: 'n8n_list_workflows',
         description: `List workflows (minimal metadata only). Returns id/name/active/dates/tags. Check hasMore/nextCursor for pagination.`,
         inputSchema: {

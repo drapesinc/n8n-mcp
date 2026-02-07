@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.n8nDeployTemplateDoc = exports.n8nWorkflowVersionsDoc = exports.n8nExecutionsDoc = exports.n8nTestWorkflowDoc = exports.n8nAutofixWorkflowDoc = exports.n8nValidateWorkflowDoc = exports.n8nListWorkflowsDoc = exports.n8nDeleteWorkflowDoc = exports.n8nUpdatePartialWorkflowDoc = exports.n8nUpdateFullWorkflowDoc = exports.n8nGetWorkflowDoc = exports.n8nCreateWorkflowDoc = void 0;
+exports.n8nDeployTemplateDoc = exports.n8nWorkflowVersionsDoc = exports.n8nExecutionsDoc = exports.n8nTestWorkflowDoc = exports.n8nAutofixWorkflowDoc = exports.n8nValidateWorkflowDoc = exports.n8nListWorkflowsDoc = exports.n8nActivateWorkflowDoc = exports.n8nDeleteWorkflowDoc = exports.n8nUpdatePartialWorkflowDoc = exports.n8nUpdateFullWorkflowDoc = exports.n8nGetWorkflowDoc = exports.n8nCreateWorkflowDoc = void 0;
 var n8n_create_workflow_1 = require("./n8n-create-workflow");
 Object.defineProperty(exports, "n8nCreateWorkflowDoc", { enumerable: true, get: function () { return n8n_create_workflow_1.n8nCreateWorkflowDoc; } });
 var n8n_get_workflow_1 = require("./n8n-get-workflow");
@@ -11,6 +11,8 @@ var n8n_update_partial_workflow_1 = require("./n8n-update-partial-workflow");
 Object.defineProperty(exports, "n8nUpdatePartialWorkflowDoc", { enumerable: true, get: function () { return n8n_update_partial_workflow_1.n8nUpdatePartialWorkflowDoc; } });
 var n8n_delete_workflow_1 = require("./n8n-delete-workflow");
 Object.defineProperty(exports, "n8nDeleteWorkflowDoc", { enumerable: true, get: function () { return n8n_delete_workflow_1.n8nDeleteWorkflowDoc; } });
+var n8n_activate_workflow_1 = require("./n8n-activate-workflow");
+Object.defineProperty(exports, "n8nActivateWorkflowDoc", { enumerable: true, get: function () { return n8n_activate_workflow_1.n8nActivateWorkflowDoc; } });
 var n8n_list_workflows_1 = require("./n8n-list-workflows");
 Object.defineProperty(exports, "n8nListWorkflowsDoc", { enumerable: true, get: function () { return n8n_list_workflows_1.n8nListWorkflowsDoc; } });
 var n8n_validate_workflow_1 = require("./n8n-validate-workflow");

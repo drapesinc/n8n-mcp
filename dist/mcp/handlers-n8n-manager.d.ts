@@ -14,6 +14,7 @@ export declare function handleGetWorkflowStructure(args: unknown, context?: Inst
 export declare function handleGetWorkflowMinimal(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleUpdateWorkflow(args: unknown, repository: NodeRepository, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDeleteWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleActivateWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleListWorkflows(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleValidateWorkflow(args: unknown, repository: NodeRepository, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleAutofixWorkflow(args: unknown, repository: NodeRepository, context?: InstanceContext): Promise<McpToolResponse>;

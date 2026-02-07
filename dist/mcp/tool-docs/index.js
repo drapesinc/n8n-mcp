@@ -23,6 +23,7 @@ exports.toolsDocumentation = {
     n8n_update_full_workflow: workflow_management_1.n8nUpdateFullWorkflowDoc,
     n8n_update_partial_workflow: workflow_management_1.n8nUpdatePartialWorkflowDoc,
     n8n_delete_workflow: workflow_management_1.n8nDeleteWorkflowDoc,
+    n8n_activate_workflow: workflow_management_1.n8nActivateWorkflowDoc,
     n8n_list_workflows: workflow_management_1.n8nListWorkflowsDoc,
     n8n_validate_workflow: workflow_management_1.n8nValidateWorkflowDoc,
     n8n_autofix_workflow: workflow_management_1.n8nAutofixWorkflowDoc,
