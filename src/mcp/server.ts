@@ -198,8 +198,11 @@ export class N8NDocumentationMCPServer {
         this.earlyLogger.logCheckpoint(STARTUP_CHECKPOINTS.N8N_API_CHECKING);
       }
 
-      // Log n8n API configuration status at startup
-      const apiConfigured = isN8nApiConfigured();
+      // Log n8n API configuration status at startup.
+      // Consider API configured if either legacy vars (N8N_API_URL/KEY) or
+      // any N8N_URL_*/N8N_TOKEN_* workspace pair is present.
+      const workspaceManager = getWorkspaceApiClientManager();
+      const apiConfigured = isN8nApiConfigured() || workspaceManager.getDefaultWorkspace() !== null;
       const totalTools = apiConfigured ?
         n8nDocumentationToolsFinal.length + n8nManagementTools.length :
         n8nDocumentationToolsFinal.length;
@@ -1075,28 +1078,28 @@ export class N8NDocumentationMCPServer {
   private resolveContextFromArgs(args: any): InstanceContext | undefined {
     const manager = getWorkspaceApiClientManager();
 
-    // If no workspace specified or single-workspace mode, use default context
-    if (!args?.workspace || !manager.isMultiWorkspace()) {
-      // In multi-workspace mode with no workspace specified, use default
-      if (manager.isMultiWorkspace() && !args?.workspace) {
-        const defaultWorkspace = manager.getDefaultWorkspace();
-        if (defaultWorkspace) {
-          const resolvedContext = resolveWorkspaceContext(defaultWorkspace);
-          if (resolvedContext) {
-            return resolvedContext;
-          }
-        }
+    // Explicit workspace parameter always wins
+    if (args?.workspace) {
+      const workspaceContext = resolveWorkspaceContext(args.workspace);
+      if (!workspaceContext) {
+        throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
       }
-      return this.instanceContext;
+      return workspaceContext;
     }
 
-    // Resolve workspace to context
-    const workspaceContext = resolveWorkspaceContext(args.workspace);
-    if (!workspaceContext) {
-      throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
+    // Fall back to the default workspace if any N8N_URL_*/N8N_TOKEN_* pairs
+    // are configured. This path fires in both single- and multi-workspace
+    // mode; isMultiWorkspace() is strictly size>1 and would skip single
+    // configured workspaces, leaving them reliant on legacy env vars.
+    const defaultWorkspace = manager.getDefaultWorkspace();
+    if (defaultWorkspace) {
+      const resolvedContext = resolveWorkspaceContext(defaultWorkspace);
+      if (resolvedContext) {
+        return resolvedContext;
+      }
     }
 
-    return workspaceContext;
+    return this.instanceContext;
   }
 
   /**

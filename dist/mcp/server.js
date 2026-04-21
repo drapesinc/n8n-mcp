@@ -116,7 +116,8 @@ class N8NDocumentationMCPServer {
             if (this.earlyLogger) {
                 this.earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.N8N_API_CHECKING);
             }
-            const apiConfigured = (0, n8n_api_1.isN8nApiConfigured)();
+            const workspaceManager = (0, workspace_api_client_1.getWorkspaceApiClientManager)();
+            const apiConfigured = (0, n8n_api_1.isN8nApiConfigured)() || workspaceManager.getDefaultWorkspace() !== null;
             const totalTools = apiConfigured ?
                 tools_1.n8nDocumentationToolsFinal.length + tools_n8n_manager_1.n8nManagementTools.length :
                 tools_1.n8nDocumentationToolsFinal.length;
@@ -742,23 +743,21 @@ class N8NDocumentationMCPServer {
     }
     resolveContextFromArgs(args) {
         const manager = (0, workspace_api_client_1.getWorkspaceApiClientManager)();
-        if (!args?.workspace || !manager.isMultiWorkspace()) {
-            if (manager.isMultiWorkspace() && !args?.workspace) {
-                const defaultWorkspace = manager.getDefaultWorkspace();
-                if (defaultWorkspace) {
-                    const resolvedContext = (0, workspace_api_client_1.resolveWorkspaceContext)(defaultWorkspace);
-                    if (resolvedContext) {
-                        return resolvedContext;
-                    }
-                }
+        if (args?.workspace) {
+            const workspaceContext = (0, workspace_api_client_1.resolveWorkspaceContext)(args.workspace);
+            if (!workspaceContext) {
+                throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
             }
-            return this.instanceContext;
+            return workspaceContext;
         }
-        const workspaceContext = (0, workspace_api_client_1.resolveWorkspaceContext)(args.workspace);
-        if (!workspaceContext) {
-            throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
+        const defaultWorkspace = manager.getDefaultWorkspace();
+        if (defaultWorkspace) {
+            const resolvedContext = (0, workspace_api_client_1.resolveWorkspaceContext)(defaultWorkspace);
+            if (resolvedContext) {
+                return resolvedContext;
+            }
         }
-        return workspaceContext;
+        return this.instanceContext;
     }
     validateExtractedArgs(toolName, args) {
         if (!args || typeof args !== 'object') {
