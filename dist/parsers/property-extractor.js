@@ -95,13 +95,17 @@ class PropertyExtractor {
             }
         }
         if (description.properties && Array.isArray(description.properties)) {
-            const operationProp = description.properties.find((p) => p.name === 'operation' || p.name === 'action');
-            if (operationProp?.options) {
+            const operationProps = description.properties.filter((p) => p.name === 'operation' || p.name === 'action');
+            for (const operationProp of operationProps) {
+                if (!operationProp?.options)
+                    continue;
+                const resource = operationProp.displayOptions?.show?.resource?.[0];
                 operationProp.options.forEach((op) => {
                     operations.push({
                         operation: op.value,
                         name: op.name,
-                        description: op.description
+                        description: op.description,
+                        ...(resource ? { resource } : {})
                     });
                 });
             }

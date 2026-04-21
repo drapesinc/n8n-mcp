@@ -6,6 +6,8 @@
  * backward compatibility with environment-based configuration.
  */
 
+import { SSRFProtection } from '../utils/ssrf-protection';
+
 export interface InstanceContext {
   /**
    * Instance-specific n8n API configuration
@@ -146,6 +148,12 @@ export function validateInstanceContext(context: InstanceContext): {
         }
       } catch {
         errors.push(`Invalid n8nApiUrl: URL format is malformed or incomplete`);
+      }
+    } else {
+      // SECURITY (GHSA-4ggg-h7ph-26qr): sync URL validation.
+      const ssrf = SSRFProtection.validateUrlSync(context.n8nApiUrl);
+      if (!ssrf.valid) {
+        errors.push(`Invalid n8nApiUrl: ${ssrf.reason}`);
       }
     }
   }

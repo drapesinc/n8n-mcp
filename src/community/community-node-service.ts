@@ -343,10 +343,17 @@ export class CommunityNodeService {
     const operations: any[] = [];
 
     // Check properties for resource/operation pattern
+    // Nodes can have multiple operation properties, each mapped to a resource via displayOptions
     if (nodeDesc.properties) {
       for (const prop of nodeDesc.properties) {
-        if (prop.name === 'operation' && prop.options) {
-          operations.push(...prop.options);
+        if ((prop.name === 'operation' || prop.name === 'action') && prop.options) {
+          const resource = prop.displayOptions?.show?.resource?.[0];
+          for (const op of prop.options) {
+            operations.push({
+              ...op,
+              ...(resource ? { resource } : {})
+            });
+          }
         }
       }
     }

@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { NodeRepository } from '../database/node-repository';
 import { EnhancedConfigValidator } from './enhanced-config-validator';
 import { ExpressionValidator } from './expression-validator';
+import { extractBracketExpressions } from '../utils/expression-utils';
 import { ExpressionFormatValidator } from './expression-format-validator';
 import { NodeSimilarityService, NodeSuggestion } from './node-similarity-service';
 import { NodeTypeNormalizer } from '../utils/node-type-normalizer';
@@ -15,6 +16,7 @@ import { validateAISpecificNodes, hasAINodes, AI_CONNECTION_TYPES } from './ai-n
 import { isAIToolSubNode } from './ai-tool-validators';
 import { isTriggerNode } from '../utils/node-type-utils';
 import { isNonExecutableNode } from '../utils/node-classification';
+import { validateConditionNodeStructure } from './n8n-validation';
 import { ToolVariantGenerator } from './tool-variant-generator';
 const logger = new Logger({ prefix: '[WorkflowValidator]' });
 
@@ -578,6 +580,19 @@ export class WorkflowValidator {
             message: typeof warning === 'string' ? warning : warning.message || String(warning)
           });
         });
+
+        // Validate If/Switch conditions structure (version-conditional)
+        if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.switch') {
+          const conditionErrors = validateConditionNodeStructure(node as any);
+          for (const err of conditionErrors) {
+            result.errors.push({
+              type: 'error',
+              nodeId: node.id,
+              nodeName: node.name,
+              message: err
+            });
+          }
+        }
 
       } catch (error) {
         result.errors.push({
@@ -1198,29 +1213,45 @@ export class WorkflowValidator {
     const nodeInfo = this.nodeRepository.getNode(normalizedType);
     if (!nodeInfo) return;
 
-    // Most nodes have 1 main input. Known exceptions:
     const shortType = normalizedType.replace(/^(n8n-)?nodes-base\./, '');
-    let mainInputCount = 1; // Default: most nodes have 1 input
-
-    if (shortType === 'merge' || shortType === 'compareDatasets') {
-      mainInputCount = 2; // Merge nodes have 2 inputs
-    }
 
     // Trigger nodes have 0 inputs
     if (nodeInfo.isTrigger || isTriggerNode(targetNode.type)) {
-      mainInputCount = 0;
+      if (connection.index >= 0) {
+        result.errors.push({
+          type: 'error',
+          nodeName: targetNode.name,
+          message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (0). ` +
+            `Connection from "${sourceName}" targets input ${connection.index}, but trigger nodes have no main inputs.`,
+          code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+        });
+        result.statistics.invalidConnections++;
+      }
+      return;
     }
 
-    if (mainInputCount > 0 && connection.index >= mainInputCount) {
-      result.errors.push({
-        type: 'error',
-        nodeName: targetNode.name,
-        message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${mainInputCount}). ` +
-          `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${mainInputCount} main input(s) (indices 0-${mainInputCount - 1}).`,
-        code: 'INPUT_INDEX_OUT_OF_BOUNDS'
-      });
-      result.statistics.invalidConnections++;
+    // Merge/CompareDatasets: read dynamic numberInputs parameter (defaults to 2)
+    if (shortType === 'merge' || shortType === 'compareDatasets') {
+      const rawInputs = targetNode.parameters?.numberInputs;
+      const parsed = rawInputs ? Number(rawInputs) : 2;
+      const mainInputCount = Number.isFinite(parsed) ? parsed : 2;
+
+      if (connection.index >= mainInputCount) {
+        result.errors.push({
+          type: 'error',
+          nodeName: targetNode.name,
+          message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${mainInputCount}). ` +
+            `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${mainInputCount} main input(s) (indices 0-${mainInputCount - 1}).`,
+          code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+        });
+        result.statistics.invalidConnections++;
+      }
+      return;
     }
+
+    // For all other nodes: skip input bounds check.
+    // Many n8n nodes accept dynamic inputs that can't be determined from
+    // metadata alone. The false positive cost outweighs the benefit.
   }
 
   /**
@@ -1361,7 +1392,17 @@ export class WorkflowValidator {
       'nodes-base.loop'
     ];
 
-    const hasCycleDFS = (nodeName: string, pathFromLoopNode: boolean = false): boolean => {
+    // Conditional node types that can serve as loop exit conditions
+    const conditionalNodeTypes = [
+      'n8n-nodes-base.if',
+      'nodes-base.if',
+      'n8n-nodes-base.switch',
+      'nodes-base.switch',
+      'n8n-nodes-base.filter',
+      'nodes-base.filter',
+    ];
+
+    const hasCycleDFS = (nodeName: string, pathFromLoopNode: boolean = false, pathFromConditionalNode: boolean = false): boolean => {
       visited.add(nodeName);
       recursionStack.add(nodeName);
 
@@ -1379,20 +1420,21 @@ export class WorkflowValidator {
 
         const currentNodeType = nodeTypeMap.get(nodeName);
         const isLoopNode = loopNodeTypes.includes(currentNodeType || '');
-        
+        const isConditionalNode = conditionalNodeTypes.includes(currentNodeType || '');
+
         for (const target of allTargets) {
           if (!visited.has(target)) {
-            if (hasCycleDFS(target, pathFromLoopNode || isLoopNode)) return true;
+            if (hasCycleDFS(target, pathFromLoopNode || isLoopNode, pathFromConditionalNode || isConditionalNode)) return true;
           } else if (recursionStack.has(target)) {
             // Allow cycles that involve legitimate loop nodes
             const targetNodeType = nodeTypeMap.get(target);
             const isTargetLoopNode = loopNodeTypes.includes(targetNodeType || '');
-            
-            // If this cycle involves a loop node, it's legitimate
-            if (isTargetLoopNode || pathFromLoopNode || isLoopNode) {
+
+            // Allow cycles involving loop nodes or conditional exit nodes (IF/Switch/Filter)
+            if (isTargetLoopNode || pathFromLoopNode || isLoopNode || pathFromConditionalNode || isConditionalNode) {
               continue; // Allow this cycle
             }
-            
+
             return true; // Reject other cycles
           }
         }
@@ -1509,13 +1551,12 @@ export class WorkflowValidator {
    */
   private countExpressionsInObject(obj: any): number {
     let count = 0;
-    
+
     if (typeof obj === 'string') {
-      // Count expressions in string
-      const matches = obj.match(/\{\{[\s\S]+?\}\}/g);
-      if (matches) {
-        count += matches.length;
-      }
+      // Count expressions in string using linear-time scan instead of
+      // the lazy regex `/\{\{[\s\S]+?\}\}/g` which CodeQL flagged as
+      // polynomial-ReDoS.
+      count += extractBracketExpressions(obj).length;
     } else if (Array.isArray(obj)) {
       // Recursively count in arrays
       for (const item of obj) {

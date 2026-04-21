@@ -3,6 +3,8 @@
  * Validates expression syntax, variable references, and context availability
  */
 
+import { extractBracketExpressions } from '../utils/expression-utils';
+
 interface ExpressionValidationResult {
   valid: boolean;
   errors: string[];
@@ -19,8 +21,20 @@ interface ExpressionContext {
 }
 
 export class ExpressionValidator {
-  // Common n8n expression patterns
-  private static readonly EXPRESSION_PATTERN = /\{\{([\s\S]+?)\}\}/g;
+  // Bare n8n variable references missing {{ }} wrappers
+  private static readonly BARE_EXPRESSION_PATTERNS: Array<{ pattern: RegExp; name: string }> = [
+    { pattern: /^\$json[.\[]/, name: '$json' },
+    { pattern: /^\$node\[/, name: '$node' },
+    { pattern: /^\$input\./, name: '$input' },
+    { pattern: /^\$execution\./, name: '$execution' },
+    { pattern: /^\$workflow\./, name: '$workflow' },
+    { pattern: /^\$prevNode\./, name: '$prevNode' },
+    { pattern: /^\$env\./, name: '$env' },
+    { pattern: /^\$(now|today|itemIndex|runIndex)$/, name: 'built-in variable' },
+  ];
+
+  // Expression extraction is now handled by the linear-time
+  // `extractBracketExpressions` helper in utils/expression-utils.
   private static readonly VARIABLE_PATTERNS = {
     json: /\$json(\.[a-zA-Z_][\w]*|\["[^"]+"\]|\['[^']+'\]|\[\d+\])*/g,
     node: /\$node\["([^"]+)"\]\.json/g,
@@ -115,17 +129,15 @@ export class ExpressionValidator {
   }
 
   /**
-   * Extract all expressions from a string
+   * Extract all expressions from a string.
+   *
+   * Uses the shared linear-time `extractBracketExpressions` helper
+   * instead of the old `EXPRESSION_PATTERN.exec()` loop to avoid
+   * CodeQL js/polynomial-redos. Strips the `{{` / `}}` delimiters
+   * and trims whitespace to preserve the previous contract.
    */
   private static extractExpressions(text: string): string[] {
-    const expressions: string[] = [];
-    let match;
-    
-    while ((match = this.EXPRESSION_PATTERN.exec(text)) !== null) {
-      expressions.push(match[1].trim());
-    }
-    
-    return expressions;
+    return extractBracketExpressions(text).map(match => match.slice(2, -2).trim());
   }
 
   /**
@@ -289,6 +301,32 @@ export class ExpressionValidator {
   }
 
   /**
+   * Detect bare n8n variable references missing {{ }} wrappers.
+   * Emits warnings since the value is technically valid as a literal string.
+   */
+  private static checkBareExpression(
+    value: string,
+    path: string,
+    result: ExpressionValidationResult
+  ): void {
+    if (value.includes('{{') || value.startsWith('=')) {
+      return;
+    }
+
+    const trimmed = value.trim();
+    for (const { pattern, name } of this.BARE_EXPRESSION_PATTERNS) {
+      if (pattern.test(trimmed)) {
+        result.warnings.push(
+          (path ? `${path}: ` : '') +
+          `Possible unwrapped expression: "${trimmed}" looks like an n8n ${name} reference. ` +
+          `Use "={{ ${trimmed} }}" to evaluate it as an expression.`
+        );
+        return;
+      }
+    }
+  }
+
+  /**
    * Recursively validate expressions in parameters
    */
   private static validateParametersRecursive(
@@ -307,6 +345,9 @@ export class ExpressionValidator {
     }
     
     if (typeof obj === 'string') {
+      // Detect bare expressions missing {{ }} wrappers
+      this.checkBareExpression(obj, path, result);
+
       if (obj.includes('{{')) {
         const validation = this.validateExpression(obj, context);
         
@@ -335,6 +376,11 @@ export class ExpressionValidator {
       });
     } else if (obj && typeof obj === 'object') {
       Object.entries(obj).forEach(([key, value]) => {
+        // Skip raw code fields — they contain JavaScript/Python source code,
+        // not n8n expressions, so bracket matching would produce false positives.
+        if (key === 'jsCode' || key === 'pythonCode' || key === 'functionCode') {
+          return;
+        }
         const newPath = path ? `${path}.${key}` : key;
         this.validateParametersRecursive(value, context, result, newPath, visited);
       });

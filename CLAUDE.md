@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Fork Information
 
-- **Fork:** https://github.com/jyoansah/n8n-mcp
+- **Fork:** https://github.com/drapesinc/n8n-mcp
 - **Upstream:** https://github.com/czlonkowski/n8n-mcp
 
 ### Syncing with Upstream
@@ -28,11 +28,9 @@ This fork adds multi-workspace support following the Notion MCP pattern:
 
 **Environment Variables (Multi-Workspace Mode):**
 ```bash
-N8N_URL_PERSONAL=https://n8n.jyoansah.me
-N8N_TOKEN_PERSONAL=<api-key>
-N8N_URL_DRAPES=https://n8n.drapesinc.com
-N8N_TOKEN_DRAPES=<api-key>
-N8N_DEFAULT_WORKSPACE=personal
+N8N_URL_<NAME>=https://n8n.example.com
+N8N_TOKEN_<NAME>=<api-key>
+# N8N_DEFAULT_WORKSPACE=<name>   # optional; otherwise first discovered
 ```
 
 **Single-Instance Fallback (Backward Compatible):**
@@ -40,22 +38,6 @@ N8N_DEFAULT_WORKSPACE=personal
 N8N_API_URL=https://n8n.example.com
 N8N_API_KEY=<api-key>
 ```
-
-### Configured Workspaces
-
-| Workspace | n8n URL | Workflows | Notion DB ID | Notion Workspace |
-|-----------|---------|-----------|--------------|------------------|
-| personal | n8n.jyoansah.me | 65 | `0713a7983b5b4311ba75d889890f16b3` | personal |
-| drapes | n8n.drapesinc.com | 65 | `db0bc2b8bc4a44fe89137932cfa793fb` | drapes |
-| fourall | n8n.fourall.ca | 55 | `25424f67124181ba8600c66e1e285b24` | fourall |
-| mini | n8n.mini.jyoansah.me | 2 | - | - |
-
-**Workspace Details:**
-
-- **personal**: Primary instance for personal automations - Wave accounting, Notion sync, AI assistants, Gmail/Slack integrations
-- **drapes**: Drapes Inc client management - Helm CRM, accounting workflows, MainWP website sync
-- **fourall**: Four All Ice Cream operations - Shopify, Recipal recipes, Push Operations HR, Tally forms, Production runs
-- **mini**: New lightweight instance - WhatsApp Chat Assistant, Task Assistant
 
 ---
 
@@ -252,35 +234,6 @@ The MCP server exposes tools in several categories:
 
 ### Development Best Practices
 - Run typecheck and lint after every code change
-
-### Session Persistence Feature (v2.24.1)
-
-**Location:**
-- Types: `src/types/session-state.ts`
-- Implementation: `src/http-server-single-session.ts` (lines 698-702, 1444-1584)
-- Wrapper: `src/mcp-engine.ts` (lines 123-169)
-- Tests: `tests/unit/http-server/session-persistence.test.ts`, `tests/unit/mcp-engine/session-persistence.test.ts`
-
-**Key Features:**
-- **Export/Restore API**: `exportSessionState()` and `restoreSessionState()` methods
-- **Multi-tenant support**: Enables zero-downtime deployments for SaaS platforms
-- **Security-first**: API keys exported as plaintext - downstream MUST encrypt
-- **Dormant sessions**: Restored sessions recreate transports on first request
-- **Automatic expiration**: Respects `sessionTimeout` setting (default 30 min)
-- **MAX_SESSIONS limit**: Caps at 100 concurrent sessions (configurable via N8N_MCP_MAX_SESSIONS env var)
-
-**Important Implementation Notes:**
-- Only exports sessions with valid n8nApiUrl and n8nApiKey in context
-- Skips expired sessions during both export and restore
-- Uses `validateInstanceContext()` for data integrity checks
-- Handles null/invalid session gracefully with warnings
-- Session metadata (timestamps) and context (credentials) are persisted
-- Transport and server objects are NOT persisted (recreated on-demand)
-
-**Testing:**
-- 22 unit tests covering export, restore, edge cases, and round-trip cycles
-- Tests use current timestamps to avoid expiration issues
-- Integration with multi-tenant backends documented in README.md
 
 # important-instruction-reminders
 Do what has been asked; nothing more, nothing less.

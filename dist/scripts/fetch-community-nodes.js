@@ -13,6 +13,7 @@ function parseArgs() {
     const options = {
         verifiedOnly: false,
         update: false,
+        rebuild: false,
         npmLimit: 100,
         staging: false,
     };
@@ -22,6 +23,9 @@ function parseArgs() {
         }
         else if (arg === '--update') {
             options.update = true;
+        }
+        else if (arg === '--rebuild') {
+            options.rebuild = true;
         }
         else if (arg === '--staging') {
             options.staging = true;
@@ -50,7 +54,7 @@ async function main() {
     console.log('='.repeat(60));
     console.log();
     console.log('Options:');
-    console.log(`  - Mode: ${cliOptions.update ? 'Update (incremental)' : 'Rebuild'}`);
+    console.log(`  - Mode: ${cliOptions.rebuild ? 'Rebuild (clean slate)' : cliOptions.update ? 'Update (skip existing)' : 'Upsert (preserves docs)'}`);
     console.log(`  - Verified only: ${cliOptions.verifiedOnly ? 'Yes' : 'No'}`);
     if (!cliOptions.verifiedOnly) {
         console.log(`  - npm package limit: ${cliOptions.npmLimit}`);
@@ -63,8 +67,9 @@ async function main() {
     const repository = new node_repository_1.NodeRepository(db);
     const environment = cliOptions.staging ? 'staging' : 'production';
     const service = new community_1.CommunityNodeService(repository, environment);
-    if (!cliOptions.update) {
-        console.log('\nClearing existing community nodes...');
+    if (cliOptions.rebuild) {
+        console.log('\nClearing existing community nodes (--rebuild)...');
+        console.log('  WARNING: This wipes READMEs and AI summaries!');
         const deleted = service.deleteCommunityNodes();
         console.log(`  Deleted ${deleted} existing community nodes`);
     }

@@ -19,6 +19,14 @@ import { WorkflowBuilder } from '../../utils/builders/workflow.builder';
 import { z } from 'zod';
 import { WorkflowNode, WorkflowConnection, Workflow } from '../../../src/types/n8n-api';
 
+function webhookNode(id: string, name: string, type: string, typeVersion = 2): WorkflowNode {
+  return { id, name, type, typeVersion, position: [250, 300] as [number, number], parameters: {} };
+}
+
+function workflowWithNodes(nodes: WorkflowNode[]): Partial<Workflow> {
+  return { name: 'Test', nodes, connections: {} };
+}
+
 describe('n8n-validation', () => {
   describe('Zod Schemas', () => {
     describe('workflowNodeSchema', () => {
@@ -301,6 +309,44 @@ describe('n8n-validation', () => {
         const cleaned = cleanWorkflowForCreate(workflow as Workflow);
         expect(cleaned.settings).toEqual(customSettings);
       });
+
+      it('should inject webhookId on webhook nodes missing it', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'),
+        ]);
+
+        const cleaned = cleanWorkflowForCreate(workflow as Workflow);
+        expect(cleaned.nodes![0].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+      });
+
+      it('should preserve existing webhookId on webhook nodes', () => {
+        const workflow = workflowWithNodes([
+          { ...webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'), webhookId: 'existing-id' },
+        ]);
+
+        const cleaned = cleanWorkflowForCreate(workflow as Workflow);
+        expect(cleaned.nodes![0].webhookId).toBe('existing-id');
+      });
+
+      it('should inject webhookId on formTrigger and chatTrigger nodes', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Form', 'n8n-nodes-base.formTrigger'),
+          webhookNode('2', 'Chat', '@n8n/n8n-nodes-langchain.chatTrigger'),
+        ]);
+
+        const cleaned = cleanWorkflowForCreate(workflow as Workflow);
+        expect(cleaned.nodes![0].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+        expect(cleaned.nodes![1].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+      });
+
+      it('should not inject webhookId on non-webhook nodes', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Set', 'n8n-nodes-base.set', 3.4),
+        ]);
+
+        const cleaned = cleanWorkflowForCreate(workflow as Workflow);
+        expect(cleaned.nodes![0].webhookId).toBeUndefined();
+      });
     });
 
     describe('cleanWorkflowForUpdate', () => {
@@ -532,6 +578,44 @@ describe('n8n-validation', () => {
           timezone: 'America/New_York'
         });
         expect(cleaned.settings).not.toHaveProperty('someOtherProperty');
+      });
+
+      it('should inject webhookId on webhook nodes missing it', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'),
+        ]) as any;
+
+        const cleaned = cleanWorkflowForUpdate(workflow);
+        expect(cleaned.nodes![0].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+      });
+
+      it('should preserve existing webhookId on webhook nodes', () => {
+        const workflow = workflowWithNodes([
+          { ...webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'), webhookId: 'existing-id' },
+        ]) as any;
+
+        const cleaned = cleanWorkflowForUpdate(workflow);
+        expect(cleaned.nodes![0].webhookId).toBe('existing-id');
+      });
+
+      it('should inject webhookId on formTrigger and chatTrigger nodes', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Form', 'n8n-nodes-base.formTrigger'),
+          webhookNode('2', 'Chat', '@n8n/n8n-nodes-langchain.chatTrigger'),
+        ]) as any;
+
+        const cleaned = cleanWorkflowForUpdate(workflow);
+        expect(cleaned.nodes![0].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+        expect(cleaned.nodes![1].webhookId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/);
+      });
+
+      it('should not inject webhookId on non-webhook nodes', () => {
+        const workflow = workflowWithNodes([
+          webhookNode('1', 'Set', 'n8n-nodes-base.set', 3.4),
+        ]) as any;
+
+        const cleaned = cleanWorkflowForUpdate(workflow);
+        expect(cleaned.nodes![0].webhookId).toBeUndefined();
       });
     });
   });
@@ -1744,6 +1828,515 @@ describe('n8n-validation', () => {
       // Empty settings get minimal defaults to avoid API rejection (Issue #431)
       expect(forUpdate.settings).toEqual({ executionOrder: 'v1' });
       expect(validateWorkflowStructure(forUpdate)).toEqual([]);
+    });
+  });
+
+  describe('Sticky Notes Bug Fix', () => {
+    describe('sticky notes should be excluded from disconnected nodes validation', () => {
+      it('should allow workflow with sticky notes and connected functional nodes', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Test Workflow',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: '2',
+              name: 'HTTP Request',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: 'sticky1',
+              name: 'Documentation Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'This is a documentation note' }
+            }
+          ],
+          connections: {
+            'Webhook': {
+              main: [[{ node: 'HTTP Request', type: 'main', index: 0 }]]
+            }
+          }
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors).toEqual([]);
+      });
+
+      it('should handle multiple sticky notes without errors', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Documented Workflow',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: '2',
+              name: 'Process',
+              type: 'n8n-nodes-base.set',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            ...Array.from({ length: 10 }, (_, i) => ({
+              id: `sticky${i}`,
+              name: `Note ${i}`,
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [100 + i * 50, 100] as [number, number],
+              parameters: { content: `Documentation note ${i}` }
+            }))
+          ],
+          connections: {
+            'Webhook': {
+              main: [[{ node: 'Process', type: 'main', index: 0 }]]
+            }
+          }
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+        expect(errors).toEqual([]);
+      });
+
+      it('should handle all sticky note type variations', () => {
+        const stickyTypes = [
+          'n8n-nodes-base.stickyNote',
+          'nodes-base.stickyNote',
+          '@n8n/n8n-nodes-base.stickyNote'
+        ];
+
+        stickyTypes.forEach((stickyType, index) => {
+          const workflow: Partial<Workflow> = {
+            name: 'Test Workflow',
+            nodes: [
+              {
+                id: '1',
+                name: 'Webhook',
+                type: 'n8n-nodes-base.webhook',
+                typeVersion: 1,
+                position: [250, 300],
+                parameters: { path: '/test' }
+              },
+              {
+                id: `sticky${index}`,
+                name: `Note ${index}`,
+                type: stickyType,
+                typeVersion: 1,
+                position: [250, 100],
+                parameters: { content: `Note ${index}` }
+              }
+            ],
+            connections: {}
+          };
+
+          const errors = validateWorkflowStructure(workflow);
+
+          expect(errors.every(e => !e.includes(`Note ${index}`))).toBe(true);
+        });
+      });
+
+      it('should handle complex workflow with multiple sticky notes (real-world scenario)', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'POST /auth/login',
+          nodes: [
+            {
+              id: 'webhook1',
+              name: 'Webhook Trigger',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/auth/login', httpMethod: 'POST' }
+            },
+            {
+              id: 'http1',
+              name: 'Authenticate',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: 'respond1',
+              name: 'Return Success',
+              type: 'n8n-nodes-base.respondToWebhook',
+              typeVersion: 1,
+              position: [650, 250],
+              parameters: {}
+            },
+            {
+              id: 'respond2',
+              name: 'Return Error',
+              type: 'n8n-nodes-base.respondToWebhook',
+              typeVersion: 1,
+              position: [650, 350],
+              parameters: {}
+            },
+            {
+              id: 'sticky1',
+              name: 'Webhook Trigger Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 150],
+              parameters: { content: 'Receives login request' }
+            },
+            {
+              id: 'sticky2',
+              name: 'Authenticate with Supabase Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [450, 150],
+              parameters: { content: 'Validates credentials' }
+            },
+            {
+              id: 'sticky3',
+              name: 'Return Tokens Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [650, 150],
+              parameters: { content: 'Returns access and refresh tokens' }
+            },
+            {
+              id: 'sticky4',
+              name: 'Return Error Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [650, 450],
+              parameters: { content: 'Returns error message' }
+            }
+          ],
+          connections: {
+            'Webhook Trigger': {
+              main: [[{ node: 'Authenticate', type: 'main', index: 0 }]]
+            },
+            'Authenticate': {
+              main: [
+                [{ node: 'Return Success', type: 'main', index: 0 }],
+                [{ node: 'Return Error', type: 'main', index: 0 }]
+              ]
+            }
+          }
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors).toEqual([]);
+      });
+    });
+
+    describe('validation should still detect truly disconnected functional nodes', () => {
+      it('should detect disconnected HTTP node but ignore sticky note', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Test Workflow',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: '2',
+              name: 'Disconnected HTTP',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: 'sticky1',
+              name: 'Sticky Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'Note' }
+            }
+          ],
+          connections: {}
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors.length).toBeGreaterThan(0);
+        const disconnectedError = errors.find(e => e.includes('Disconnected'));
+        expect(disconnectedError).toBeDefined();
+        expect(disconnectedError).toContain('Disconnected HTTP');
+        expect(disconnectedError).not.toContain('Sticky Note');
+      });
+
+      it('should detect multiple disconnected functional nodes but ignore sticky notes', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Test Workflow',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: '2',
+              name: 'Disconnected HTTP',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: '3',
+              name: 'Disconnected Set',
+              type: 'n8n-nodes-base.set',
+              typeVersion: 3,
+              position: [650, 300],
+              parameters: {}
+            },
+            {
+              id: 'sticky1',
+              name: 'Note 1',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'Note 1' }
+            },
+            {
+              id: 'sticky2',
+              name: 'Note 2',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [450, 100],
+              parameters: { content: 'Note 2' }
+            }
+          ],
+          connections: {}
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors.length).toBeGreaterThan(0);
+        const connectionError = errors.find(e => e.includes('no connections') || e.includes('Disconnected'));
+        expect(connectionError).toBeDefined();
+        expect(connectionError).not.toContain('Note 1');
+        expect(connectionError).not.toContain('Note 2');
+      });
+
+      it('should allow sticky notes but still validate functional node connections', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Test Workflow',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: '2',
+              name: 'Connected HTTP',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: '3',
+              name: 'Disconnected Set',
+              type: 'n8n-nodes-base.set',
+              typeVersion: 3,
+              position: [650, 300],
+              parameters: {}
+            },
+            {
+              id: 'sticky1',
+              name: 'Sticky Note',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'Note' }
+            }
+          ],
+          connections: {
+            'Webhook': {
+              main: [[{ node: 'Connected HTTP', type: 'main', index: 0 }]]
+            }
+          }
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors.length).toBeGreaterThan(0);
+        const disconnectedError = errors.find(e => e.includes('Disconnected'));
+        expect(disconnectedError).toBeDefined();
+        expect(disconnectedError).toContain('Disconnected Set');
+        expect(disconnectedError).not.toContain('Connected HTTP');
+        expect(disconnectedError).not.toContain('Sticky Note');
+      });
+    });
+
+    describe('regression tests - ensure sticky notes work like in n8n UI', () => {
+      it('single webhook with sticky notes should be valid (matches n8n UI behavior)', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Webhook Only with Notes',
+          nodes: [
+            {
+              id: '1',
+              name: 'Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/test' }
+            },
+            {
+              id: 'sticky1',
+              name: 'Usage Instructions',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'Call this webhook to trigger the workflow' }
+            }
+          ],
+          connections: {}
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors).toEqual([]);
+      });
+
+      it('workflow with only sticky notes should be invalid (no executable nodes)', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Only Notes',
+          nodes: [
+            {
+              id: 'sticky1',
+              name: 'Note 1',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250, 100],
+              parameters: { content: 'Note 1' }
+            },
+            {
+              id: 'sticky2',
+              name: 'Note 2',
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [450, 100],
+              parameters: { content: 'Note 2' }
+            }
+          ],
+          connections: {}
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors.length).toBeGreaterThan(0);
+        expect(errors.some(e => e.includes('at least one executable node'))).toBe(true);
+      });
+
+      it('complex production workflow structure should validate correctly', () => {
+        const workflow: Partial<Workflow> = {
+          name: 'Production API Endpoint',
+          nodes: [
+            {
+              id: 'webhook1',
+              name: 'API Webhook',
+              type: 'n8n-nodes-base.webhook',
+              typeVersion: 1,
+              position: [250, 300],
+              parameters: { path: '/api/endpoint' }
+            },
+            {
+              id: 'validate1',
+              name: 'Validate Input',
+              type: 'n8n-nodes-base.code',
+              typeVersion: 2,
+              position: [450, 300],
+              parameters: {}
+            },
+            {
+              id: 'branch1',
+              name: 'Check Valid',
+              type: 'n8n-nodes-base.if',
+              typeVersion: 2,
+              position: [650, 300],
+              parameters: {}
+            },
+            {
+              id: 'process1',
+              name: 'Process Request',
+              type: 'n8n-nodes-base.httpRequest',
+              typeVersion: 3,
+              position: [850, 250],
+              parameters: {}
+            },
+            {
+              id: 'success1',
+              name: 'Return Success',
+              type: 'n8n-nodes-base.respondToWebhook',
+              typeVersion: 1,
+              position: [1050, 250],
+              parameters: {}
+            },
+            {
+              id: 'error1',
+              name: 'Return Error',
+              type: 'n8n-nodes-base.respondToWebhook',
+              typeVersion: 1,
+              position: [850, 350],
+              parameters: {}
+            },
+            ...Array.from({ length: 11 }, (_, i) => ({
+              id: `sticky${i}`,
+              name: `Documentation ${i}`,
+              type: 'n8n-nodes-base.stickyNote',
+              typeVersion: 1,
+              position: [250 + i * 100, 100] as [number, number],
+              parameters: { content: `Documentation section ${i}` }
+            }))
+          ],
+          connections: {
+            'API Webhook': {
+              main: [[{ node: 'Validate Input', type: 'main', index: 0 }]]
+            },
+            'Validate Input': {
+              main: [[{ node: 'Check Valid', type: 'main', index: 0 }]]
+            },
+            'Check Valid': {
+              main: [
+                [{ node: 'Process Request', type: 'main', index: 0 }],
+                [{ node: 'Return Error', type: 'main', index: 0 }]
+              ]
+            },
+            'Process Request': {
+              main: [[{ node: 'Return Success', type: 'main', index: 0 }]]
+            }
+          }
+        };
+
+        const errors = validateWorkflowStructure(workflow);
+
+        expect(errors).toEqual([]);
+      });
     });
   });
 });

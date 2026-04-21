@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+{
+    const { handleTelemetryCliIfPresent } = require('../telemetry/telemetry-cli');
+    handleTelemetryCliIfPresent(process.argv.slice(2));
+}
 process.env.MCP_MODE = 'stdio';
 process.env.DISABLE_CONSOLE_OUTPUT = 'true';
 process.env.LOG_LEVEL = 'error';
@@ -29,6 +33,16 @@ console.table = () => { };
 console.clear = () => { };
 console.count = () => { };
 console.countReset = () => { };
+const originalStdoutWrite = process.stdout.write.bind(process.stdout);
+const stderrWrite = process.stderr.write.bind(process.stderr);
+process.stdout.write = function (chunk, encodingOrCallback, callback) {
+    const str = typeof chunk === 'string' ? chunk : chunk.toString();
+    const trimmed = str.trimStart();
+    if (trimmed.startsWith('{') && trimmed.includes('"jsonrpc"')) {
+        return originalStdoutWrite(chunk, encodingOrCallback, callback);
+    }
+    return stderrWrite(chunk, encodingOrCallback, callback);
+};
 const server_1 = require("./server");
 let server = null;
 async function main() {

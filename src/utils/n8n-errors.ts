@@ -22,8 +22,10 @@ export class N8nAuthenticationError extends N8nApiError {
 }
 
 export class N8nNotFoundError extends N8nApiError {
-  constructor(resource: string, id?: string) {
-    const message = id ? `${resource} with ID ${id} not found` : `${resource} not found`;
+  constructor(messageOrResource: string, id?: string) {
+    // If id is provided, format as "resource with ID id not found"
+    // Otherwise, use messageOrResource as-is (it's already a complete message from the API)
+    const message = id ? `${messageOrResource} with ID ${id} not found` : messageOrResource;
     super(message, 404, 'NOT_FOUND');
     this.name = 'N8nNotFoundError';
   }
@@ -70,7 +72,7 @@ export function handleN8nApiError(error: unknown): N8nApiError {
         case 401:
           return new N8nAuthenticationError(message);
         case 404:
-          return new N8nNotFoundError('Resource', message);
+          return new N8nNotFoundError(message || 'Resource');
         case 400:
           return new N8nValidationError(message, data);
         case 429:

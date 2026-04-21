@@ -52,6 +52,11 @@ exports.n8nDocumentationToolsFinal = [
                     description: 'Include top 2 real-world configuration examples from popular templates (default: false)',
                     default: false,
                 },
+                includeOperations: {
+                    type: 'boolean',
+                    default: false,
+                    description: 'Include resource/operation tree per node. Adds ~100-300 tokens per result but saves a get_node round-trip.',
+                },
                 source: {
                     type: 'string',
                     enum: ['all', 'core', 'community', 'verified'],
@@ -237,14 +242,14 @@ exports.n8nDocumentationToolsFinal = [
     },
     {
         name: 'search_templates',
-        description: `Search templates with multiple modes. Use searchMode='keyword' for text search, 'by_nodes' to find templates using specific nodes, 'by_task' for curated task-based templates, 'by_metadata' for filtering by complexity/setup time/services.`,
+        description: `Search templates with multiple modes. Use searchMode='keyword' for text search, 'by_nodes' to find templates using specific nodes, 'by_task' for curated task-based templates, 'by_metadata' for filtering by complexity/setup time/services, 'patterns' for lightweight workflow pattern summaries mined from 2700+ templates.`,
         inputSchema: {
             type: 'object',
             properties: {
                 searchMode: {
                     type: 'string',
-                    enum: ['keyword', 'by_nodes', 'by_task', 'by_metadata'],
-                    description: 'Search mode. keyword=text search (default), by_nodes=find by node types, by_task=curated task templates, by_metadata=filter by complexity/services',
+                    enum: ['keyword', 'by_nodes', 'by_task', 'by_metadata', 'patterns'],
+                    description: 'Search mode. keyword=text search (default), by_nodes=find by node types, by_task=curated task templates, by_metadata=filter by complexity/services, patterns=lightweight workflow pattern summaries',
                     default: 'keyword',
                 },
                 query: {
@@ -278,7 +283,7 @@ exports.n8nDocumentationToolsFinal = [
                         'api_integration',
                         'database_operations'
                     ],
-                    description: 'For searchMode=by_task: the type of task',
+                    description: 'For searchMode=by_task: the type of task. For searchMode=patterns: optional category filter (omit for overview of all categories).',
                 },
                 category: {
                     type: 'string',

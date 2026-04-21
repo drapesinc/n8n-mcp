@@ -37,6 +37,7 @@ exports.getInstanceCacheStatistics = getInstanceCacheStatistics;
 exports.getInstanceCacheMetrics = getInstanceCacheMetrics;
 exports.clearInstanceCache = clearInstanceCache;
 exports.getN8nApiClient = getN8nApiClient;
+exports.tryParseJson = tryParseJson;
 exports.handleCreateWorkflow = handleCreateWorkflow;
 exports.handleGetWorkflow = handleGetWorkflow;
 exports.handleGetWorkflowDetails = handleGetWorkflowDetails;
@@ -57,7 +58,27 @@ exports.handleDiagnostic = handleDiagnostic;
 exports.handleWorkflowVersions = handleWorkflowVersions;
 exports.handleDeployTemplate = handleDeployTemplate;
 exports.handleTriggerWebhookWorkflow = handleTriggerWebhookWorkflow;
+exports.handleCreateTable = handleCreateTable;
+exports.handleListTables = handleListTables;
+exports.handleGetTable = handleGetTable;
+exports.handleUpdateTable = handleUpdateTable;
+exports.handleDeleteTable = handleDeleteTable;
+exports.handleGetRows = handleGetRows;
+exports.handleInsertRows = handleInsertRows;
+exports.handleUpdateRows = handleUpdateRows;
+exports.handleUpsertRows = handleUpsertRows;
+exports.handleDeleteRows = handleDeleteRows;
+exports.handleListCredentials = handleListCredentials;
+exports.handleGetCredential = handleGetCredential;
+exports.handleCreateCredential = handleCreateCredential;
+exports.handleUpdateCredential = handleUpdateCredential;
+exports.handleDeleteCredential = handleDeleteCredential;
+exports.handleGetCredentialSchema = handleGetCredentialSchema;
+exports.handleAuditInstance = handleAuditInstance;
+const crypto_1 = require("crypto");
 const n8n_api_client_1 = require("../services/n8n-api-client");
+const workflow_security_scanner_1 = require("../services/workflow-security-scanner");
+const audit_report_builder_1 = require("../services/audit-report-builder");
 const n8n_api_1 = require("../config/n8n-api");
 const n8n_api_2 = require("../types/n8n-api");
 const n8n_validation_1 = require("../services/n8n-validation");
@@ -163,11 +184,21 @@ function ensureApiConfigured(context) {
     }
     return client;
 }
+function tryParseJson(val) {
+    if (typeof val !== 'string')
+        return val;
+    try {
+        return JSON.parse(val);
+    }
+    catch {
+        return val;
+    }
+}
 const createWorkflowSchema = zod_1.z.object({
     name: zod_1.z.string(),
-    nodes: zod_1.z.array(zod_1.z.any()),
-    connections: zod_1.z.record(zod_1.z.any()),
-    settings: zod_1.z.object({
+    nodes: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.any())),
+    connections: zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z.any())),
+    settings: zod_1.z.preprocess(tryParseJson, zod_1.z.object({
         executionOrder: zod_1.z.enum(['v0', 'v1']).optional(),
         timezone: zod_1.z.string().optional(),
         saveDataErrorExecution: zod_1.z.enum(['all', 'none']).optional(),
@@ -176,14 +207,15 @@ const createWorkflowSchema = zod_1.z.object({
         saveExecutionProgress: zod_1.z.boolean().optional(),
         executionTimeout: zod_1.z.number().optional(),
         errorWorkflow: zod_1.z.string().optional(),
-    }).optional(),
+    })).optional(),
+    projectId: zod_1.z.string().optional(),
 });
 const updateWorkflowSchema = zod_1.z.object({
     id: zod_1.z.string(),
     name: zod_1.z.string().optional(),
-    nodes: zod_1.z.array(zod_1.z.any()).optional(),
-    connections: zod_1.z.record(zod_1.z.any()).optional(),
-    settings: zod_1.z.any().optional(),
+    nodes: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.any())).optional(),
+    connections: zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z.any())).optional(),
+    settings: zod_1.z.preprocess(tryParseJson, zod_1.z.any()).optional(),
     createBackup: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
@@ -191,7 +223,7 @@ const listWorkflowsSchema = zod_1.z.object({
     limit: zod_1.z.number().min(1).max(100).optional(),
     cursor: zod_1.z.string().optional(),
     active: zod_1.z.boolean().optional(),
-    tags: zod_1.z.array(zod_1.z.string()).optional(),
+    tags: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.string())).optional(),
     projectId: zod_1.z.string().optional(),
     excludePinnedData: zod_1.z.boolean().optional(),
 });
@@ -498,7 +530,7 @@ async function handleGetWorkflowMinimal(args, context) {
 }
 async function handleUpdateWorkflow(args, repository, context) {
     const startTime = Date.now();
-    const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const sessionId = `mutation_${Date.now()}_${(0, crypto_1.randomUUID)()}`;
     let workflowBefore = null;
     let userIntent = 'Full workflow update';
     try {
@@ -509,6 +541,24 @@ async function handleUpdateWorkflow(args, repository, context) {
         if (updateData.nodes || updateData.connections) {
             const current = await client.getWorkflow(id);
             workflowBefore = JSON.parse(JSON.stringify(current));
+            if (updateData.nodes && current.nodes) {
+                const currentById = new Map();
+                const currentByName = new Map();
+                for (const node of current.nodes) {
+                    if (node.id)
+                        currentById.set(node.id, node);
+                    currentByName.set(node.name, node);
+                }
+                for (const node of updateData.nodes) {
+                    const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
+                    if (!hasCredentials) {
+                        const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
+                        if (match?.credentials) {
+                            node.credentials = match.credentials;
+                        }
+                    }
+                }
+            }
             if (createBackup !== false) {
                 try {
                     const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client);
@@ -1514,7 +1564,7 @@ async function handleDiagnostic(request, context) {
         }
     }
     const documentationTools = 7;
-    const managementTools = apiConfigured ? 14 : 0;
+    const managementTools = apiConfigured ? 18 : 0;
     const totalTools = documentationTools + managementTools;
     const versionCheck = await (0, npm_version_checker_1.checkNpmVersion)();
     const cacheMetricsData = getInstanceCacheMetrics();
@@ -2094,6 +2144,472 @@ async function handleTriggerWebhookWorkflow(args, context) {
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error occurred'
         };
+    }
+}
+const dataTableFilterConditionSchema = zod_1.z.object({
+    columnName: zod_1.z.string().min(1),
+    condition: zod_1.z.enum(['eq', 'neq', 'like', 'ilike', 'gt', 'gte', 'lt', 'lte']),
+    value: zod_1.z.any(),
+});
+const dataTableFilterSchema = zod_1.z.object({
+    type: zod_1.z.enum(['and', 'or']).optional().default('and'),
+    filters: zod_1.z.array(dataTableFilterConditionSchema).min(1, 'At least one filter condition is required'),
+});
+const tableIdSchema = zod_1.z.object({
+    tableId: zod_1.z.string().min(1, 'tableId is required'),
+});
+const createTableSchema = zod_1.z.object({
+    name: zod_1.z.string().min(1, 'Table name cannot be empty'),
+    columns: zod_1.z.array(zod_1.z.object({
+        name: zod_1.z.string().min(1, 'Column name cannot be empty'),
+        type: zod_1.z.enum(['string', 'number', 'boolean', 'date']).optional(),
+    })).min(1, 'At least one column is required'),
+    projectId: zod_1.z.string().optional(),
+});
+const listTablesSchema = zod_1.z.object({
+    limit: zod_1.z.number().min(1).max(100).optional(),
+    cursor: zod_1.z.string().optional(),
+});
+const updateTableSchema = tableIdSchema.extend({
+    name: zod_1.z.string().min(1, 'New table name cannot be empty'),
+});
+const coerceJsonArray = zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.record(zod_1.z.unknown())));
+const coerceJsonObject = zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z.unknown()));
+const coerceJsonFilter = zod_1.z.preprocess(tryParseJson, dataTableFilterSchema);
+const getRowsSchema = tableIdSchema.extend({
+    limit: zod_1.z.number().min(1).max(100).optional(),
+    cursor: zod_1.z.string().optional(),
+    filter: zod_1.z.union([coerceJsonFilter, zod_1.z.string()]).optional(),
+    sortBy: zod_1.z.string().optional(),
+    search: zod_1.z.string().optional(),
+});
+const insertRowsSchema = tableIdSchema.extend({
+    data: coerceJsonArray.pipe(zod_1.z.array(zod_1.z.record(zod_1.z.unknown())).min(1, 'At least one row is required')),
+    returnType: zod_1.z.enum(['count', 'id', 'all']).optional(),
+});
+const mutateRowsSchema = tableIdSchema.extend({
+    filter: coerceJsonFilter,
+    data: coerceJsonObject,
+    returnData: zod_1.z.boolean().optional(),
+    dryRun: zod_1.z.boolean().optional(),
+});
+const deleteRowsSchema = tableIdSchema.extend({
+    filter: coerceJsonFilter,
+    returnData: zod_1.z.boolean().optional(),
+    dryRun: zod_1.z.boolean().optional(),
+});
+function handleCrudError(error) {
+    if (error instanceof zod_1.z.ZodError) {
+        return { success: false, error: 'Invalid input', details: { errors: error.errors } };
+    }
+    if (error instanceof n8n_errors_1.N8nApiError) {
+        return {
+            success: false,
+            error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+            code: error.code,
+            details: error.details,
+        };
+    }
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' };
+}
+async function handleCreateTable(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = createTableSchema.parse(args);
+        const dataTable = await client.createDataTable(input);
+        if (!dataTable || !dataTable.id) {
+            return { success: false, error: 'Data table creation failed: n8n API returned an empty or invalid response' };
+        }
+        return {
+            success: true,
+            data: { id: dataTable.id, name: dataTable.name },
+            message: `Data table "${dataTable.name}" created with ID: ${dataTable.id}`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleListTables(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = listTablesSchema.parse(args || {});
+        const result = await client.listDataTables(input);
+        return {
+            success: true,
+            data: {
+                tables: result.data,
+                count: result.data.length,
+                nextCursor: result.nextCursor || undefined,
+            },
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleGetTable(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId } = tableIdSchema.parse(args);
+        const dataTable = await client.getDataTable(tableId);
+        return { success: true, data: dataTable };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleUpdateTable(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, name } = updateTableSchema.parse(args);
+        const dataTable = await client.updateDataTable(tableId, { name });
+        const rawArgs = args;
+        const hasColumns = rawArgs && typeof rawArgs === 'object' && 'columns' in rawArgs;
+        return {
+            success: true,
+            data: dataTable,
+            message: `Data table renamed to "${dataTable.name}"` +
+                (hasColumns ? '. Note: columns parameter was ignored — table schema is immutable after creation via the public API' : ''),
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleDeleteTable(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId } = tableIdSchema.parse(args);
+        await client.deleteDataTable(tableId);
+        return { success: true, message: `Data table ${tableId} deleted successfully` };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleGetRows(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, filter, sortBy, ...params } = getRowsSchema.parse(args);
+        const queryParams = { ...params };
+        if (filter) {
+            queryParams.filter = typeof filter === 'string' ? filter : JSON.stringify(filter);
+        }
+        if (sortBy) {
+            queryParams.sortBy = sortBy;
+        }
+        const result = await client.getDataTableRows(tableId, queryParams);
+        return {
+            success: true,
+            data: {
+                rows: result.data,
+                count: result.data.length,
+                nextCursor: result.nextCursor || undefined,
+            },
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleInsertRows(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, ...params } = insertRowsSchema.parse(args);
+        const result = await client.insertDataTableRows(tableId, params);
+        return {
+            success: true,
+            data: result,
+            message: `Rows inserted into data table ${tableId}`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleUpdateRows(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, ...params } = mutateRowsSchema.parse(args);
+        const result = await client.updateDataTableRows(tableId, params);
+        return {
+            success: true,
+            data: result,
+            message: params.dryRun ? 'Dry run: rows matched (no changes applied)' : 'Rows updated successfully',
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleUpsertRows(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, ...params } = mutateRowsSchema.parse(args);
+        const result = await client.upsertDataTableRow(tableId, params);
+        return {
+            success: true,
+            data: result,
+            message: params.dryRun ? 'Dry run: upsert previewed (no changes applied)' : 'Row upserted successfully',
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleDeleteRows(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { tableId, filter, ...params } = deleteRowsSchema.parse(args);
+        const queryParams = {
+            filter: JSON.stringify(filter),
+            ...params,
+        };
+        const result = await client.deleteDataTableRows(tableId, queryParams);
+        const cleanedResult = params.dryRun && Array.isArray(result)
+            ? result.filter((row) => row?.dryRunState !== 'after')
+            : result;
+        return {
+            success: true,
+            data: cleanedResult,
+            message: params.dryRun ? 'Dry run: rows matched for deletion (no changes applied)' : 'Rows deleted successfully',
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+const listCredentialsSchema = zod_1.z.object({}).passthrough();
+const getCredentialSchema = zod_1.z.object({
+    id: zod_1.z.string({ required_error: 'Credential ID is required' }),
+});
+const createCredentialSchema = zod_1.z.object({
+    name: zod_1.z.string({ required_error: 'Credential name is required' }),
+    type: zod_1.z.string({ required_error: 'Credential type is required' }),
+    data: zod_1.z.record(zod_1.z.any(), { required_error: 'Credential data is required' }),
+});
+const updateCredentialSchema = zod_1.z.object({
+    id: zod_1.z.string({ required_error: 'Credential ID is required' }),
+    name: zod_1.z.string().optional(),
+    type: zod_1.z.string().optional(),
+    data: zod_1.z.record(zod_1.z.any()).optional(),
+});
+const deleteCredentialSchema = zod_1.z.object({
+    id: zod_1.z.string({ required_error: 'Credential ID is required' }),
+});
+const getCredentialSchemaTypeSchema = zod_1.z.object({
+    type: zod_1.z.string({ required_error: 'Credential type is required' }),
+});
+async function handleListCredentials(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        listCredentialsSchema.parse(args);
+        const result = await client.listCredentials();
+        return {
+            success: true,
+            data: {
+                credentials: result.data,
+                count: result.data.length,
+                nextCursor: result.nextCursor || undefined,
+            },
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleGetCredential(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id } = getCredentialSchema.parse(args);
+        let credential;
+        try {
+            credential = await client.getCredential(id);
+        }
+        catch (getError) {
+            const status = getError.statusCode;
+            const msg = getError.message ?? '';
+            const isUnsupported = status === 405 || status === 403 || msg.includes('not allowed');
+            if (!isUnsupported) {
+                throw getError;
+            }
+            const list = await client.listCredentials();
+            credential = list.data.find((c) => c.id === id);
+            if (!credential) {
+                return { success: false, error: `Credential ${id} not found` };
+            }
+        }
+        const { data: _sensitiveData, ...safeCred } = credential;
+        return {
+            success: true,
+            data: safeCred,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleCreateCredential(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { name, type, data } = createCredentialSchema.parse(args);
+        logger_1.logger.info(`Creating credential: name="${name}", type="${type}"`);
+        const credential = await client.createCredential({ name, type, data });
+        const { data: _sensitiveData, ...safeCred } = credential;
+        return {
+            success: true,
+            data: safeCred,
+            message: `Credential "${name}" (type: ${type}) created with ID ${credential.id}`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleUpdateCredential(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id, name, type, data } = updateCredentialSchema.parse(args);
+        logger_1.logger.info(`Updating credential: id="${id}"${name ? `, name="${name}"` : ''}`);
+        const updatePayload = {};
+        if (name !== undefined)
+            updatePayload.name = name;
+        if (type !== undefined)
+            updatePayload.type = type;
+        if (data !== undefined)
+            updatePayload.data = data;
+        const credential = await client.updateCredential(id, updatePayload);
+        const { data: _sensitiveData, ...safeCred } = credential;
+        return {
+            success: true,
+            data: safeCred,
+            message: `Credential ${id} updated successfully`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleDeleteCredential(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id } = deleteCredentialSchema.parse(args);
+        logger_1.logger.info(`Deleting credential: id="${id}"`);
+        await client.deleteCredential(id);
+        return {
+            success: true,
+            message: `Credential ${id} deleted successfully`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+async function handleGetCredentialSchema(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { type } = getCredentialSchemaTypeSchema.parse(args);
+        const schema = await client.getCredentialSchema(type);
+        return {
+            success: true,
+            data: schema,
+            message: `Schema for credential type "${type}"`,
+        };
+    }
+    catch (error) {
+        return handleCrudError(error);
+    }
+}
+const auditInstanceSchema = zod_1.z.object({
+    categories: zod_1.z.array(zod_1.z.enum([
+        'credentials', 'database', 'nodes', 'instance', 'filesystem',
+    ])).optional(),
+    includeCustomScan: zod_1.z.boolean().optional().default(true),
+    daysAbandonedWorkflow: zod_1.z.number().optional(),
+    customChecks: zod_1.z.array(zod_1.z.enum([
+        'hardcoded_secrets', 'unauthenticated_webhooks', 'error_handling', 'data_retention',
+    ])).optional(),
+});
+async function handleAuditInstance(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = auditInstanceSchema.parse(args);
+        const totalStart = Date.now();
+        const warnings = [];
+        let builtinAudit = null;
+        let builtinAuditMs = 0;
+        try {
+            const auditStart = Date.now();
+            builtinAudit = await client.generateAudit({
+                categories: input.categories,
+                daysAbandonedWorkflow: input.daysAbandonedWorkflow,
+            });
+            builtinAuditMs = Date.now() - auditStart;
+        }
+        catch (auditError) {
+            builtinAuditMs = Date.now() - totalStart;
+            const msg = auditError?.statusCode === 404
+                ? 'Built-in audit endpoint not available on this n8n version.'
+                : `Built-in audit failed: ${auditError?.message || 'unknown error'}`;
+            warnings.push(msg);
+            logger_1.logger.warn(`Audit: ${msg}`);
+        }
+        let customReport = null;
+        let workflowFetchMs = 0;
+        let customScanMs = 0;
+        if (input.includeCustomScan) {
+            try {
+                const fetchStart = Date.now();
+                const allWorkflows = await client.listAllWorkflows();
+                workflowFetchMs = Date.now() - fetchStart;
+                logger_1.logger.info(`Audit: fetched ${allWorkflows.length} workflows for scanning`);
+                const scanStart = Date.now();
+                customReport = (0, workflow_security_scanner_1.scanWorkflows)(allWorkflows, input.customChecks);
+                customScanMs = Date.now() - scanStart;
+                logger_1.logger.info(`Audit: custom scan found ${customReport.summary.total} findings across ${customReport.workflowsScanned} workflows`);
+            }
+            catch (scanError) {
+                warnings.push(`Custom scan failed: ${scanError?.message || 'unknown error'}`);
+                logger_1.logger.warn(`Audit: custom scan failed: ${scanError?.message}`);
+            }
+        }
+        const totalMs = Date.now() - totalStart;
+        const apiConfig = context?.n8nApiUrl
+            ? { baseUrl: context.n8nApiUrl }
+            : (0, n8n_api_1.getN8nApiConfig)();
+        const instanceUrl = apiConfig?.baseUrl || 'unknown';
+        const report = (0, audit_report_builder_1.buildAuditReport)({
+            builtinAudit,
+            customReport,
+            performance: { builtinAuditMs, workflowFetchMs, customScanMs, totalMs },
+            instanceUrl,
+            warnings: warnings.length > 0 ? warnings : undefined,
+        });
+        return {
+            success: true,
+            data: {
+                report: report.markdown,
+                summary: report.summary,
+            },
+        };
+    }
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid audit parameters',
+                details: { issues: error.errors },
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError) {
+            return {
+                success: false,
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+            };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        return { success: false, error: message };
     }
 }
 //# sourceMappingURL=handlers-n8n-manager.js.map

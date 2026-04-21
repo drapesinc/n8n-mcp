@@ -100,6 +100,10 @@ export const n8nManagementTools: ToolDefinition[] = [
             executionTimeout: { type: 'number' },
             errorWorkflow: { type: 'string' }
           }
+        },
+        projectId: {
+          type: 'string',
+          description: 'Optional project ID to create the workflow in (enterprise feature)'
         }
       },
       required: ['name', 'nodes', 'connections']
@@ -180,7 +184,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_update_partial_workflow',
-    description: `Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, moveNode, enable/disableNode, addConnection, removeConnection, updateSettings, updateName, add/removeTag. See tools_documentation("n8n_update_partial_workflow", "full") for details.`,
+    description: `Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, patchNodeField, moveNode, enable/disableNode, addConnection, removeConnection, updateSettings, updateName, add/removeTag, activate/deactivateWorkflow, transferWorkflow. patchNodeField requires fieldPath (dot path, e.g. "parameters.jsCode") and patches: [{find, replace}]. See tools_documentation("n8n_update_partial_workflow", "full") for details.`,
     inputSchema: {
       type: 'object',
       additionalProperties: true,  // Allow any extra properties Claude Desktop might add
@@ -664,5 +668,154 @@ export const n8nManagementTools: ToolDefinition[] = [
       destructiveHint: false,
       openWorldHint: true,
     },
-  }
+  },
+  {
+    name: 'n8n_manage_datatable',
+    description: `Manage n8n data tables and rows. Actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['createTable', 'listTables', 'getTable', 'updateTable', 'deleteTable', 'getRows', 'insertRows', 'updateRows', 'upsertRows', 'deleteRows'],
+          description: 'Operation to perform',
+        },
+        tableId: { type: 'string', description: 'Data table ID (required for all actions except createTable and listTables)' },
+        name: { type: 'string', description: 'For createTable: table name. For updateTable: new name (rename only — schema is immutable after creation)' },
+        columns: {
+          type: 'array',
+          description: 'For createTable (required, at least one): column definitions. Schema is immutable after creation via public API.',
+          items: {
+            type: 'object',
+            properties: {
+              name: { type: 'string' },
+              type: { type: 'string', enum: ['string', 'number', 'boolean', 'date'] },
+            },
+            required: ['name'],
+          },
+        },
+        data: { description: 'For insertRows: array of row objects. For updateRows/upsertRows: object with column values.' },
+        filter: {
+          type: 'object',
+          description: 'For getRows/updateRows/upsertRows/deleteRows: {type?: "and"|"or", filters: [{columnName, condition, value}]}',
+        },
+        limit: { type: 'number', description: 'For listTables/getRows: max results (1-100)' },
+        cursor: { type: 'string', description: 'For listTables/getRows: pagination cursor' },
+        sortBy: { type: 'string', description: 'For getRows: "columnName:asc" or "columnName:desc"' },
+        search: { type: 'string', description: 'For getRows: text search across string columns' },
+        returnType: { type: 'string', enum: ['count', 'id', 'all'], description: 'For insertRows: what to return (default: count)' },
+        returnData: { type: 'boolean', description: 'For updateRows/upsertRows/deleteRows: return affected rows (default: false)' },
+        dryRun: { type: 'boolean', description: 'For updateRows/upsertRows/deleteRows: preview without applying (default: false)' },
+        projectId: { type: 'string', description: 'For createTable: project ID to create the table in. If omitted, uses the default project.' },
+      },
+      required: ['action'],
+    },
+    annotations: {
+      title: 'Manage Data Tables',
+      readOnlyHint: false,
+      destructiveHint: true,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'n8n_manage_credentials',
+    description: 'Manage n8n credentials. Actions: list, get, create, update, delete, getSchema. Use getSchema to discover required fields before creating. SECURITY: credential data values are never logged.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'get', 'create', 'update', 'delete', 'getSchema'], description: 'Action to perform' },
+        id: { type: 'string', description: 'Credential ID (required for get, update, delete)' },
+        name: { type: 'string', description: 'Credential name (required for create)' },
+        type: { type: 'string', description: 'Credential type e.g. httpHeaderAuth, httpBasicAuth, oAuth2Api (required for create, getSchema)' },
+        data: { type: 'object', description: 'Credential data fields - use getSchema to discover required fields (required for create, optional for update)' },
+      },
+      required: ['action'],
+    },
+    annotations: {
+      title: 'Manage Credentials',
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'n8n_generate_workflow',
+    description: 'Generate an n8n workflow from a natural language description using AI. ' +
+      'Call with just a description to get workflow proposals. ' +
+      'Then call again with deploy_id to deploy a chosen proposal, ' +
+      'or set skip_cache=true to generate a fresh workflow. ' +
+      'Use confirm_deploy=true to deploy a previously generated workflow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        description: {
+          type: 'string',
+          description: 'Clear description of what the workflow should do. Include: trigger type ' +
+            '(webhook, schedule, manual), services to integrate (Slack, Gmail, etc.), and the logic/flow.'
+        },
+        skip_cache: {
+          type: 'boolean',
+          description: 'Set to true to skip proposals and generate a fresh workflow from scratch. ' +
+            'Returns a preview — call again with confirm_deploy=true to deploy it.'
+        },
+        deploy_id: {
+          type: 'string',
+          description: 'ID of a proposal to deploy. Get proposal IDs from a previous call ' +
+            'that returned status "proposals".'
+        },
+        confirm_deploy: {
+          type: 'boolean',
+          description: 'Set to true to deploy the workflow from the last generation preview.'
+        }
+      },
+      required: ['description'],
+    },
+    annotations: {
+      title: 'Generate Workflow',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'n8n_audit_instance',
+    description: `Security audit of n8n instance. Combines n8n's built-in audit API (credentials, database, nodes, instance, filesystem risks) with deep workflow scanning (hardcoded secrets via 50+ regex patterns, unauthenticated webhooks, error handling gaps, data retention risks). Returns actionable markdown report with remediation steps using n8n_manage_credentials and n8n_update_partial_workflow.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        categories: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['credentials', 'database', 'nodes', 'instance', 'filesystem'],
+          },
+          description: 'Built-in audit categories to check (default: all 5)',
+        },
+        includeCustomScan: {
+          type: 'boolean',
+          description: 'Run deep workflow scanning for secrets, webhooks, error handling (default: true)',
+        },
+        daysAbandonedWorkflow: {
+          type: 'number',
+          description: 'Days threshold for abandoned workflow detection (default: 90)',
+        },
+        customChecks: {
+          type: 'array',
+          items: {
+            type: 'string',
+            enum: ['hardcoded_secrets', 'unauthenticated_webhooks', 'error_handling', 'data_retention'],
+          },
+          description: 'Specific custom checks to run (default: all 4)',
+        },
+      },
+    },
+    annotations: {
+      title: 'Audit Instance Security',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
 ];

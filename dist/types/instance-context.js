@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isInstanceContext = isInstanceContext;
 exports.validateInstanceContext = validateInstanceContext;
+const ssrf_protection_1 = require("../utils/ssrf-protection");
 function isValidUrl(url) {
     try {
         const parsed = new URL(url);
@@ -75,6 +76,12 @@ function validateInstanceContext(context) {
             }
             catch {
                 errors.push(`Invalid n8nApiUrl: URL format is malformed or incomplete`);
+            }
+        }
+        else {
+            const ssrf = ssrf_protection_1.SSRFProtection.validateUrlSync(context.n8nApiUrl);
+            if (!ssrf.valid) {
+                errors.push(`Invalid n8nApiUrl: ${ssrf.reason}`);
             }
         }
     }

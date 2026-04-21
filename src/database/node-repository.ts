@@ -34,6 +34,11 @@ export class NodeRepository {
    * Supports both core and community nodes via optional community fields
    */
   saveNode(node: ParsedNode & Partial<CommunityNodeFields>): void {
+    // Preserve existing npm_readme and ai_documentation_summary on upsert
+    const existing = this.db.prepare(
+      'SELECT npm_readme, ai_documentation_summary, ai_summary_generated_at FROM nodes WHERE node_type = ?'
+    ).get(node.nodeType) as { npm_readme?: string; ai_documentation_summary?: string; ai_summary_generated_at?: string } | undefined;
+
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO nodes (
         node_type, package_name, display_name, description,
@@ -43,8 +48,9 @@ export class NodeRepository {
         properties_schema, operations, credentials_required,
         outputs, output_names,
         is_community, is_verified, author_name, author_github_url,
-        npm_package_name, npm_version, npm_downloads, community_fetched_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        npm_package_name, npm_version, npm_downloads, community_fetched_at,
+        npm_readme, ai_documentation_summary, ai_summary_generated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -76,7 +82,11 @@ export class NodeRepository {
       node.npmPackageName || null,
       node.npmVersion || null,
       node.npmDownloads || 0,
-      node.communityFetchedAt || null
+      node.communityFetchedAt || null,
+      // Preserve existing docs data on upsert
+      existing?.npm_readme || null,
+      existing?.ai_documentation_summary || null,
+      existing?.ai_summary_generated_at || null
     );
   }
   
@@ -566,9 +576,12 @@ export class NodeRepository {
         }
       }
     } catch (error) {
-      // Log error and return undefined rather than throwing
-      // This ensures validation continues even with malformed node data
-      console.error(`Error getting default operation for ${nodeType}:`, error);
+      // Log error and return undefined rather than throwing.
+      // `nodeType` is passed as a separate argument (not interpolated into
+      // the format string) so a value containing `%s` / `%d` / `%o` can't
+      // hijack `console.error`'s format directives. Addresses CodeQL
+      // js/tainted-format-string.
+      console.error('Error getting default operation for', nodeType, error);
       return undefined;
     }
 
@@ -954,6 +967,18 @@ export class NodeRepository {
     `).all(normalizedType, fromVersion, toVersion) as any[];
 
     return rows.map(row => this.parsePropertyChangeRow(row));
+  }
+
+  /**
+   * Whether any version metadata rows exist for this node type.
+   * Distinguishes "no known changes" from "no data" for get_node version modes.
+   */
+  hasVersionMetadata(nodeType: string): boolean {
+    const normalizedType = NodeTypeNormalizer.normalizeToFullForm(nodeType);
+    const row = this.db.prepare(`
+      SELECT 1 FROM node_versions WHERE node_type = ? LIMIT 1
+    `).get(normalizedType) as any;
+    return !!row;
   }
 
   /**

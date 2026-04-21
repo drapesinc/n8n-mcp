@@ -1,6 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeSpecificValidators = void 0;
+const MAX_CODE_LENGTH = 200000;
+const MAX_SHORT_INPUT_LENGTH = 2000;
 class NodeSpecificValidators {
     static validateSlack(context) {
         const { config, errors, warnings, suggestions, autofix } = context;
@@ -307,7 +309,7 @@ class NodeSpecificValidators {
             });
         }
         const a1Pattern = /^('[^']+'|[^!]+)!([A-Z]+\d*:?[A-Z]*\d*|[A-Z]+:[A-Z]+|\d+:\d+)$/i;
-        if (!a1Pattern.test(range)) {
+        if (range.length <= MAX_SHORT_INPUT_LENGTH && !a1Pattern.test(range)) {
             warnings.push({
                 type: 'inefficient',
                 property: 'range',
@@ -943,7 +945,8 @@ class NodeSpecificValidators {
         else if (language === 'python') {
             this.validatePythonCode(code, errors, warnings, suggestions);
         }
-        this.validateReturnStatement(code, language, errors, warnings, suggestions);
+        const mode = config.mode || 'runOnceForAllItems';
+        this.validateReturnStatement(code, language, errors, warnings, suggestions, mode);
         this.validateN8nVariables(code, language, warnings, suggestions, errors);
         this.validateCodeSecurity(code, language, warnings);
         if (!config.onError && code.length > 100) {
@@ -988,7 +991,9 @@ class NodeSpecificValidators {
         });
         const functionWithAwait = /function\s+\w*\s*\([^)]*\)\s*{[^}]*await/;
         const arrowWithAwait = /\([^)]*\)\s*=>\s*{[^}]*await/;
-        if ((functionWithAwait.test(code) || arrowWithAwait.test(code)) && !code.includes('async')) {
+        if (code.length <= MAX_CODE_LENGTH
+            && (functionWithAwait.test(code) || arrowWithAwait.test(code))
+            && !code.includes('async')) {
             warnings.push({
                 type: 'best_practice',
                 message: 'Using await inside a non-async function',
@@ -1045,7 +1050,7 @@ class NodeSpecificValidators {
             }
         });
     }
-    static validateReturnStatement(code, language, errors, warnings, suggestions) {
+    static validateReturnStatement(code, language, errors, warnings, suggestions, mode = 'runOnceForAllItems') {
         const hasReturn = /return\s+/.test(code);
         if (!hasReturn) {
             errors.push({
@@ -1059,7 +1064,8 @@ class NodeSpecificValidators {
             return;
         }
         if (language === 'javaScript') {
-            if (/return\s+{(?!.*\[).*}\s*;?$/s.test(code) && !code.includes('json:')) {
+            const isRunOncePerItem = mode === 'runOnceForEachItem';
+            if (!isRunOncePerItem && /return\s+{(?!.*\[).*}\s*;?$/s.test(code) && !code.includes('json:')) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'jsCode',
@@ -1067,8 +1073,9 @@ class NodeSpecificValidators {
                     fix: 'Wrap in array: return [{json: yourObject}]'
                 });
             }
-            const hasHelperFunctions = /(?:function\s+\w+\s*\(|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|\w+\s*=>))/.test(code);
-            if (!hasHelperFunctions && /return\s+(true|false|null|undefined|\d+|['"`])/m.test(code)) {
+            const hasHelperFunctions = code.length <= MAX_CODE_LENGTH
+                && /(?:function\s+\w+\s*\(|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|\w+\s*=>))/.test(code);
+            if (!isRunOncePerItem && !hasHelperFunctions && /return\s+(true|false|null|undefined|\d+|['"`])/m.test(code)) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'jsCode',
@@ -1090,7 +1097,8 @@ class NodeSpecificValidators {
             }
         }
         if (language === 'python') {
-            if (/return\s+{(?!.*\[).*}$/s.test(code)) {
+            const isRunOncePerItem = mode === 'runOnceForEachItem';
+            if (!isRunOncePerItem && /return\s+{(?!.*\[).*}$/s.test(code)) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'pythonCode',
@@ -1098,7 +1106,7 @@ class NodeSpecificValidators {
                     fix: 'Wrap in list: return [{"json": your_dict}]'
                 });
             }
-            if (/return\s+(True|False|None|\d+|['"`])/m.test(code)) {
+            if (!isRunOncePerItem && /return\s+(True|False|None|\d+|['"`])/m.test(code)) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'pythonCode',
@@ -1211,7 +1219,7 @@ class NodeSpecificValidators {
             }
         }
         const jmespathFunction = language === 'javaScript' ? '$jmespath' : '_jmespath';
-        if (code.includes(jmespathFunction + '(')) {
+        if (code.length <= MAX_CODE_LENGTH && code.includes(jmespathFunction + '(')) {
             const filterPattern = /\[?\?[^[\]]*(?:>=?|<=?|==|!=)\s*(\d+(?:\.\d+)?)\s*\]/g;
             let match;
             while ((match = filterPattern.exec(code)) !== null) {
@@ -1317,12 +1325,16 @@ class NodeSpecificValidators {
             }
         }
         if (config.mode === 'manual') {
-            const hasFields = config.values && Object.keys(config.values).length > 0;
+            const hasFieldsViaValues = config.values && Object.keys(config.values).length > 0;
+            const hasFieldsViaAssignments = config.assignments?.assignments
+                && Array.isArray(config.assignments.assignments)
+                && config.assignments.assignments.length > 0;
+            const hasFields = hasFieldsViaValues || hasFieldsViaAssignments;
             if (!hasFields && !config.jsonOutput) {
                 warnings.push({
                     type: 'missing_common',
                     message: 'Set node has no fields configured - will output empty items',
-                    suggestion: 'Add fields in the Values section or use JSON mode'
+                    suggestion: 'Add field assignments or use JSON mode'
                 });
             }
         }

@@ -187,8 +187,14 @@ class CommunityNodeService {
         const operations = [];
         if (nodeDesc.properties) {
             for (const prop of nodeDesc.properties) {
-                if (prop.name === 'operation' && prop.options) {
-                    operations.push(...prop.options);
+                if ((prop.name === 'operation' || prop.name === 'action') && prop.options) {
+                    const resource = prop.displayOptions?.show?.resource?.[0];
+                    for (const op of prop.options) {
+                        operations.push({
+                            ...op,
+                            ...(resource ? { resource } : {})
+                        });
+                    }
                 }
             }
         }

@@ -47,6 +47,7 @@ const tools_n8n_manager_1 = require("./tools-n8n-manager");
 const tools_n8n_friendly_1 = require("./tools-n8n-friendly");
 const workflow_examples_1 = require("./workflow-examples");
 const logger_1 = require("../utils/logger");
+const redaction_1 = require("../utils/redaction");
 const node_repository_1 = require("../database/node-repository");
 const database_adapter_1 = require("../database/database-adapter");
 const shared_database_1 = require("../database/shared-database");
@@ -72,8 +73,11 @@ const validation_schemas_1 = require("../utils/validation-schemas");
 const protocol_version_1 = require("../utils/protocol-version");
 const telemetry_1 = require("../telemetry");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
+function escapeRegExp(input) {
+    return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 class N8NDocumentationMCPServer {
-    constructor(instanceContext, earlyLogger) {
+    constructor(instanceContext, earlyLogger, options) {
         this.db = null;
         this.repository = null;
         this.templateService = null;
@@ -87,8 +91,10 @@ class N8NDocumentationMCPServer {
         this.sharedDbState = null;
         this.isShutdown = false;
         this.dbHealthChecked = false;
+        this.workflowPatternsCache = null;
         this.instanceContext = instanceContext;
         this.earlyLogger = earlyLogger || null;
+        this.generateWorkflowHandler = options?.generateWorkflowHandler;
         const envDbPath = process.env.NODE_DB_PATH;
         let dbPath = null;
         let possiblePaths = [];
@@ -437,15 +443,11 @@ class N8NDocumentationMCPServer {
         });
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
-            logger_1.logger.info('Tool call received - DETAILED DEBUG', {
+            logger_1.logger.info('Tool call received', {
                 toolName: name,
-                arguments: JSON.stringify(args, null, 2),
-                argumentsType: typeof args,
-                argumentsKeys: args ? Object.keys(args) : [],
-                hasNodeType: args && 'nodeType' in args,
-                hasConfig: args && 'config' in args,
-                configType: args && args.config ? typeof args.config : 'N/A',
-                rawRequest: JSON.stringify(request.params)
+                ...(0, redaction_1.summarizeToolCallArgs)(args),
+                hasNodeType: !!(args && typeof args === 'object' && 'nodeType' in args),
+                hasConfig: !!(args && typeof args === 'object' && 'config' in args),
             });
             const disabledTools = this.getDisabledTools();
             if (disabledTools.has(name)) {
@@ -481,8 +483,9 @@ class N8NDocumentationMCPServer {
                         const parsed = JSON.parse(possibleNestedData);
                         if (parsed && typeof parsed === 'object') {
                             logger_1.logger.warn('Detected n8n nested output bug, attempting to extract actual arguments', {
-                                originalArgs: args,
-                                extractedArgs: parsed
+                                toolName: name,
+                                originalArgsKeys: Object.keys(args),
+                                extractedArgsKeys: Object.keys(parsed),
                             });
                             if (this.validateExtractedArgs(name, parsed)) {
                                 processedArgs = parsed;
@@ -490,7 +493,7 @@ class N8NDocumentationMCPServer {
                             else {
                                 logger_1.logger.warn('Extracted arguments failed validation, using original args', {
                                     toolName: name,
-                                    extractedArgs: parsed
+                                    extractedArgsKeys: Object.keys(parsed),
                                 });
                             }
                         }
@@ -503,8 +506,11 @@ class N8NDocumentationMCPServer {
                 }
             }
             processedArgs = this.coerceStringifiedJsonParams(name, processedArgs);
+            if (processedArgs) {
+                processedArgs = JSON.parse(JSON.stringify(processedArgs));
+            }
             try {
-                logger_1.logger.debug(`Executing tool: ${name}`, { args: processedArgs });
+                logger_1.logger.debug(`Executing tool: ${name}`, (0, redaction_1.summarizeToolCallArgs)(processedArgs));
                 const startTime = Date.now();
                 const result = await this.executeTool(name, processedArgs);
                 const duration = Date.now() - startTime;
@@ -698,6 +704,19 @@ class N8NDocumentationMCPServer {
                         ? { valid: true, errors: [] }
                         : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
                     break;
+                case 'n8n_manage_datatable':
+                    validationResult = args.action
+                        ? { valid: true, errors: [] }
+                        : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
+                    break;
+                case 'n8n_manage_credentials':
+                    validationResult = args.action
+                        ? { valid: true, errors: [] }
+                        : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
+                    break;
+                case 'n8n_audit_instance':
+                    validationResult = { valid: true, errors: [] };
+                    break;
                 case 'n8n_deploy_template':
                     validationResult = args.templateId !== undefined
                         ? { valid: true, errors: [] }
@@ -775,8 +794,8 @@ class N8NDocumentationMCPServer {
             if (!(requiredField in args)) {
                 logger_1.logger.debug(`Extracted args missing required field: ${requiredField}`, {
                     toolName,
-                    extractedArgs: args,
-                    required
+                    extractedArgsKeys: Object.keys(args),
+                    required,
                 });
                 return false;
             }
@@ -793,7 +812,6 @@ class N8NDocumentationMCPServer {
                         toolName,
                         expectedType,
                         actualType,
-                        fieldValue
                     });
                     return false;
                 }
@@ -852,7 +870,13 @@ class N8NDocumentationMCPServer {
                             coercedAny = true;
                         }
                     }
-                    catch { }
+                    catch (e) {
+                        logger_1.logger.warn(`Failed to parse string→${expectedType} for param "${key}" in tool "${toolName}"`, {
+                            error: e instanceof Error ? e.message : String(e),
+                            valuePreview: trimmed.substring(0, 200),
+                            valueLength: trimmed.length,
+                        });
+                    }
                     continue;
                 }
                 if (expectedType === 'array' && trimmed.startsWith('[')) {
@@ -863,7 +887,13 @@ class N8NDocumentationMCPServer {
                             coercedAny = true;
                         }
                     }
-                    catch { }
+                    catch (e) {
+                        logger_1.logger.warn(`Failed to parse string→${expectedType} for param "${key}" in tool "${toolName}"`, {
+                            error: e instanceof Error ? e.message : String(e),
+                            valuePreview: trimmed.substring(0, 200),
+                            valueLength: trimmed.length,
+                        });
+                    }
                     continue;
                 }
                 if (expectedType === 'number' || expectedType === 'integer') {
@@ -894,7 +924,7 @@ class N8NDocumentationMCPServer {
         }
         if (coercedAny) {
             logger_1.logger.warn(`Coerced mistyped params for tool "${toolName}"`, {
-                original: Object.fromEntries(Object.entries(args).map(([k, v]) => [k, `${typeof v}: ${typeof v === 'string' ? v.substring(0, 80) : v}`])),
+                original: Object.fromEntries(Object.entries(args).map(([k, v]) => [k, typeof v])),
             });
         }
         return coerced;
@@ -905,11 +935,7 @@ class N8NDocumentationMCPServer {
         if (disabledTools.has(name)) {
             throw new Error(`Tool '${name}' is disabled via DISABLED_TOOLS environment variable`);
         }
-        logger_1.logger.info(`Tool execution: ${name}`, {
-            args: typeof args === 'object' ? JSON.stringify(args) : args,
-            argsType: typeof args,
-            argsKeys: typeof args === 'object' ? Object.keys(args) : 'not-object'
-        });
+        logger_1.logger.info(`Tool execution: ${name}`, (0, redaction_1.summarizeToolCallArgs)(args));
         if (typeof args !== 'object' || args === null) {
             throw new Error(`Invalid arguments for tool ${name}: expected object, got ${typeof args}`);
         }
@@ -922,6 +948,7 @@ class N8NDocumentationMCPServer {
                 return this.searchNodes(args.query, limit, {
                     mode: args.mode,
                     includeExamples: args.includeExamples,
+                    includeOperations: args.includeOperations,
                     source: args.source
                 });
             case 'get_node':
@@ -1013,6 +1040,8 @@ class N8NDocumentationMCPServer {
                             requiredService: args.requiredService,
                             targetAudience: args.targetAudience
                         }, searchLimit, searchOffset);
+                    case 'patterns':
+                        return this.getWorkflowPatterns(args.task, searchLimit);
                     case 'keyword':
                     default:
                         if (!args.query) {
@@ -1110,6 +1139,78 @@ class N8NDocumentationMCPServer {
                 if (!this.repository)
                     throw new Error('Repository not initialized');
                 return n8nHandlers.handleDeployTemplate(args, this.templateService, this.repository, this.resolveContextFromArgs(args));
+            case 'n8n_manage_datatable': {
+                this.validateToolParams(name, args, ['action']);
+                const dtAction = args.action;
+                switch (dtAction) {
+                    case 'createTable': return n8nHandlers.handleCreateTable(args, this.instanceContext);
+                    case 'listTables': return n8nHandlers.handleListTables(args, this.instanceContext);
+                    case 'getTable': return n8nHandlers.handleGetTable(args, this.instanceContext);
+                    case 'updateTable': return n8nHandlers.handleUpdateTable(args, this.instanceContext);
+                    case 'deleteTable': return n8nHandlers.handleDeleteTable(args, this.instanceContext);
+                    case 'getRows': return n8nHandlers.handleGetRows(args, this.instanceContext);
+                    case 'insertRows': return n8nHandlers.handleInsertRows(args, this.instanceContext);
+                    case 'updateRows': return n8nHandlers.handleUpdateRows(args, this.instanceContext);
+                    case 'upsertRows': return n8nHandlers.handleUpsertRows(args, this.instanceContext);
+                    case 'deleteRows': return n8nHandlers.handleDeleteRows(args, this.instanceContext);
+                    default:
+                        throw new Error(`Unknown action: ${dtAction}. Valid actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows`);
+                }
+            }
+            case 'n8n_manage_credentials': {
+                this.validateToolParams(name, args, ['action']);
+                const credAction = args.action;
+                switch (credAction) {
+                    case 'list': return n8nHandlers.handleListCredentials(args, this.instanceContext);
+                    case 'get': return n8nHandlers.handleGetCredential(args, this.instanceContext);
+                    case 'create': return n8nHandlers.handleCreateCredential(args, this.instanceContext);
+                    case 'update': return n8nHandlers.handleUpdateCredential(args, this.instanceContext);
+                    case 'delete': return n8nHandlers.handleDeleteCredential(args, this.instanceContext);
+                    case 'getSchema': return n8nHandlers.handleGetCredentialSchema(args, this.instanceContext);
+                    default:
+                        throw new Error(`Unknown action: ${credAction}. Valid actions: list, get, create, update, delete, getSchema`);
+                }
+            }
+            case 'n8n_audit_instance':
+                return n8nHandlers.handleAuditInstance(args, this.instanceContext);
+            case 'n8n_generate_workflow': {
+                this.validateToolParams(name, args, ['description']);
+                if (this.generateWorkflowHandler && this.instanceContext) {
+                    await this.ensureInitialized();
+                    if (!this.repository) {
+                        throw new Error('Repository not initialized');
+                    }
+                    const repo = this.repository;
+                    const ctx = this.instanceContext;
+                    const helpers = {
+                        createWorkflow: (wfArgs) => n8nHandlers.handleCreateWorkflow(wfArgs, ctx),
+                        validateWorkflow: (id) => n8nHandlers.handleValidateWorkflow({ id }, repo, ctx),
+                        autofixWorkflow: (id) => n8nHandlers.handleAutofixWorkflow({ id }, repo, ctx),
+                        getWorkflow: (id) => n8nHandlers.handleGetWorkflow({ id }, ctx),
+                    };
+                    try {
+                        const result = await this.generateWorkflowHandler(args, ctx, helpers);
+                        return result ?? { success: false, error: 'Handler returned no result' };
+                    }
+                    catch (err) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        return { success: false, error: message };
+                    }
+                }
+                return {
+                    hosted_only: true,
+                    message: 'The n8n_generate_workflow tool is available exclusively on the hosted version of n8n-mcp. ' +
+                        'It uses AI to generate complete, validated n8n workflows from natural language descriptions.\n\n' +
+                        'To access this feature:\n' +
+                        '1. Register for free at https://dashboard.n8n-mcp.com\n' +
+                        '2. Connect your n8n instance\n' +
+                        '3. Use your hosted API key in your MCP client\n\n' +
+                        'The hosted service includes:\n' +
+                        '- 73,000+ pre-built workflow templates with instant deployment\n' +
+                        '- AI-powered fresh generation for custom workflows\n' +
+                        '- Automatic validation and error correction'
+                };
+            }
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
@@ -1248,7 +1349,7 @@ class N8NDocumentationMCPServer {
             return { query, results: [], totalCount: 0 };
         }
         if (mode === 'FUZZY') {
-            return this.searchNodesFuzzy(cleanedQuery, limit);
+            return this.searchNodesFuzzy(cleanedQuery, limit, { includeOperations: options?.includeOperations });
         }
         let ftsQuery;
         if (cleanedQuery.startsWith('"') && cleanedQuery.endsWith('"')) {
@@ -1316,7 +1417,7 @@ class N8NDocumentationMCPServer {
             const hasHttpRequest = scoredNodes.some(n => n.node_type === 'nodes-base.httpRequest');
             if (cleanedQuery.toLowerCase().includes('http') && !hasHttpRequest) {
                 logger_1.logger.debug('FTS missed HTTP Request node, augmenting with LIKE search');
-                return this.searchNodesLIKE(query, limit);
+                return this.searchNodesLIKE(query, limit, options);
             }
             const result = {
                 query,
@@ -1338,6 +1439,12 @@ class N8NDocumentationMCPServer {
                         }
                         if (node.npm_downloads) {
                             nodeResult.npmDownloads = node.npm_downloads;
+                        }
+                    }
+                    if (options?.includeOperations) {
+                        const opsTree = this.buildOperationsTree(node.operations);
+                        if (opsTree) {
+                            nodeResult.operationsTree = opsTree;
                         }
                     }
                     return nodeResult;
@@ -1390,7 +1497,7 @@ class N8NDocumentationMCPServer {
             return this.searchNodesLIKE(query, limit);
         }
     }
-    async searchNodesFuzzy(query, limit) {
+    async searchNodesFuzzy(query, limit, options) {
         if (!this.db)
             throw new Error('Database not initialized');
         const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 0);
@@ -1418,14 +1525,23 @@ class N8NDocumentationMCPServer {
         return {
             query,
             mode: 'FUZZY',
-            results: matchingNodes.map(node => ({
-                nodeType: node.node_type,
-                workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package_name, node.node_type),
-                displayName: node.display_name,
-                description: node.description,
-                category: node.category,
-                package: node.package_name
-            })),
+            results: matchingNodes.map(node => {
+                const nodeResult = {
+                    nodeType: node.node_type,
+                    workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package_name, node.node_type),
+                    displayName: node.display_name,
+                    description: node.description,
+                    category: node.category,
+                    package: node.package_name
+                };
+                if (options?.includeOperations) {
+                    const opsTree = this.buildOperationsTree(node.operations);
+                    if (opsTree) {
+                        nodeResult.operationsTree = opsTree;
+                    }
+                }
+                return nodeResult;
+            }),
             totalCount: matchingNodes.length
         };
     }
@@ -1546,6 +1662,12 @@ class N8NDocumentationMCPServer {
                             nodeResult.npmDownloads = node.npm_downloads;
                         }
                     }
+                    if (options?.includeOperations) {
+                        const opsTree = this.buildOperationsTree(node.operations);
+                        if (opsTree) {
+                            nodeResult.operationsTree = opsTree;
+                        }
+                    }
                     return nodeResult;
                 }),
                 totalCount: rankedNodes.length
@@ -1611,6 +1733,12 @@ class N8NDocumentationMCPServer {
                     }
                     if (node.npm_downloads) {
                         nodeResult.npmDownloads = node.npm_downloads;
+                    }
+                }
+                if (options?.includeOperations) {
+                    const opsTree = this.buildOperationsTree(node.operations);
+                    if (opsTree) {
+                        nodeResult.operationsTree = opsTree;
                     }
                 }
                 return nodeResult;
@@ -1685,7 +1813,7 @@ class N8NDocumentationMCPServer {
         else if (name_lower.startsWith(query_lower)) {
             score = 800;
         }
-        else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+        else if (new RegExp(`\\b${escapeRegExp(query_lower)}\\b`, 'i').test(node.display_name)) {
             score = 700;
         }
         else if (name_lower.includes(query_lower)) {
@@ -1727,7 +1855,7 @@ class N8NDocumentationMCPServer {
             else if (name_lower.startsWith(query_lower)) {
                 score = 800;
             }
-            else if (new RegExp(`\\b${query_lower}\\b`, 'i').test(node.display_name)) {
+            else if (new RegExp(`\\b${escapeRegExp(query_lower)}\\b`, 'i').test(node.display_name)) {
                 score = 700;
             }
             else if (name_lower.includes(query_lower)) {
@@ -1915,6 +2043,47 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 nodeCount: pkg.count,
             })),
         };
+    }
+    buildOperationsTree(operationsRaw) {
+        if (!operationsRaw)
+            return undefined;
+        let ops;
+        if (typeof operationsRaw === 'string') {
+            try {
+                ops = JSON.parse(operationsRaw);
+            }
+            catch {
+                return undefined;
+            }
+        }
+        else if (Array.isArray(operationsRaw)) {
+            ops = operationsRaw;
+        }
+        else {
+            return undefined;
+        }
+        if (!Array.isArray(ops) || ops.length === 0)
+            return undefined;
+        const byResource = new Map();
+        for (const op of ops) {
+            const resource = op.resource || 'default';
+            const opName = op.name || op.operation;
+            if (!opName)
+                continue;
+            if (!byResource.has(resource)) {
+                byResource.set(resource, []);
+            }
+            const list = byResource.get(resource);
+            if (!list.includes(opName)) {
+                list.push(opName);
+            }
+        }
+        if (byResource.size === 0)
+            return undefined;
+        return Array.from(byResource.entries()).map(([resource, operations]) => ({
+            resource,
+            operations
+        }));
     }
     async getNodeEssentials(nodeType, includeExamples) {
         await this.ensureInitialized();
@@ -2133,18 +2302,34 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
         const versions = this.repository.getNodeVersions(nodeType);
         const latest = this.repository.getLatestNodeVersion(nodeType);
+        const nodeRow = latest ? null : this.repository.getNode(nodeType);
         const summary = {
-            currentVersion: latest?.version || 'unknown',
+            currentVersion: latest?.version ?? nodeRow?.version ?? 'unknown',
             totalVersions: versions.length,
             hasVersionHistory: versions.length > 0
         };
         this.cache.set(cacheKey, summary, 86400000);
         return summary;
     }
+    versionMetadataUnavailable(nodeType, extra = {}) {
+        const node = this.repository.getNode(nodeType);
+        return {
+            nodeType,
+            available: false,
+            reason: 'Version metadata not populated for this node. Callers must not infer upgrade safety from this response.',
+            currentVersion: node?.version ?? null,
+            isVersioned: node?.isVersioned ?? false,
+            ...extra
+        };
+    }
     getVersionHistory(nodeType) {
+        if (!this.repository.hasVersionMetadata(nodeType)) {
+            return this.versionMetadataUnavailable(nodeType, { totalVersions: 0, versions: [] });
+        }
         const versions = this.repository.getNodeVersions(nodeType);
         return {
             nodeType,
+            available: true,
             totalVersions: versions.length,
             versions: versions.map(v => ({
                 version: v.version,
@@ -2155,14 +2340,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 breakingChangesCount: (v.breakingChanges || []).length,
                 deprecatedProperties: v.deprecatedProperties || [],
                 addedProperties: v.addedProperties || []
-            })),
-            available: versions.length > 0,
-            message: versions.length === 0 ?
-                'No version history available. Version tracking may not be enabled for this node.' :
-                undefined
+            }))
         };
     }
     compareVersions(nodeType, fromVersion, toVersion) {
+        if (!this.repository.hasVersionMetadata(nodeType)) {
+            return this.versionMetadataUnavailable(nodeType, {
+                fromVersion,
+                toVersion: toVersion ?? 'latest',
+                totalChanges: 0,
+                changes: []
+            });
+        }
         const latest = this.repository.getLatestNodeVersion(nodeType);
         const targetVersion = toVersion || latest?.version;
         if (!targetVersion) {
@@ -2171,6 +2360,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         const changes = this.repository.getPropertyChanges(nodeType, fromVersion, targetVersion);
         return {
             nodeType,
+            available: true,
             fromVersion,
             toVersion: targetVersion,
             totalChanges: changes.length,
@@ -2188,9 +2378,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         };
     }
     getBreakingChanges(nodeType, fromVersion, toVersion) {
+        if (!this.repository.hasVersionMetadata(nodeType)) {
+            return this.versionMetadataUnavailable(nodeType, {
+                fromVersion,
+                toVersion: toVersion ?? 'latest',
+                totalBreakingChanges: 0,
+                changes: []
+            });
+        }
         const breakingChanges = this.repository.getBreakingChanges(nodeType, fromVersion, toVersion);
         return {
             nodeType,
+            available: true,
             fromVersion,
             toVersion: toVersion || 'latest',
             totalBreakingChanges: breakingChanges.length,
@@ -2208,10 +2407,20 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         };
     }
     getMigrations(nodeType, fromVersion, toVersion) {
+        if (!this.repository.hasVersionMetadata(nodeType)) {
+            return this.versionMetadataUnavailable(nodeType, {
+                fromVersion,
+                toVersion,
+                autoMigratableChanges: 0,
+                totalChanges: 0,
+                migrations: []
+            });
+        }
         const migrations = this.repository.getAutoMigratableChanges(nodeType, fromVersion, toVersion);
         const allChanges = this.repository.getPropertyChanges(nodeType, fromVersion, toVersion);
         return {
             nodeType,
+            available: true,
             fromVersion,
             toVersion,
             autoMigratableChanges: migrations.length,
@@ -2773,6 +2982,54 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             tip: `Found ${result.total} templates matching "${query}". Showing ${result.items.length}.`
         };
     }
+    getWorkflowPatterns(category, limit = 10) {
+        if (!this.workflowPatternsCache) {
+            try {
+                const patternsPath = path_1.default.join(__dirname, '..', '..', 'data', 'workflow-patterns.json');
+                if ((0, fs_1.existsSync)(patternsPath)) {
+                    this.workflowPatternsCache = JSON.parse((0, fs_1.readFileSync)(patternsPath, 'utf-8'));
+                }
+                else {
+                    return { error: 'Workflow patterns not generated yet. Run: npm run mine:patterns' };
+                }
+            }
+            catch (e) {
+                return { error: `Failed to load workflow patterns: ${e instanceof Error ? e.message : String(e)}` };
+            }
+        }
+        const patterns = this.workflowPatternsCache;
+        if (category) {
+            const categoryData = patterns.categories[category];
+            if (!categoryData) {
+                const available = Object.keys(patterns.categories);
+                return { error: `Unknown category "${category}". Available: ${available.join(', ')}` };
+            }
+            const MAX_CHAINS = 5;
+            return {
+                category,
+                templateCount: categoryData.templateCount,
+                pattern: categoryData.pattern,
+                nodes: categoryData.nodes?.slice(0, limit).map(n => ({
+                    type: n.type, freq: n.frequency, role: n.role
+                })),
+                chains: categoryData.commonChains?.slice(0, MAX_CHAINS).map(c => ({
+                    path: c.chain.map(t => t.split('.').pop() ?? t), count: c.count, freq: c.frequency
+                })),
+            };
+        }
+        const overview = Object.entries(patterns.categories).map(([name, data]) => ({
+            category: name,
+            templateCount: data.templateCount,
+            pattern: data.pattern,
+            topNodes: data.nodes?.slice(0, 5).map(n => n.displayName || n.type),
+        }));
+        return {
+            templateCount: patterns.templateCount,
+            generatedAt: patterns.generatedAt,
+            categories: overview,
+            tip: 'Use search_templates({searchMode: "patterns", task: "category_name"}) for full pattern data with nodes, chains, and tips.',
+        };
+    }
     async getTemplatesForTask(task, limit = 10, offset = 0) {
         await this.ensureInitialized();
         if (!this.templateService)
@@ -2798,6 +3055,21 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         await this.ensureInitialized();
         if (!this.templateService)
             throw new Error('Template service not initialized');
+        const metadataAvailable = await this.templateService.hasMetadataCoverage();
+        if (!metadataAvailable) {
+            return {
+                available: false,
+                reason: 'Template metadata has not been enriched yet. by_metadata search requires ' +
+                    'running the metadata enrichment job (see scripts/fetch-templates). ' +
+                    'Use searchMode "keyword", "by_nodes", or "patterns" in the meantime.',
+                filters,
+                items: [],
+                total: 0,
+                limit,
+                offset,
+                hasMore: false
+            };
+        }
         const result = await this.templateService.searchTemplatesByMetadata(filters, limit, offset);
         const filterSummary = [];
         if (filters.category)
@@ -2817,6 +3089,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             const availableAudiences = await this.templateService.getAvailableTargetAudiences();
             return {
                 ...result,
+                available: true,
                 message: `No templates found with filters: ${filterSummary.join(', ')}`,
                 availableCategories: availableCategories.slice(0, 10),
                 availableAudiences: availableAudiences.slice(0, 5),
@@ -2825,6 +3098,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
         return {
             ...result,
+            available: true,
             filters,
             filterSummary: filterSummary.join(', '),
             tip: `Found ${result.total} templates matching filters. Showing ${result.items.length}. Each includes AI-generated metadata.`

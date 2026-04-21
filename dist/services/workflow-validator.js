@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.WorkflowValidator = exports.VALID_CONNECTION_TYPES = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const expression_validator_1 = require("./expression-validator");
+const expression_utils_1 = require("../utils/expression-utils");
 const expression_format_validator_1 = require("./expression-format-validator");
 const node_similarity_service_1 = require("./node-similarity-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
@@ -14,6 +15,7 @@ const ai_node_validator_1 = require("./ai-node-validator");
 const ai_tool_validators_1 = require("./ai-tool-validators");
 const node_type_utils_1 = require("../utils/node-type-utils");
 const node_classification_1 = require("../utils/node-classification");
+const n8n_validation_1 = require("./n8n-validation");
 const tool_variant_generator_1 = require("./tool-variant-generator");
 const logger = new logger_1.Logger({ prefix: '[WorkflowValidator]' });
 exports.VALID_CONNECTION_TYPES = new Set([
@@ -367,6 +369,17 @@ class WorkflowValidator {
                         message: typeof warning === 'string' ? warning : warning.message || String(warning)
                     });
                 });
+                if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.switch') {
+                    const conditionErrors = (0, n8n_validation_1.validateConditionNodeStructure)(node);
+                    for (const err of conditionErrors) {
+                        result.errors.push({
+                            type: 'error',
+                            nodeId: node.id,
+                            nodeName: node.name,
+                            message: err
+                        });
+                    }
+                }
             }
             catch (error) {
                 result.errors.push({
@@ -784,22 +797,34 @@ class WorkflowValidator {
         if (!nodeInfo)
             return;
         const shortType = normalizedType.replace(/^(n8n-)?nodes-base\./, '');
-        let mainInputCount = 1;
-        if (shortType === 'merge' || shortType === 'compareDatasets') {
-            mainInputCount = 2;
-        }
         if (nodeInfo.isTrigger || (0, node_type_utils_1.isTriggerNode)(targetNode.type)) {
-            mainInputCount = 0;
+            if (connection.index >= 0) {
+                result.errors.push({
+                    type: 'error',
+                    nodeName: targetNode.name,
+                    message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (0). ` +
+                        `Connection from "${sourceName}" targets input ${connection.index}, but trigger nodes have no main inputs.`,
+                    code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+                });
+                result.statistics.invalidConnections++;
+            }
+            return;
         }
-        if (mainInputCount > 0 && connection.index >= mainInputCount) {
-            result.errors.push({
-                type: 'error',
-                nodeName: targetNode.name,
-                message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${mainInputCount}). ` +
-                    `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${mainInputCount} main input(s) (indices 0-${mainInputCount - 1}).`,
-                code: 'INPUT_INDEX_OUT_OF_BOUNDS'
-            });
-            result.statistics.invalidConnections++;
+        if (shortType === 'merge' || shortType === 'compareDatasets') {
+            const rawInputs = targetNode.parameters?.numberInputs;
+            const parsed = rawInputs ? Number(rawInputs) : 2;
+            const mainInputCount = Number.isFinite(parsed) ? parsed : 2;
+            if (connection.index >= mainInputCount) {
+                result.errors.push({
+                    type: 'error',
+                    nodeName: targetNode.name,
+                    message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${mainInputCount}). ` +
+                        `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${mainInputCount} main input(s) (indices 0-${mainInputCount - 1}).`,
+                    code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+                });
+                result.statistics.invalidConnections++;
+            }
+            return;
         }
     }
     flagOrphanedNodes(workflow, result) {
@@ -913,7 +938,15 @@ class WorkflowValidator {
             'n8n-nodes-base.loop',
             'nodes-base.loop'
         ];
-        const hasCycleDFS = (nodeName, pathFromLoopNode = false) => {
+        const conditionalNodeTypes = [
+            'n8n-nodes-base.if',
+            'nodes-base.if',
+            'n8n-nodes-base.switch',
+            'nodes-base.switch',
+            'n8n-nodes-base.filter',
+            'nodes-base.filter',
+        ];
+        const hasCycleDFS = (nodeName, pathFromLoopNode = false, pathFromConditionalNode = false) => {
             visited.add(nodeName);
             recursionStack.add(nodeName);
             const connections = workflow.connections[nodeName];
@@ -929,15 +962,16 @@ class WorkflowValidator {
                 }
                 const currentNodeType = nodeTypeMap.get(nodeName);
                 const isLoopNode = loopNodeTypes.includes(currentNodeType || '');
+                const isConditionalNode = conditionalNodeTypes.includes(currentNodeType || '');
                 for (const target of allTargets) {
                     if (!visited.has(target)) {
-                        if (hasCycleDFS(target, pathFromLoopNode || isLoopNode))
+                        if (hasCycleDFS(target, pathFromLoopNode || isLoopNode, pathFromConditionalNode || isConditionalNode))
                             return true;
                     }
                     else if (recursionStack.has(target)) {
                         const targetNodeType = nodeTypeMap.get(target);
                         const isTargetLoopNode = loopNodeTypes.includes(targetNodeType || '');
-                        if (isTargetLoopNode || pathFromLoopNode || isLoopNode) {
+                        if (isTargetLoopNode || pathFromLoopNode || isLoopNode || pathFromConditionalNode || isConditionalNode) {
                             continue;
                         }
                         return true;
@@ -1019,10 +1053,7 @@ class WorkflowValidator {
     countExpressionsInObject(obj) {
         let count = 0;
         if (typeof obj === 'string') {
-            const matches = obj.match(/\{\{[\s\S]+?\}\}/g);
-            if (matches) {
-                count += matches.length;
-            }
+            count += (0, expression_utils_1.extractBracketExpressions)(obj).length;
         }
         else if (Array.isArray(obj)) {
             for (const item of obj) {

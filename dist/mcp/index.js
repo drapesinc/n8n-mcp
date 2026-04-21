@@ -36,7 +36,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 const server_1 = require("./server");
 const logger_1 = require("../utils/logger");
-const config_manager_1 = require("../telemetry/config-manager");
+const telemetry_cli_1 = require("../telemetry/telemetry-cli");
 const early_error_logger_1 = require("../telemetry/early-error-logger");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
 const fs_1 = require("fs");
@@ -78,37 +78,7 @@ async function main() {
     try {
         earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.PROCESS_STARTED);
         checkpoints.push(startup_checkpoints_1.STARTUP_CHECKPOINTS.PROCESS_STARTED);
-        const args = process.argv.slice(2);
-        if (args.length > 0 && args[0] === 'telemetry') {
-            const telemetryConfig = config_manager_1.TelemetryConfigManager.getInstance();
-            const action = args[1];
-            switch (action) {
-                case 'enable':
-                    telemetryConfig.enable();
-                    process.exit(0);
-                    break;
-                case 'disable':
-                    telemetryConfig.disable();
-                    process.exit(0);
-                    break;
-                case 'status':
-                    console.log(telemetryConfig.getStatus());
-                    process.exit(0);
-                    break;
-                default:
-                    console.log(`
-Usage: n8n-mcp telemetry [command]
-
-Commands:
-  enable   Enable anonymous telemetry
-  disable  Disable anonymous telemetry
-  status   Show current telemetry status
-
-Learn more: https://github.com/czlonkowski/n8n-mcp/blob/main/PRIVACY.md
-`);
-                    process.exit(args[1] ? 1 : 0);
-            }
-        }
+        (0, telemetry_cli_1.handleTelemetryCliIfPresent)(process.argv.slice(2));
         const mode = process.env.MCP_MODE || 'stdio';
         earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.TELEMETRY_INITIALIZING);
         checkpoints.push(startup_checkpoints_1.STARTUP_CHECKPOINTS.TELEMETRY_INITIALIZING);

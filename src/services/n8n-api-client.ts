@@ -22,6 +22,15 @@ import {
   SourceControlStatus,
   SourceControlPullResult,
   SourceControlPushResult,
+  DataTable,
+  DataTableColumn,
+  DataTableListParams,
+  DataTableRow,
+  DataTableRowListParams,
+  DataTableInsertRowsParams,
+  DataTableUpdateRowsParams,
+  DataTableUpsertRowParams,
+  DataTableDeleteRowsParams,
 } from '../types/n8n-api';
 import { handleN8nApiError, logN8nError } from '../utils/n8n-errors';
 import { cleanWorkflowForCreate, cleanWorkflowForUpdate } from './n8n-validation';
@@ -49,12 +58,28 @@ export class N8nApiClient {
     const { baseUrl, apiKey, timeout = 30000, maxRetries = 3 } = config;
 
     this.maxRetries = maxRetries;
-    this.baseUrl = baseUrl;
+
+    // SECURITY (GHSA-4ggg-h7ph-26qr): defense-in-depth baseUrl normalization.
+    let normalizedBase: string;
+    try {
+      const parsed = new URL(baseUrl);
+      parsed.hash = '';
+      parsed.username = '';
+      parsed.password = '';
+      normalizedBase = parsed.toString().replace(/\/$/, '');
+    } catch {
+      // Unparseable input falls through to raw; downstream axios call will
+      // fail cleanly. Preserves backward compat for tests that pass
+      // placeholder strings.
+      normalizedBase = baseUrl;
+    }
+
+    this.baseUrl = normalizedBase;
 
     // Ensure baseUrl ends with /api/v1
-    const apiUrl = baseUrl.endsWith('/api/v1')
-      ? baseUrl
-      : `${baseUrl.replace(/\/$/, '')}/api/v1`;
+    const apiUrl = normalizedBase.endsWith('/api/v1')
+      ? normalizedBase
+      : `${normalizedBase}/api/v1`;
 
     this.client = axios.create({
       baseURL: apiUrl,
@@ -68,9 +93,11 @@ export class N8nApiClient {
     // Request interceptor for logging
     this.client.interceptors.request.use(
       (config: InternalAxiosRequestConfig) => {
+        // Redact request body for credential endpoints to prevent secret leakage
+        const isSensitive = config.url?.includes('/credentials') && config.method !== 'get';
         logger.debug(`n8n API Request: ${config.method?.toUpperCase()} ${config.url}`, {
           params: config.params,
-          data: config.data,
+          data: isSensitive ? '[REDACTED]' : config.data,
         });
         return config;
       },
@@ -124,13 +151,7 @@ export class N8nApiClient {
    * Internal method to fetch version once
    */
   private async fetchVersionOnce(): Promise<N8nVersionInfo | null> {
-    // Check if already cached globally
-    let version = getCachedVersion(this.baseUrl);
-    if (!version) {
-      // Fetch from server
-      version = await fetchN8nVersion(this.baseUrl);
-    }
-    return version;
+    return getCachedVersion(this.baseUrl) ?? await fetchN8nVersion(this.baseUrl);
   }
 
   /**
@@ -252,6 +273,14 @@ export class N8nApiClient {
     }
   }
 
+  async transferWorkflow(id: string, destinationProjectId: string): Promise<void> {
+    try {
+      await this.client.put(`/workflows/${id}/transfer`, { destinationProjectId });
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
   async activateWorkflow(id: string): Promise<Workflow> {
     try {
       const response = await this.client.post(`/workflows/${id}/activate`, {});
@@ -290,6 +319,40 @@ export class N8nApiClient {
     } catch (error) {
       throw handleN8nApiError(error);
     }
+  }
+
+  // Audit
+  async generateAudit(options?: { categories?: string[]; daysAbandonedWorkflow?: number }): Promise<any> {
+    try {
+      const additionalOptions: Record<string, unknown> = {};
+      if (options?.categories) additionalOptions.categories = options.categories;
+      if (options?.daysAbandonedWorkflow !== undefined) additionalOptions.daysAbandonedWorkflow = options.daysAbandonedWorkflow;
+
+      const body = Object.keys(additionalOptions).length > 0 ? { additionalOptions } : {};
+      const response = await this.client.post('/audit', body);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  // Fetch all workflows with pagination (for audit scanning)
+  async listAllWorkflows(): Promise<Workflow[]> {
+    const allWorkflows: Workflow[] = [];
+    let cursor: string | undefined;
+    const seenCursors = new Set<string>();
+    const PAGE_SIZE = 100;
+    const MAX_PAGES = 50; // Safety limit: 5000 workflows max
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const params: WorkflowListParams = { limit: PAGE_SIZE, cursor };
+      const response = await this.listWorkflows(params);
+      allWorkflows.push(...response.data);
+      if (!response.nextCursor || seenCursors.has(response.nextCursor)) break;
+      seenCursors.add(response.nextCursor);
+      cursor = response.nextCursor;
+    }
+    return allWorkflows;
   }
 
   // Execution Management
@@ -444,6 +507,15 @@ export class N8nApiClient {
     }
   }
 
+  async getCredentialSchema(typeName: string): Promise<any> {
+    try {
+      const response = await this.client.get(`/credentials/schema/${typeName}`);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
   // Tag Management
   /**
    * Lists tags from n8n instance.
@@ -572,6 +644,114 @@ export class N8nApiClient {
     } catch (error) {
       throw handleN8nApiError(error);
     }
+  }
+
+  async createDataTable(params: { name: string; columns?: DataTableColumn[]; projectId?: string }): Promise<DataTable> {
+    try {
+      const response = await this.client.post('/data-tables', params);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async listDataTables(params: DataTableListParams = {}): Promise<{ data: DataTable[]; nextCursor?: string | null }> {
+    try {
+      const response = await this.client.get('/data-tables', { params });
+      return this.validateListResponse<DataTable>(response.data, 'data-tables');
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async getDataTable(id: string): Promise<DataTable> {
+    try {
+      const response = await this.client.get(`/data-tables/${id}`);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async updateDataTable(id: string, params: { name: string }): Promise<DataTable> {
+    try {
+      const response = await this.client.patch(`/data-tables/${id}`, params);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async deleteDataTable(id: string): Promise<void> {
+    try {
+      await this.client.delete(`/data-tables/${id}`);
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async getDataTableRows(id: string, params: DataTableRowListParams = {}): Promise<{ data: DataTableRow[]; nextCursor?: string | null }> {
+    try {
+      const response = await this.client.get(`/data-tables/${id}/rows`, {
+        params,
+        paramsSerializer: (p) => this.serializeDataTableParams(p),
+      });
+      return this.validateListResponse<DataTableRow>(response.data, 'data-table-rows');
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async insertDataTableRows(id: string, params: DataTableInsertRowsParams): Promise<any> {
+    try {
+      const response = await this.client.post(`/data-tables/${id}/rows`, params);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async updateDataTableRows(id: string, params: DataTableUpdateRowsParams): Promise<any> {
+    try {
+      const response = await this.client.patch(`/data-tables/${id}/rows/update`, params);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async upsertDataTableRow(id: string, params: DataTableUpsertRowParams): Promise<any> {
+    try {
+      const response = await this.client.post(`/data-tables/${id}/rows/upsert`, params);
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async deleteDataTableRows(id: string, params: DataTableDeleteRowsParams): Promise<any> {
+    try {
+      const response = await this.client.delete(`/data-tables/${id}/rows/delete`, {
+        params,
+        paramsSerializer: (p) => this.serializeDataTableParams(p),
+      });
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  /**
+   * Serializes data table query params with explicit encodeURIComponent.
+   * Axios's default serializer doesn't encode some reserved chars that n8n rejects.
+   */
+  private serializeDataTableParams(params: Record<string, any>): string {
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null) continue;
+      parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+    }
+    return parts.join('&');
   }
 
   /**

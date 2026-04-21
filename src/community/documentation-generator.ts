@@ -77,6 +77,8 @@ const DEFAULT_CONFIG: Required<Omit<DocumentationGeneratorConfig, 'baseUrl' | 't
  */
 export class DocumentationGenerator {
   private client: OpenAI;
+  private baseUrl: string;
+  private apiKey: string;
   private model: string;
   private maxTokens: number;
   private timeout: number;
@@ -85,6 +87,8 @@ export class DocumentationGenerator {
   constructor(config: DocumentationGeneratorConfig) {
     const fullConfig = { ...DEFAULT_CONFIG, ...config };
 
+    this.baseUrl = config.baseUrl;
+    this.apiKey = fullConfig.apiKey;
     this.client = new OpenAI({
       baseURL: config.baseUrl,
       apiKey: fullConfig.apiKey,
@@ -103,21 +107,10 @@ export class DocumentationGenerator {
     try {
       const prompt = this.buildPrompt(input);
 
-      const completion = await this.client.chat.completions.create({
-        model: this.model,
-        max_completion_tokens: this.maxTokens,
-        ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
-        messages: [
-          {
-            role: 'system',
-            content: this.getSystemPrompt(),
-          },
-          {
-            role: 'user',
-            content: prompt,
-          },
-        ],
-      });
+      const completion = await this.chatCompletion([
+        { role: 'system', content: this.getSystemPrompt() },
+        { role: 'user', content: prompt },
+      ], this.maxTokens);
 
       const content = completion.choices[0]?.message?.content;
       if (!content) {
@@ -246,20 +239,23 @@ Guidelines:
    * Extract JSON from LLM response (handles markdown code blocks)
    */
   private extractJson(content: string): string {
+    // Strip <think>...</think> blocks from thinking models (e.g., Qwen3-Thinking)
+    const stripped = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
     // Try to extract from markdown code block
-    const jsonBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const jsonBlockMatch = stripped.match(/```(?:json)?\s*([\s\S]*?)```/);
     if (jsonBlockMatch) {
       return jsonBlockMatch[1].trim();
     }
 
     // Try to find JSON object directly
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    const jsonMatch = stripped.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       return jsonMatch[0];
     }
 
     // Return as-is if no extraction needed
-    return content.trim();
+    return stripped;
   }
 
   /**
@@ -323,16 +319,9 @@ Guidelines:
    */
   async testConnection(): Promise<{ success: boolean; message: string }> {
     try {
-      const completion = await this.client.chat.completions.create({
-        model: this.model,
-        max_completion_tokens: 200,
-        messages: [
-          {
-            role: 'user',
-            content: 'Hello',
-          },
-        ],
-      });
+      const completion = await this.chatCompletion([
+        { role: 'user', content: 'Hello' },
+      ], 200);
 
       if (completion.choices[0]?.message?.content) {
         return { success: true, message: `Connected to ${this.model}` };
@@ -342,6 +331,44 @@ Guidelines:
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
       return { success: false, message: `Connection failed: ${message}` };
+    }
+  }
+
+  /**
+   * Make a chat completion request with chat_template_kwargs support for vLLM thinking models
+   */
+  private async chatCompletion(
+    messages: Array<{ role: string; content: string }>,
+    maxTokens: number
+  ): Promise<{ choices: Array<{ message: { content: string | null } }> }> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(this.apiKey !== 'not-needed' ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages,
+          max_completion_tokens: maxTokens,
+          ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
+          chat_template_kwargs: { enable_thinking: false },
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`${response.status} ${text}`);
+      }
+
+      return (await response.json()) as { choices: Array<{ message: { content: string | null } }> };
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -358,8 +385,21 @@ export function createDocumentationGenerator(): DocumentationGenerator {
   const model = process.env.N8N_MCP_LLM_MODEL || 'qwen3-4b-thinking-2507';
   const timeout = parseInt(process.env.N8N_MCP_LLM_TIMEOUT || '60000', 10);
   const apiKey = process.env.N8N_MCP_LLM_API_KEY || process.env.OPENAI_API_KEY;
-  // Only set temperature for local LLM servers; cloud APIs like OpenAI may not support custom values
-  const isLocalServer = !baseUrl.includes('openai.com') && !baseUrl.includes('anthropic.com');
+  // Only set temperature for local LLM servers; cloud APIs like OpenAI may
+  // not support custom values. Parse the URL and check the hostname suffix
+  // instead of `baseUrl.includes('openai.com')` so an arbitrary URL like
+  // `http://example.com/openai.com/...` isn't misclassified as a cloud API.
+  // Addresses CodeQL js/incomplete-url-substring-sanitization.
+  let isLocalServer = true;
+  try {
+    const host = new URL(baseUrl).hostname;
+    const isCloud =
+      host === 'openai.com' || host.endsWith('.openai.com') ||
+      host === 'anthropic.com' || host.endsWith('.anthropic.com');
+    isLocalServer = !isCloud;
+  } catch {
+    // Malformed URL — fall through with the default (treat as local).
+  }
 
   return new DocumentationGenerator({
     baseUrl,

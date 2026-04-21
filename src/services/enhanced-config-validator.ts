@@ -425,17 +425,28 @@ export class EnhancedConfigValidator extends ConfigValidator {
     }
 
     // 2. Suggest responseFormat for API endpoints
-    const lowerUrl = url.toLowerCase();
+    // Parse the host once; fall back to path-only heuristics if parsing fails.
+    // CodeQL js/incomplete-url-substring-sanitization: checking
+    // `url.includes('googleapis.com')` would match `http://evil/googleapis.com`,
+    // so we check the hostname suffix instead.
+    let host = '';
+    try {
+      host = new URL(url).hostname.toLowerCase();
+    } catch {
+      // Malformed URL — leave host empty, only path heuristics will apply.
+    }
+    const hostMatches = (suffix: string) =>
+      host === suffix || host.endsWith('.' + suffix);
     const isApiEndpoint =
       // Subdomain patterns (api.example.com)
       /^https?:\/\/api\./i.test(url) ||
       // Path patterns with word boundaries to prevent false positives like "therapist", "restaurant"
       /\/api[\/\?]|\/api$/i.test(url) ||
       /\/rest[\/\?]|\/rest$/i.test(url) ||
-      // Known API service domains
-      lowerUrl.includes('supabase.co') ||
-      lowerUrl.includes('firebase') ||
-      lowerUrl.includes('googleapis.com') ||
+      // Known API service domains (strict hostname match)
+      hostMatches('supabase.co') ||
+      host.includes('firebase') ||  // firebase has many variants (firebaseio.com, firebase.google.com, etc.)
+      hostMatches('googleapis.com') ||
       // Versioned API paths (e.g., example.com/v1, example.com/v2)
       /\.com\/v\d+/i.test(url);
 
@@ -1209,30 +1220,30 @@ export class EnhancedConfigValidator extends ConfigValidator {
         'empty', 'notEmpty', 'equals', 'notEquals',
         'contains', 'notContains', 'startsWith', 'notStartsWith',
         'endsWith', 'notEndsWith', 'regex', 'notRegex',
-        'exists', 'notExists', 'isNotEmpty' // exists checks field presence, isNotEmpty alias for notEmpty
+        'exists', 'notExists'
       ],
       number: [
         'empty', 'notEmpty', 'equals', 'notEquals', 'gt', 'lt', 'gte', 'lte',
-        'exists', 'notExists', 'isNotEmpty'
+        'exists', 'notExists'
       ],
       dateTime: [
         'empty', 'notEmpty', 'equals', 'notEquals', 'after', 'before', 'afterOrEquals', 'beforeOrEquals',
-        'exists', 'notExists', 'isNotEmpty'
+        'exists', 'notExists'
       ],
       boolean: [
         'empty', 'notEmpty', 'true', 'false', 'equals', 'notEquals',
-        'exists', 'notExists', 'isNotEmpty'
+        'exists', 'notExists'
       ],
       array: [
         'contains', 'notContains', 'lengthEquals', 'lengthNotEquals',
         'lengthGt', 'lengthLt', 'lengthGte', 'lengthLte', 'empty', 'notEmpty',
-        'exists', 'notExists', 'isNotEmpty'
+        'exists', 'notExists'
       ],
       object: [
         'empty', 'notEmpty',
-        'exists', 'notExists', 'isNotEmpty'
+        'exists', 'notExists'
       ],
-      any: ['exists', 'notExists', 'isNotEmpty']
+      any: ['exists', 'notExists']
     };
 
     for (let i = 0; i < conditions.length; i++) {

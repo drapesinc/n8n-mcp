@@ -21,6 +21,13 @@ export {
 export type {
   SessionState
 } from './types/session-state';
+export type {
+  GenerateWorkflowArgs,
+  GenerateWorkflowResult,
+  GenerateWorkflowProposal,
+  GenerateWorkflowHandler,
+  GenerateWorkflowHelpers
+} from './types/generate-workflow';
 
 // UI module exports
 export type { UIAppConfig, UIMetadata } from './mcp/ui/types';

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { InstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
+import { GenerateWorkflowHandler } from './types/generate-workflow';
 export interface EngineHealth {
     status: 'healthy' | 'unhealthy';
     uptime: number;
@@ -15,6 +16,7 @@ export interface EngineHealth {
 export interface EngineOptions {
     sessionTimeout?: number;
     logLevel?: 'error' | 'warn' | 'info' | 'debug';
+    generateWorkflowHandler?: GenerateWorkflowHandler;
 }
 export declare class N8NMCPEngine {
     private server;

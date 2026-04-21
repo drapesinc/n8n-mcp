@@ -5,7 +5,9 @@ const http_server_single_session_1 = require("./http-server-single-session");
 const logger_1 = require("./utils/logger");
 class N8NMCPEngine {
     constructor(options = {}) {
-        this.server = new http_server_single_session_1.SingleSessionHTTPServer();
+        this.server = new http_server_single_session_1.SingleSessionHTTPServer({
+            generateWorkflowHandler: options.generateWorkflowHandler,
+        });
         this.startTime = new Date();
         if (options.logLevel) {
             process.env.LOG_LEVEL = options.logLevel;

@@ -25,6 +25,8 @@ const DEFAULT_CONFIG = {
 class DocumentationGenerator {
     constructor(config) {
         const fullConfig = { ...DEFAULT_CONFIG, ...config };
+        this.baseUrl = config.baseUrl;
+        this.apiKey = fullConfig.apiKey;
         this.client = new openai_1.default({
             baseURL: config.baseUrl,
             apiKey: fullConfig.apiKey,
@@ -33,25 +35,15 @@ class DocumentationGenerator {
         this.model = fullConfig.model;
         this.maxTokens = fullConfig.maxTokens;
         this.timeout = fullConfig.timeout;
+        this.temperature = fullConfig.temperature;
     }
     async generateSummary(input) {
         try {
             const prompt = this.buildPrompt(input);
-            const completion = await this.client.chat.completions.create({
-                model: this.model,
-                max_tokens: this.maxTokens,
-                temperature: 0.3,
-                messages: [
-                    {
-                        role: 'system',
-                        content: this.getSystemPrompt(),
-                    },
-                    {
-                        role: 'user',
-                        content: prompt,
-                    },
-                ],
-            });
+            const completion = await this.chatCompletion([
+                { role: 'system', content: this.getSystemPrompt() },
+                { role: 'user', content: prompt },
+            ], this.maxTokens);
             const content = completion.choices[0]?.message?.content;
             if (!content) {
                 throw new Error('No content in LLM response');
@@ -134,15 +126,16 @@ Guidelines:
 - Respond with valid JSON only, no additional text`;
     }
     extractJson(content) {
-        const jsonBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
+        const stripped = content.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+        const jsonBlockMatch = stripped.match(/```(?:json)?\s*([\s\S]*?)```/);
         if (jsonBlockMatch) {
             return jsonBlockMatch[1].trim();
         }
-        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        const jsonMatch = stripped.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             return jsonMatch[0];
         }
-        return content.trim();
+        return stripped;
     }
     truncateArrayFields(parsed) {
         const limits = {
@@ -182,16 +175,9 @@ Guidelines:
     }
     async testConnection() {
         try {
-            const completion = await this.client.chat.completions.create({
-                model: this.model,
-                max_tokens: 10,
-                messages: [
-                    {
-                        role: 'user',
-                        content: 'Hello',
-                    },
-                ],
-            });
+            const completion = await this.chatCompletion([
+                { role: 'user', content: 'Hello' },
+            ], 200);
             if (completion.choices[0]?.message?.content) {
                 return { success: true, message: `Connected to ${this.model}` };
             }
@@ -200,6 +186,35 @@ Guidelines:
         catch (error) {
             const message = error instanceof Error ? error.message : 'Unknown error';
             return { success: false, message: `Connection failed: ${message}` };
+        }
+    }
+    async chatCompletion(messages, maxTokens) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+        try {
+            const response = await fetch(`${this.baseUrl}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...(this.apiKey !== 'not-needed' ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+                },
+                body: JSON.stringify({
+                    model: this.model,
+                    messages,
+                    max_completion_tokens: maxTokens,
+                    ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
+                    chat_template_kwargs: { enable_thinking: false },
+                }),
+                signal: controller.signal,
+            });
+            if (!response.ok) {
+                const text = await response.text();
+                throw new Error(`${response.status} ${text}`);
+            }
+            return (await response.json());
+        }
+        finally {
+            clearTimeout(timeoutId);
         }
     }
     sleep(ms) {
@@ -211,10 +226,22 @@ function createDocumentationGenerator() {
     const baseUrl = process.env.N8N_MCP_LLM_BASE_URL || 'http://localhost:1234/v1';
     const model = process.env.N8N_MCP_LLM_MODEL || 'qwen3-4b-thinking-2507';
     const timeout = parseInt(process.env.N8N_MCP_LLM_TIMEOUT || '60000', 10);
+    const apiKey = process.env.N8N_MCP_LLM_API_KEY || process.env.OPENAI_API_KEY;
+    let isLocalServer = true;
+    try {
+        const host = new URL(baseUrl).hostname;
+        const isCloud = host === 'openai.com' || host.endsWith('.openai.com') ||
+            host === 'anthropic.com' || host.endsWith('.anthropic.com');
+        isLocalServer = !isCloud;
+    }
+    catch {
+    }
     return new DocumentationGenerator({
         baseUrl,
         model,
         timeout,
+        ...(apiKey ? { apiKey } : {}),
+        ...(isLocalServer ? { temperature: 0.3 } : {}),
     });
 }
 //# sourceMappingURL=documentation-generator.js.map

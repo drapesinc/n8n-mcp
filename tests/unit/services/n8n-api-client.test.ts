@@ -297,7 +297,7 @@ describe('N8nApiClient', () => {
         expect.fail('Should have thrown an error');
       } catch (err) {
         expect(err).toBeInstanceOf(N8nNotFoundError);
-        expect((err as N8nNotFoundError).message).toContain('not found');
+        expect((err as N8nNotFoundError).message.toLowerCase()).toContain('not found');
         expect((err as N8nNotFoundError).statusCode).toBe(404);
       }
     });
@@ -380,7 +380,7 @@ describe('N8nApiClient', () => {
         expect.fail('Should have thrown an error');
       } catch (err) {
         expect(err).toBeInstanceOf(N8nNotFoundError);
-        expect((err as N8nNotFoundError).message).toContain('not found');
+        expect((err as N8nNotFoundError).message.toLowerCase()).toContain('not found');
         expect((err as N8nNotFoundError).statusCode).toBe(404);
       }
     });
@@ -432,7 +432,7 @@ describe('N8nApiClient', () => {
         expect.fail('Should have thrown an error');
       } catch (err) {
         expect(err).toBeInstanceOf(N8nNotFoundError);
-        expect((err as N8nNotFoundError).message).toContain('not found');
+        expect((err as N8nNotFoundError).message.toLowerCase()).toContain('not found');
         expect((err as N8nNotFoundError).statusCode).toBe(404);
       }
     });
@@ -501,7 +501,7 @@ describe('N8nApiClient', () => {
         expect.fail('Should have thrown an error');
       } catch (err) {
         expect(err).toBeInstanceOf(N8nNotFoundError);
-        expect((err as N8nNotFoundError).message).toContain('not found');
+        expect((err as N8nNotFoundError).message.toLowerCase()).toContain('not found');
         expect((err as N8nNotFoundError).statusCode).toBe(404);
       }
     });
@@ -1250,6 +1250,413 @@ describe('N8nApiClient', () => {
     });
   });
 
+  describe('transferWorkflow', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should transfer workflow successfully via PUT', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: undefined });
+
+      await client.transferWorkflow('123', 'project-456');
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith(
+        '/workflows/123/transfer',
+        { destinationProjectId: 'project-456' }
+      );
+    });
+
+    it('should throw N8nNotFoundError on 404', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 404, data: { message: 'Workflow not found' } }
+      };
+      await mockAxiosInstance.simulateError('put', error);
+
+      try {
+        await client.transferWorkflow('123', 'project-456');
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nNotFoundError);
+        expect((err as N8nNotFoundError).message.toLowerCase()).toContain('not found');
+        expect((err as N8nNotFoundError).statusCode).toBe(404);
+      }
+    });
+
+    it('should throw appropriate error on 403 forbidden', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 403, data: { message: 'Forbidden' } }
+      };
+      await mockAxiosInstance.simulateError('put', error);
+
+      try {
+        await client.transferWorkflow('123', 'project-456');
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nApiError);
+        expect((err as N8nApiError).statusCode).toBe(403);
+      }
+    });
+  });
+
+  describe('createDataTable', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should create data table with name and columns', async () => {
+      const params = {
+        name: 'My Table',
+        columns: [
+          { name: 'email', type: 'string' as const },
+          { name: 'count', type: 'number' as const },
+        ],
+      };
+      const createdTable = { id: 'dt-1', name: 'My Table', columns: [] };
+
+      mockAxiosInstance.post.mockResolvedValue({ data: createdTable });
+
+      const result = await client.createDataTable(params);
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/data-tables', params);
+      expect(result).toEqual(createdTable);
+    });
+
+    it('should create data table without columns', async () => {
+      const params = { name: 'Empty Table' };
+      const createdTable = { id: 'dt-2', name: 'Empty Table' };
+
+      mockAxiosInstance.post.mockResolvedValue({ data: createdTable });
+
+      const result = await client.createDataTable(params);
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/data-tables', params);
+      expect(result).toEqual(createdTable);
+    });
+
+    it('should handle 400 error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 400, data: { message: 'Invalid table name' } },
+      };
+      await mockAxiosInstance.simulateError('post', error);
+
+      try {
+        await client.createDataTable({ name: '' });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nValidationError);
+        expect((err as N8nValidationError).message).toBe('Invalid table name');
+        expect((err as N8nValidationError).statusCode).toBe(400);
+      }
+    });
+  });
+
+  describe('listDataTables', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should list data tables successfully', async () => {
+      const response = { data: [{ id: 'dt-1', name: 'Table One' }], nextCursor: 'abc' };
+      mockAxiosInstance.get.mockResolvedValue({ data: response });
+
+      const result = await client.listDataTables({ limit: 10, cursor: 'xyz' });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/data-tables', { params: { limit: 10, cursor: 'xyz' } });
+      expect(result).toEqual(response);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 500, data: { message: 'Internal server error' } },
+      };
+      await mockAxiosInstance.simulateError('get', error);
+
+      try {
+        await client.listDataTables();
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nServerError);
+        expect((err as N8nServerError).statusCode).toBe(500);
+      }
+    });
+  });
+
+  describe('getDataTable', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should get data table successfully', async () => {
+      const table = { id: 'dt-1', name: 'My Table', columns: [] };
+      mockAxiosInstance.get.mockResolvedValue({ data: table });
+
+      const result = await client.getDataTable('dt-1');
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/data-tables/dt-1');
+      expect(result).toEqual(table);
+    });
+
+    it('should handle 404 error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 404, data: { message: 'Data table not found' } },
+      };
+      await mockAxiosInstance.simulateError('get', error);
+
+      try {
+        await client.getDataTable('dt-nonexistent');
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nNotFoundError);
+        expect((err as N8nNotFoundError).statusCode).toBe(404);
+      }
+    });
+  });
+
+  describe('updateDataTable', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should update data table successfully', async () => {
+      const updated = { id: 'dt-1', name: 'Renamed' };
+      mockAxiosInstance.patch.mockResolvedValue({ data: updated });
+
+      const result = await client.updateDataTable('dt-1', { name: 'Renamed' });
+
+      expect(mockAxiosInstance.patch).toHaveBeenCalledWith('/data-tables/dt-1', { name: 'Renamed' });
+      expect(result).toEqual(updated);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 400, data: { message: 'Invalid name' } },
+      };
+      await mockAxiosInstance.simulateError('patch', error);
+
+      try {
+        await client.updateDataTable('dt-1', { name: '' });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nValidationError);
+        expect((err as N8nValidationError).statusCode).toBe(400);
+      }
+    });
+  });
+
+  describe('deleteDataTable', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should delete data table successfully', async () => {
+      mockAxiosInstance.delete.mockResolvedValue({ data: {} });
+
+      await client.deleteDataTable('dt-1');
+
+      expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/data-tables/dt-1');
+    });
+
+    it('should handle 404 error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 404, data: { message: 'Data table not found' } },
+      };
+      await mockAxiosInstance.simulateError('delete', error);
+
+      try {
+        await client.deleteDataTable('dt-nonexistent');
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nNotFoundError);
+        expect((err as N8nNotFoundError).statusCode).toBe(404);
+      }
+    });
+  });
+
+  describe('getDataTableRows', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should get data table rows with params', async () => {
+      const response = { data: [{ id: 1, email: 'a@b.com' }], nextCursor: null };
+      mockAxiosInstance.get.mockResolvedValue({ data: response });
+
+      const params = { limit: 50, sortBy: 'email:asc', search: 'john' };
+      const result = await client.getDataTableRows('dt-1', params);
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/data-tables/dt-1/rows', expect.objectContaining({ params }));
+      expect(result).toEqual(response);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 500, data: { message: 'Internal server error' } },
+      };
+      await mockAxiosInstance.simulateError('get', error);
+
+      try {
+        await client.getDataTableRows('dt-1');
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nServerError);
+        expect((err as N8nServerError).statusCode).toBe(500);
+      }
+    });
+  });
+
+  describe('insertDataTableRows', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should insert data table rows successfully', async () => {
+      const insertResult = { insertedCount: 2 };
+      mockAxiosInstance.post.mockResolvedValue({ data: insertResult });
+
+      const params = { data: [{ email: 'a@b.com' }, { email: 'c@d.com' }], returnType: 'count' as const };
+      const result = await client.insertDataTableRows('dt-1', params);
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/data-tables/dt-1/rows', params);
+      expect(result).toEqual(insertResult);
+    });
+
+    it('should handle 400 error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 400, data: { message: 'Invalid row data' } },
+      };
+      await mockAxiosInstance.simulateError('post', error);
+
+      try {
+        await client.insertDataTableRows('dt-1', { data: [{}] });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nValidationError);
+        expect((err as N8nValidationError).message).toBe('Invalid row data');
+        expect((err as N8nValidationError).statusCode).toBe(400);
+      }
+    });
+  });
+
+  describe('updateDataTableRows', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should update data table rows successfully', async () => {
+      const updateResult = { updatedCount: 3 };
+      mockAxiosInstance.patch.mockResolvedValue({ data: updateResult });
+
+      const params = {
+        filter: { type: 'and' as const, filters: [{ columnName: 'status', condition: 'eq' as const, value: 'old' }] },
+        data: { status: 'new' },
+      };
+      const result = await client.updateDataTableRows('dt-1', params);
+
+      expect(mockAxiosInstance.patch).toHaveBeenCalledWith('/data-tables/dt-1/rows/update', params);
+      expect(result).toEqual(updateResult);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 500, data: { message: 'Internal server error' } },
+      };
+      await mockAxiosInstance.simulateError('patch', error);
+
+      try {
+        await client.updateDataTableRows('dt-1', {
+          filter: { type: 'and', filters: [{ columnName: 'id', condition: 'eq', value: 1 }] },
+          data: { name: 'test' },
+        });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nServerError);
+        expect((err as N8nServerError).statusCode).toBe(500);
+      }
+    });
+  });
+
+  describe('upsertDataTableRow', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should upsert data table row successfully', async () => {
+      const upsertResult = { action: 'updated', row: { id: 1, email: 'a@b.com' } };
+      mockAxiosInstance.post.mockResolvedValue({ data: upsertResult });
+
+      const params = {
+        filter: { type: 'and' as const, filters: [{ columnName: 'email', condition: 'eq' as const, value: 'a@b.com' }] },
+        data: { score: 15 },
+      };
+      const result = await client.upsertDataTableRow('dt-1', params);
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/data-tables/dt-1/rows/upsert', params);
+      expect(result).toEqual(upsertResult);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 400, data: { message: 'Invalid upsert params' } },
+      };
+      await mockAxiosInstance.simulateError('post', error);
+
+      try {
+        await client.upsertDataTableRow('dt-1', {
+          filter: { type: 'and', filters: [{ columnName: 'id', condition: 'eq', value: 1 }] },
+          data: { name: 'test' },
+        });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nValidationError);
+        expect((err as N8nValidationError).statusCode).toBe(400);
+      }
+    });
+  });
+
+  describe('deleteDataTableRows', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should delete data table rows successfully', async () => {
+      const deleteResult = { deletedCount: 2 };
+      mockAxiosInstance.delete.mockResolvedValue({ data: deleteResult });
+
+      const params = { filter: '{"type":"and","filters":[]}', dryRun: false };
+      const result = await client.deleteDataTableRows('dt-1', params);
+
+      expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/data-tables/dt-1/rows/delete', expect.objectContaining({ params }));
+      expect(result).toEqual(deleteResult);
+    });
+
+    it('should handle error', async () => {
+      const error = {
+        message: 'Request failed',
+        response: { status: 500, data: { message: 'Internal server error' } },
+      };
+      await mockAxiosInstance.simulateError('delete', error);
+
+      try {
+        await client.deleteDataTableRows('dt-1', { filter: '{}' });
+        expect.fail('Should have thrown an error');
+      } catch (err) {
+        expect(err).toBeInstanceOf(N8nServerError);
+        expect((err as N8nServerError).statusCode).toBe(500);
+      }
+    });
+  });
+
   describe('interceptors', () => {
     let requestInterceptor: any;
     let responseInterceptor: any;
@@ -1315,6 +1722,70 @@ describe('N8nApiClient', () => {
       const result = await responseErrorInterceptor(error).catch((e: any) => e);
       expect(result).toBeInstanceOf(N8nValidationError);
       expect(result.message).toBe('Bad request');
+    });
+  });
+
+  // GHSA-4ggg-h7ph-26qr — defense-in-depth URL normalization in the constructor.
+  describe('constructor URL normalization', () => {
+    const getLastAxiosBaseURL = (): string => {
+      const calls = vi.mocked(axios.create).mock.calls;
+      return (calls[calls.length - 1][0] as any).baseURL;
+    };
+
+    it('should strip a trailing fragment', () => {
+      const c = new N8nApiClient({
+        baseUrl: 'http://169.254.169.254#',
+        apiKey: 'k'
+      });
+      expect((c as any).baseUrl).toBe('http://169.254.169.254');
+      const baseURL = getLastAxiosBaseURL();
+      expect(baseURL).not.toContain('#');
+      expect(baseURL).toBe('http://169.254.169.254/api/v1');
+    });
+
+    it('should strip a fragment with content after the hash', () => {
+      const c = new N8nApiClient({
+        baseUrl: 'https://n8n.example.com#trailing',
+        apiKey: 'k'
+      });
+      expect((c as any).baseUrl).not.toContain('#');
+      expect(getLastAxiosBaseURL()).not.toContain('#');
+    });
+
+    it('should strip userinfo from baseUrl', () => {
+      const c = new N8nApiClient({
+        baseUrl: 'https://user:pw@n8n.example.com',
+        apiKey: 'k'
+      });
+      expect((c as any).baseUrl).not.toContain('@');
+      expect((c as any).baseUrl).not.toContain('user');
+      expect((c as any).baseUrl).not.toContain('pw');
+      expect(getLastAxiosBaseURL()).not.toContain('@');
+    });
+
+    it('should collapse trailing slash', () => {
+      const c = new N8nApiClient({
+        baseUrl: 'https://n8n.example.com/',
+        apiKey: 'k'
+      });
+      expect((c as any).baseUrl).toBe('https://n8n.example.com');
+      expect(getLastAxiosBaseURL()).toBe('https://n8n.example.com/api/v1');
+    });
+
+    it('should be idempotent when baseUrl already ends with /api/v1', () => {
+      const c = new N8nApiClient({
+        baseUrl: 'https://n8n.example.com/api/v1',
+        apiKey: 'k'
+      });
+      expect(getLastAxiosBaseURL()).toBe('https://n8n.example.com/api/v1');
+      // Must not double-suffix to /api/v1/api/v1
+      expect(getLastAxiosBaseURL()).not.toContain('/api/v1/api/v1');
+    });
+
+    it('should fall through to raw input for unparseable URLs without throwing', () => {
+      expect(() => {
+        new N8nApiClient({ baseUrl: 'not-a-url', apiKey: 'k' });
+      }).not.toThrow();
     });
   });
 });

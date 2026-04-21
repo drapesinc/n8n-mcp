@@ -17,7 +17,8 @@ import {
   AddTagOperation,
   RemoveTagOperation,
   CleanStaleConnectionsOperation,
-  ReplaceConnectionsOperation
+  ReplaceConnectionsOperation,
+  TransferWorkflowOperation
 } from '@/types/workflow-diff';
 import { Workflow } from '@/types/n8n-api';
 
@@ -426,6 +427,688 @@ describe('WorkflowDiffEngine', () => {
       expect(result.errors![0].message).toContain('Missing required parameter \'updates\'');
       expect(result.errors![0].message).toContain('Correct structure:');
     });
+
+    it('should reject prototype pollution via update path', async () => {
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeId: 'http-1',
+          updates: {
+            '__proto__.polluted': 'malicious'
+          }
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('forbidden key');
+    });
+
+    it('should apply __patch_find_replace to string properties (#642)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;\nreturn x + 2;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                { find: 'x + 2', replace: 'x + 3' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const x = 1;\nreturn x + 3;');
+    });
+
+    it('should apply multiple sequential __patch_find_replace patches', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const a = 1;\nconst b = 2;\nreturn a + b;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                { find: 'const a = 1', replace: 'const a = 10' },
+                { find: 'const b = 2', replace: 'const b = 20' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const a = 10;\nconst b = 20;\nreturn a + b;');
+    });
+
+    it('should reject __patch_find_replace on non-string properties', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { retryCount: 3 }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.retryCount': {
+              __patch_find_replace: [
+                { find: '3', replace: '5' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('__patch_find_replace');
+    });
+
+    it('should reject __patch_find_replace with invalid format', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: 'not an array'
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('must be an array');
+    });
+
+    it('should warn when __patch_find_replace find string not found', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'updateNode' as const,
+          nodeName: 'Code',
+          updates: {
+            'parameters.jsCode': {
+              __patch_find_replace: [
+                { find: 'nonexistent text', replace: 'something' }
+              ]
+            }
+          }
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.warnings).toBeDefined();
+      expect(result.warnings!.some(w => w.message.includes('not found'))).toBe(true);
+    });
+  });
+
+  describe('PatchNodeField Operation', () => {
+    it('should apply single find/replace patch', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;\nreturn x + 2;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'x + 2', replace: 'x + 3' }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const x = 1;\nreturn x + 3;');
+    });
+
+    it('should error when find string not found', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'nonexistent text', replace: 'something' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('not found');
+    });
+
+    it('should error on ambiguous match (multiple occurrences)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const a = 1;\nconst b = 1;\nconst c = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'const', replace: 'let' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('3 times');
+      expect(result.errors?.[0]?.message).toContain('replaceAll');
+    });
+
+    it('should replace all occurrences with replaceAll flag', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const a = 1;\nconst b = 2;\nconst c = 3;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'const', replace: 'let', replaceAll: true }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('let a = 1;\nlet b = 2;\nlet c = 3;');
+    });
+
+    it('should apply multiple sequential patches', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const a = 1;\nconst b = 2;\nreturn a + b;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [
+            { find: 'const a = 1', replace: 'const a = 10' },
+            { find: 'const b = 2', replace: 'const b = 20' }
+          ]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const a = 10;\nconst b = 20;\nreturn a + b;');
+    });
+
+    it('should support regex pattern matching', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const limit = 42;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'const limit = \\d+', replace: 'const limit = 100', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('const limit = 100;');
+    });
+
+    it('should support regex with replaceAll', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'item1 = 10;\nitem2 = 20;\nitem3 = 30;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'item\\d+', replace: 'val', regex: true, replaceAll: true }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.name === 'Code');
+      expect(codeNode?.parameters.jsCode).toBe('val = 10;\nval = 20;\nval = 30;');
+    });
+
+    it('should error on ambiguous regex match without replaceAll', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'item1 = 10;\nitem2 = 20;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'item\\d+', replace: 'val', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('2 times');
+    });
+
+    it('should reject invalid regex pattern in validation', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: '(unclosed', replace: 'x', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('Invalid regex');
+    });
+
+    it('should error on non-existent field', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.nonExistent',
+          patches: [{ find: 'x', replace: 'y' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('does not exist');
+    });
+
+    it('should error on non-string field', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { retryCount: 3 }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.retryCount',
+          patches: [{ find: '3', replace: '5' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('expected string');
+    });
+
+    it('should error on missing node', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'NonExistent',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'x', replace: 'y' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('not found');
+    });
+
+    it('should reject empty patches array', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: []
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('non-empty');
+    });
+
+    it('should reject empty find string', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: '', replace: 'y' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('must not be empty');
+    });
+
+    it('should work with nested fieldPath using dot notation', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'set-1',
+        name: 'Set',
+        type: 'n8n-nodes-base.set',
+        typeVersion: 3,
+        position: [900, 300],
+        parameters: {
+          options: {
+            template: '<p>Hello World</p>'
+          }
+        }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Set',
+          fieldPath: 'parameters.options.template',
+          patches: [{ find: 'Hello World', replace: 'Goodbye World' }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const setNode = result.workflow.nodes.find((n: any) => n.name === 'Set');
+      expect(setNode?.parameters.options.template).toBe('<p>Goodbye World</p>');
+    });
+
+    it('should reject prototype pollution via fieldPath', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: '__proto__.polluted',
+          patches: [{ find: 'x', replace: 'y' }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('forbidden key');
+    });
+
+    it('should reject unsafe regex patterns (ReDoS)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: '(a+)+$', replace: 'safe', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('unsafe regex');
+    });
+
+    it('should reject too many patches', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const patches = Array.from({ length: 51 }, (_, i) => ({
+        find: `pattern${i}`,
+        replace: `replacement${i}`
+      }));
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('too many patches');
+    });
+
+    it('should reject overly long regex patterns', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeName: 'Code',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'a'.repeat(501), replace: 'b', regex: true }]
+        }]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.message).toContain('too long');
+    });
+
+    it('should work with nodeId reference', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: { jsCode: 'const x = 1;' }
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'patchNodeField' as const,
+          nodeId: 'code-1',
+          fieldPath: 'parameters.jsCode',
+          patches: [{ find: 'const x = 1', replace: 'const x = 2' }]
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      const codeNode = result.workflow.nodes.find((n: any) => n.id === 'code-1');
+      expect(codeNode?.parameters.jsCode).toBe('const x = 2;');
+    });
   });
 
   describe('MoveNode Operation', () => {
@@ -461,10 +1144,48 @@ describe('WorkflowDiffEngine', () => {
       };
 
       const result = await diffEngine.applyDiff(baseWorkflow, request);
-      
+
       expect(result.success).toBe(true);
       const movedNode = result.workflow!.nodes.find((n: any) => n.name === 'Webhook');
       expect(movedNode!.position).toEqual([100, 100]);
+    });
+
+    it('rejects newPosition typo pre-mutation with did-you-mean hint (regression #6)', async () => {
+      const op: any = { type: 'moveNode', nodeName: 'Webhook', newPosition: [450, 600] };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [op] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/newPosition/);
+      expect(result.errors![0].message).toMatch(/Did you mean 'position'/);
+      const node = baseWorkflow.nodes.find(n => n.name === 'Webhook')!;
+      expect(node.position).not.toEqual([450, 600]);
+    });
+
+    it('rejects newPosition even when position is also provided (regression #6)', async () => {
+      const op: any = { type: 'moveNode', nodeName: 'Webhook', newPosition: [1, 2], position: [3, 4] };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [op] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/newPosition/);
+    });
+
+    it('rejects missing position parameter for moveNode (regression #6)', async () => {
+      const op: any = { type: 'moveNode', nodeName: 'Webhook' };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [op] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/Missing required parameter 'position'/);
+    });
+
+    it('rejects non-array position value for moveNode (regression #6)', async () => {
+      const op: any = { type: 'moveNode', nodeName: 'Webhook', position: 'not-an-array' };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [op] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/Invalid 'position' for moveNode/);
+    });
+
+    it('rejects wrong-length position array for moveNode (regression #6)', async () => {
+      const op: any = { type: 'moveNode', nodeName: 'Webhook', position: [1, 2, 3] };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [op] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/Invalid 'position' for moveNode/);
     });
   });
 
@@ -765,6 +1486,97 @@ describe('WorkflowDiffEngine', () => {
       expect(result.errors![0].message).toContain('HTTP Request');
       expect(result.errors![0].message).toContain('Slack');
     });
+
+    it('should remap numeric targetInput to main (#659)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: {}
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'addConnection' as const,
+          source: 'Slack',
+          target: 'Code',
+          sourceOutput: 'main',
+          targetInput: '0',
+          sourceIndex: 0,
+          targetIndex: 0
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.workflow.connections['Slack']['main'][0][0].type).toBe('main');
+    });
+
+    it('should remap sourceOutput 0 with explicit sourceIndex 0 (#659)', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'code-1',
+        name: 'Code',
+        type: 'n8n-nodes-base.code',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: {}
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'addConnection' as const,
+          source: 'Slack',
+          target: 'Code',
+          sourceOutput: '0',
+          sourceIndex: 0,
+          targetIndex: 0
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.workflow.connections['Slack']['main']).toBeDefined();
+      expect(result.workflow.connections['Slack']['0']).toBeUndefined();
+      expect(result.workflow.connections['Slack']['main'][0][0].type).toBe('main');
+    });
+
+    it('should preserve named targetInput like ai_tool', async () => {
+      const workflow = JSON.parse(JSON.stringify(baseWorkflow));
+      workflow.nodes.push({
+        id: 'agent-1',
+        name: 'AI Agent',
+        type: '@n8n/n8n-nodes-langchain.agent',
+        typeVersion: 1,
+        position: [900, 300],
+        parameters: {}
+      });
+      workflow.nodes.push({
+        id: 'tool-1',
+        name: 'Calculator',
+        type: '@n8n/n8n-nodes-langchain.toolCalculator',
+        typeVersion: 1,
+        position: [1100, 300],
+        parameters: {}
+      });
+
+      const result = await diffEngine.applyDiff(workflow, {
+        id: 'test',
+        operations: [{
+          type: 'addConnection' as const,
+          source: 'Calculator',
+          target: 'AI Agent',
+          sourceOutput: 'ai_tool',
+          targetInput: 'ai_tool'
+        }]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.workflow.connections['Calculator']['ai_tool'][0][0].type).toBe('ai_tool');
+    });
   });
 
   describe('RemoveConnection Operation', () => {
@@ -1023,6 +1835,82 @@ describe('WorkflowDiffEngine', () => {
       expect(result.errors![0].message).toContain('No connections found from');
       expect(result.errors![0].message).toContain('Slack');
     });
+
+    it('should not duplicate edge when rewiring to an already-connected target (regression #7)', async () => {
+      // Setup: Webhook → HTTP Request (baseWorkflow) AND Webhook → Slack (parallel).
+      // Rewire from HTTP Request to Slack. Slack is already a target of Webhook,
+      // so the result should contain exactly one Slack edge (not two) and no
+      // HTTP Request edge.
+      const addSlackConn: AddConnectionOperation = {
+        type: 'addConnection',
+        source: 'Webhook',
+        target: 'Slack'
+      };
+
+      const rewire: any = {
+        type: 'rewireConnection',
+        source: 'Webhook',
+        from: 'HTTP Request',
+        to: 'Slack'
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        operations: [addSlackConn, rewire]
+      });
+
+      expect(result.success).toBe(true);
+      const webhookEdges = result.workflow!.connections['Webhook']['main'][0];
+      const slackEdges = webhookEdges.filter((c: any) => c.node === 'Slack');
+      const httpEdges = webhookEdges.filter((c: any) => c.node === 'HTTP Request');
+      expect(slackEdges).toHaveLength(1);
+      expect(httpEdges).toHaveLength(0);
+    });
+
+    it('should rewire correctly when source/from/to are passed as node IDs (regression #7)', async () => {
+      // baseWorkflow nodes have fixed ids: webhook-1, http-1, slack-1
+      const rewireById: any = {
+        type: 'rewireConnection',
+        source: 'webhook-1',
+        from: 'http-1',
+        to: 'slack-1'
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        operations: [rewireById]
+      });
+
+      expect(result.success).toBe(true);
+      const webhookEdges = result.workflow!.connections['Webhook']['main'][0];
+      expect(webhookEdges.some((c: any) => c.node === 'HTTP Request')).toBe(false);
+      expect(webhookEdges.some((c: any) => c.node === 'Slack')).toBe(true);
+    });
+
+    it('rejects rewire when from and to are the same string (regression Copilot review)', async () => {
+      const rewire: any = {
+        type: 'rewireConnection',
+        source: 'Webhook',
+        from: 'HTTP Request',
+        to: 'HTTP Request'
+      };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [rewire] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/must refer to different nodes/);
+    });
+
+    it('rejects rewire when from (ID) and to (name) resolve to the same node (regression Copilot review)', async () => {
+      const rewire: any = {
+        type: 'rewireConnection',
+        source: 'Webhook',
+        from: 'http-1',
+        to: 'HTTP Request'
+      };
+      const result = await diffEngine.applyDiff(baseWorkflow, { id: 'test-workflow', operations: [rewire] });
+      expect(result.success).toBe(false);
+      expect(result.errors![0].message).toMatch(/resolve to the same node|must refer to different nodes/);
+    });
+
 
     it('should handle rewiring IF node branches correctly', async () => {
       // Add IF node with true/false branches
@@ -4560,6 +5448,34 @@ describe('WorkflowDiffEngine', () => {
       expect(result.shouldDeactivate).toBe(true);
     });
 
+    it('applies last-op-wins when activate+deactivate are batched together (regression #8)', async () => {
+      const workflowWithTrigger = createWorkflow('Test Workflow')
+        .addWebhookNode({ id: 'webhook-1', name: 'Webhook Trigger' })
+        .build() as Workflow;
+      const newConnections: any = {};
+      for (const [nodeId, outputs] of Object.entries(workflowWithTrigger.connections)) {
+        const node = workflowWithTrigger.nodes.find((n: any) => n.id === nodeId);
+        if (node) newConnections[node.name] = outputs;
+      }
+      workflowWithTrigger.connections = newConnections;
+
+      const lastWinsDeactivate = await diffEngine.applyDiff(workflowWithTrigger, {
+        id: 'test-workflow',
+        operations: [{ type: 'activateWorkflow' } as any, { type: 'deactivateWorkflow' } as any]
+      });
+      expect(lastWinsDeactivate.success).toBe(true);
+      expect(lastWinsDeactivate.shouldDeactivate).toBe(true);
+      expect(lastWinsDeactivate.shouldActivate).toBeFalsy();
+
+      const lastWinsActivate = await diffEngine.applyDiff(workflowWithTrigger, {
+        id: 'test-workflow',
+        operations: [{ type: 'deactivateWorkflow' } as any, { type: 'activateWorkflow' } as any]
+      });
+      expect(lastWinsActivate.success).toBe(true);
+      expect(lastWinsActivate.shouldActivate).toBe(true);
+      expect(lastWinsActivate.shouldDeactivate).toBeFalsy();
+    });
+
     it('should combine activation with other operations', async () => {
       // Create workflow with webhook trigger
       const workflowWithTrigger = createWorkflow('Test Workflow')
@@ -4987,6 +5903,153 @@ describe('WorkflowDiffEngine', () => {
       expect(result.success).toBe(true);
       const updatedNode = result.workflow.nodes.find((n: any) => n.name === 'HTTP Request')!;
       expect('nonExistent' in updatedNode).toBe(false);
+    });
+  });
+
+  describe('transferWorkflow operation', () => {
+    it('should set transferToProjectId in result for valid transferWorkflow', async () => {
+      const operation: TransferWorkflowOperation = {
+        type: 'transferWorkflow',
+        destinationProjectId: 'project-abc-123'
+      };
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations: [operation]
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(true);
+      expect(result.transferToProjectId).toBe('project-abc-123');
+    });
+
+    it('should fail validation when destinationProjectId is empty', async () => {
+      const operation: TransferWorkflowOperation = {
+        type: 'transferWorkflow',
+        destinationProjectId: ''
+      };
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations: [operation]
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toBeDefined();
+      expect(result.errors![0].message).toContain('destinationProjectId');
+    });
+
+    it('should fail validation when destinationProjectId is undefined', async () => {
+      const operation = {
+        type: 'transferWorkflow',
+        destinationProjectId: undefined
+      } as any as TransferWorkflowOperation;
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations: [operation]
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toBeDefined();
+      expect(result.errors![0].message).toContain('destinationProjectId');
+    });
+
+    it('should not include transferToProjectId when no transferWorkflow operation is present', async () => {
+      const operation: UpdateNameOperation = {
+        type: 'updateName',
+        name: 'Renamed Workflow'
+      };
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations: [operation]
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(true);
+      expect(result.transferToProjectId).toBeUndefined();
+    });
+
+    it('should combine updateName and transferWorkflow operations', async () => {
+      const operations: WorkflowDiffOperation[] = [
+        {
+          type: 'updateName',
+          name: 'Transferred Workflow'
+        } as UpdateNameOperation,
+        {
+          type: 'transferWorkflow',
+          destinationProjectId: 'project-xyz-789'
+        } as TransferWorkflowOperation
+      ];
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(true);
+      expect(result.operationsApplied).toBe(2);
+      expect(result.workflow!.name).toBe('Transferred Workflow');
+      expect(result.transferToProjectId).toBe('project-xyz-789');
+    });
+
+    it('should combine removeTag and transferWorkflow in continueOnError mode', async () => {
+      const operations: WorkflowDiffOperation[] = [
+        {
+          type: 'removeTag',
+          tag: 'non-existent-tag'
+        } as RemoveTagOperation,
+        {
+          type: 'transferWorkflow',
+          destinationProjectId: 'project-target-456'
+        } as TransferWorkflowOperation
+      ];
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations,
+        continueOnError: true
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(true);
+      expect(result.transferToProjectId).toBe('project-target-456');
+    });
+
+    it('should fail entire batch in atomic mode when transferWorkflow has empty destinationProjectId alongside updateName', async () => {
+      const operations: WorkflowDiffOperation[] = [
+        {
+          type: 'updateName',
+          name: 'Should Not Apply'
+        } as UpdateNameOperation,
+        {
+          type: 'transferWorkflow',
+          destinationProjectId: ''
+        } as TransferWorkflowOperation
+      ];
+
+      const request: WorkflowDiffRequest = {
+        id: 'test-workflow',
+        operations
+      };
+
+      const result = await diffEngine.applyDiff(baseWorkflow, request);
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toBeDefined();
+      expect(result.errors![0].message).toContain('destinationProjectId');
+      // In atomic mode, the workflow should not be returned since the batch failed
+      expect(result.workflow).toBeUndefined();
     });
   });
 });

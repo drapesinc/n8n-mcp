@@ -213,13 +213,19 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
             result.suggestions.push('Consider adding alwaysOutputData: true at node level (not in parameters) for better error handling. ' +
                 'This ensures the node produces output even when HTTP requests fail, allowing downstream error handling.');
         }
-        const lowerUrl = url.toLowerCase();
+        let host = '';
+        try {
+            host = new URL(url).hostname.toLowerCase();
+        }
+        catch {
+        }
+        const hostMatches = (suffix) => host === suffix || host.endsWith('.' + suffix);
         const isApiEndpoint = /^https?:\/\/api\./i.test(url) ||
             /\/api[\/\?]|\/api$/i.test(url) ||
             /\/rest[\/\?]|\/rest$/i.test(url) ||
-            lowerUrl.includes('supabase.co') ||
-            lowerUrl.includes('firebase') ||
-            lowerUrl.includes('googleapis.com') ||
+            hostMatches('supabase.co') ||
+            host.includes('firebase') ||
+            hostMatches('googleapis.com') ||
             /\.com\/v\d+/i.test(url);
         if (isApiEndpoint && !options.response?.response?.responseFormat) {
             result.suggestions.push('API endpoints should explicitly set options.response.response.responseFormat to "json" or "text" ' +
@@ -730,30 +736,30 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                 'empty', 'notEmpty', 'equals', 'notEquals',
                 'contains', 'notContains', 'startsWith', 'notStartsWith',
                 'endsWith', 'notEndsWith', 'regex', 'notRegex',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
             number: [
                 'empty', 'notEmpty', 'equals', 'notEquals', 'gt', 'lt', 'gte', 'lte',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
             dateTime: [
                 'empty', 'notEmpty', 'equals', 'notEquals', 'after', 'before', 'afterOrEquals', 'beforeOrEquals',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
             boolean: [
                 'empty', 'notEmpty', 'true', 'false', 'equals', 'notEquals',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
             array: [
                 'contains', 'notContains', 'lengthEquals', 'lengthNotEquals',
                 'lengthGt', 'lengthLt', 'lengthGte', 'lengthLte', 'empty', 'notEmpty',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
             object: [
                 'empty', 'notEmpty',
-                'exists', 'notExists', 'isNotEmpty'
+                'exists', 'notExists'
             ],
-            any: ['exists', 'notExists', 'isNotEmpty']
+            any: ['exists', 'notExists']
         };
         for (let i = 0; i < conditions.length; i++) {
             const condition = conditions[i];

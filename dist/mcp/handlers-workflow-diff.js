@@ -35,6 +35,7 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleUpdatePartialWorkflow = handleUpdatePartialWorkflow;
 const zod_1 = require("zod");
+const crypto_1 = require("crypto");
 const workflow_diff_engine_1 = require("../services/workflow-diff-engine");
 const handlers_n8n_manager_1 = require("./handlers-n8n-manager");
 const n8n_errors_1 = require("../utils/n8n-errors");
@@ -51,17 +52,19 @@ function getValidator(repository) {
     return cachedValidator;
 }
 const NODE_TARGETING_OPERATIONS = new Set([
-    'updateNode', 'removeNode', 'moveNode', 'enableNode', 'disableNode'
+    'updateNode', 'removeNode', 'moveNode', 'enableNode', 'disableNode', 'patchNodeField'
 ]);
 const workflowDiffSchema = zod_1.z.object({
     id: zod_1.z.string(),
-    operations: zod_1.z.array(zod_1.z.object({
+    operations: zod_1.z.preprocess(handlers_n8n_manager_1.tryParseJson, zod_1.z.array(zod_1.z.object({
         type: zod_1.z.string(),
         description: zod_1.z.string().optional(),
         node: zod_1.z.any().optional(),
         nodeId: zod_1.z.string().optional(),
         nodeName: zod_1.z.string().optional(),
         updates: zod_1.z.any().optional(),
+        fieldPath: zod_1.z.string().optional(),
+        patches: zod_1.z.any().optional(),
         position: zod_1.z.tuple([zod_1.z.number(), zod_1.z.number()]).optional(),
         source: zod_1.z.string().optional(),
         target: zod_1.z.string().optional(),
@@ -79,6 +82,7 @@ const workflowDiffSchema = zod_1.z.object({
         settings: zod_1.z.any().optional(),
         name: zod_1.z.string().optional(),
         tag: zod_1.z.string().optional(),
+        destinationProjectId: zod_1.z.string().min(1).optional(),
         id: zod_1.z.string().optional(),
     }).transform((op) => {
         if (NODE_TARGETING_OPERATIONS.has(op.type)) {
@@ -92,7 +96,7 @@ const workflowDiffSchema = zod_1.z.object({
             }
         }
         return op;
-    })),
+    }))),
     validateOnly: zod_1.z.boolean().optional(),
     continueOnError: zod_1.z.boolean().optional(),
     createBackup: zod_1.z.boolean().optional(),
@@ -100,7 +104,7 @@ const workflowDiffSchema = zod_1.z.object({
 });
 async function handleUpdatePartialWorkflow(args, repository, context) {
     const startTime = Date.now();
-    const sessionId = `mutation_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+    const sessionId = `mutation_${Date.now()}_${(0, crypto_1.randomUUID)()}`;
     let workflowBefore = null;
     let validationBefore = null;
     let validationAfter = null;
@@ -266,9 +270,9 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                 });
                 const recoverySteps = [];
                 if (errorTypes.has('operator_issues')) {
-                    recoverySteps.push('Operator structure issue detected. Use validate_node_operation to check specific nodes.');
+                    recoverySteps.push('Operator structure issue detected. Use validate_node to check specific nodes.');
                     recoverySteps.push('Binary operators (equals, contains, greaterThan, etc.) must NOT have singleValue:true');
-                    recoverySteps.push('Unary operators (isEmpty, isNotEmpty, true, false) REQUIRE singleValue:true');
+                    recoverySteps.push('Unary operators (empty, notEmpty, true, false) REQUIRE singleValue:true');
                 }
                 if (errorTypes.has('connection_issues')) {
                     recoverySteps.push('Connection validation failed. Check all node connections reference existing nodes.');
@@ -365,6 +369,25 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     logger_1.logger.warn('Tag operations failed (non-blocking)', tagError);
                 }
             }
+            let transferMessage = '';
+            if (diffResult.transferToProjectId) {
+                try {
+                    await client.transferWorkflow(input.id, diffResult.transferToProjectId);
+                    transferMessage = ` Workflow transferred to project ${diffResult.transferToProjectId}.`;
+                }
+                catch (transferError) {
+                    logger_1.logger.error('Failed to transfer workflow to project', transferError);
+                    return {
+                        success: false,
+                        saved: true,
+                        error: 'Workflow updated successfully but project transfer failed',
+                        details: {
+                            workflowUpdated: true,
+                            transferError: transferError instanceof Error ? transferError.message : 'Unknown error'
+                        }
+                    };
+                }
+            }
             let finalWorkflow = updatedWorkflow;
             let activationMessage = '';
             try {
@@ -445,7 +468,7 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     nodeCount: finalWorkflow.nodes?.length || 0,
                     operationsApplied: diffResult.operationsApplied
                 },
-                message: `Workflow "${finalWorkflow.name}" updated successfully. Applied ${diffResult.operationsApplied} operations.${activationMessage} Use n8n_get_workflow with mode 'structure' to verify current state.`,
+                message: `Workflow "${finalWorkflow.name}" updated successfully. Applied ${diffResult.operationsApplied} operations.${transferMessage}${activationMessage} Use n8n_get_workflow with mode 'structure' to verify current state.`,
                 details: {
                     applied: diffResult.applied,
                     failed: diffResult.failed,
@@ -522,6 +545,8 @@ function inferIntentFromOperations(operations) {
                 return `Remove node ${op.nodeName || op.nodeId || ''}`.trim();
             case 'updateNode':
                 return `Update node ${op.nodeName || op.nodeId || ''}`.trim();
+            case 'patchNodeField':
+                return `Patch field on node ${op.nodeName || op.nodeId || ''}`.trim();
             case 'addConnection':
                 return `Connect ${op.source || 'node'} to ${op.target || 'node'}`;
             case 'removeConnection':
@@ -534,6 +559,8 @@ function inferIntentFromOperations(operations) {
                 return 'Activate workflow';
             case 'deactivateWorkflow':
                 return 'Deactivate workflow';
+            case 'transferWorkflow':
+                return `Transfer workflow to project ${op.destinationProjectId || ''}`.trim();
             default:
                 return `Workflow ${op.type}`;
         }
@@ -551,6 +578,10 @@ function inferIntentFromOperations(operations) {
     if (typeSet.has('updateNode')) {
         const count = opTypes.filter((t) => t === 'updateNode').length;
         summary.push(`update ${count} node${count > 1 ? 's' : ''}`);
+    }
+    if (typeSet.has('patchNodeField')) {
+        const count = opTypes.filter((t) => t === 'patchNodeField').length;
+        summary.push(`patch ${count} field${count > 1 ? 's' : ''}`);
     }
     if (typeSet.has('addConnection') || typeSet.has('rewireConnection')) {
         summary.push('modify connections');

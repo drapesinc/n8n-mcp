@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ExpressionValidator = void 0;
+const expression_utils_1 = require("../utils/expression-utils");
 class ExpressionValidator {
     static validateExpression(expression, context) {
         const result = {
@@ -46,12 +47,7 @@ class ExpressionValidator {
         return errors;
     }
     static extractExpressions(text) {
-        const expressions = [];
-        let match;
-        while ((match = this.EXPRESSION_PATTERN.exec(text)) !== null) {
-            expressions.push(match[1].trim());
-        }
-        return expressions;
+        return (0, expression_utils_1.extractBracketExpressions)(text).map(match => match.slice(2, -2).trim());
     }
     static validateSingleExpression(expr, context, result) {
         let match;
@@ -134,6 +130,20 @@ class ExpressionValidator {
         combinedResult.valid = combinedResult.errors.length === 0;
         return combinedResult;
     }
+    static checkBareExpression(value, path, result) {
+        if (value.includes('{{') || value.startsWith('=')) {
+            return;
+        }
+        const trimmed = value.trim();
+        for (const { pattern, name } of this.BARE_EXPRESSION_PATTERNS) {
+            if (pattern.test(trimmed)) {
+                result.warnings.push((path ? `${path}: ` : '') +
+                    `Possible unwrapped expression: "${trimmed}" looks like an n8n ${name} reference. ` +
+                    `Use "={{ ${trimmed} }}" to evaluate it as an expression.`);
+                return;
+            }
+        }
+    }
     static validateParametersRecursive(obj, context, result, path = '', visited = new WeakSet()) {
         if (obj && typeof obj === 'object') {
             if (visited.has(obj)) {
@@ -142,6 +152,7 @@ class ExpressionValidator {
             visited.add(obj);
         }
         if (typeof obj === 'string') {
+            this.checkBareExpression(obj, path, result);
             if (obj.includes('{{')) {
                 const validation = this.validateExpression(obj, context);
                 validation.errors.forEach(error => {
@@ -161,6 +172,9 @@ class ExpressionValidator {
         }
         else if (obj && typeof obj === 'object') {
             Object.entries(obj).forEach(([key, value]) => {
+                if (key === 'jsCode' || key === 'pythonCode' || key === 'functionCode') {
+                    return;
+                }
                 const newPath = path ? `${path}.${key}` : key;
                 this.validateParametersRecursive(value, context, result, newPath, visited);
             });
@@ -168,7 +182,16 @@ class ExpressionValidator {
     }
 }
 exports.ExpressionValidator = ExpressionValidator;
-ExpressionValidator.EXPRESSION_PATTERN = /\{\{([\s\S]+?)\}\}/g;
+ExpressionValidator.BARE_EXPRESSION_PATTERNS = [
+    { pattern: /^\$json[.\[]/, name: '$json' },
+    { pattern: /^\$node\[/, name: '$node' },
+    { pattern: /^\$input\./, name: '$input' },
+    { pattern: /^\$execution\./, name: '$execution' },
+    { pattern: /^\$workflow\./, name: '$workflow' },
+    { pattern: /^\$prevNode\./, name: '$prevNode' },
+    { pattern: /^\$env\./, name: '$env' },
+    { pattern: /^\$(now|today|itemIndex|runIndex)$/, name: 'built-in variable' },
+];
 ExpressionValidator.VARIABLE_PATTERNS = {
     json: /\$json(\.[a-zA-Z_][\w]*|\["[^"]+"\]|\['[^']+'\]|\[\d+\])*/g,
     node: /\$node\["([^"]+)"\]\.json/g,

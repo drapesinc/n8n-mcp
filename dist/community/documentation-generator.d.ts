@@ -40,12 +40,16 @@ export interface DocumentationGeneratorConfig {
     apiKey?: string;
     timeout?: number;
     maxTokens?: number;
+    temperature?: number;
 }
 export declare class DocumentationGenerator {
     private client;
+    private baseUrl;
+    private apiKey;
     private model;
     private maxTokens;
     private timeout;
+    private temperature?;
     constructor(config: DocumentationGeneratorConfig);
     generateSummary(input: DocumentationInput): Promise<DocumentationResult>;
     generateBatch(inputs: DocumentationInput[], concurrency?: number, progressCallback?: (message: string, current: number, total: number) => void): Promise<DocumentationResult[]>;
@@ -59,6 +63,7 @@ export declare class DocumentationGenerator {
         success: boolean;
         message: string;
     }>;
+    private chatCompletion;
     private sleep;
 }
 export declare function createDocumentationGenerator(): DocumentationGenerator;

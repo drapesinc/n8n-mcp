@@ -1,5 +1,9 @@
 import { InstanceContext } from '../types/instance-context';
+import { GenerateWorkflowHandler } from '../types/generate-workflow';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
+interface MCPServerOptions {
+    generateWorkflowHandler?: GenerateWorkflowHandler;
+}
 export declare class N8NDocumentationMCPServer {
     private server;
     private db;
@@ -16,7 +20,8 @@ export declare class N8NDocumentationMCPServer {
     private useSharedDatabase;
     private sharedDbState;
     private isShutdown;
-    constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger);
+    private generateWorkflowHandler?;
+    constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions);
     close(): Promise<void>;
     private initializeDatabase;
     private initializeInMemorySchema;
@@ -47,11 +52,13 @@ export declare class N8NDocumentationMCPServer {
     private getNodeDocumentation;
     private safeJsonParse;
     private getDatabaseStatistics;
+    private buildOperationsTree;
     private getNodeEssentials;
     private getNode;
     private handleInfoMode;
     private handleVersionMode;
     private getVersionSummary;
+    private versionMetadataUnavailable;
     private getVersionHistory;
     private compareVersions;
     private getBreakingChanges;
@@ -75,6 +82,8 @@ export declare class N8NDocumentationMCPServer {
     private listNodeTemplates;
     private getTemplate;
     private searchTemplates;
+    private workflowPatternsCache;
+    private getWorkflowPatterns;
     private getTemplatesForTask;
     private searchTemplatesByMetadata;
     private getTaskDescription;
@@ -84,4 +93,5 @@ export declare class N8NDocumentationMCPServer {
     run(): Promise<void>;
     shutdown(): Promise<void>;
 }
+export {};
 //# sourceMappingURL=server.d.ts.map

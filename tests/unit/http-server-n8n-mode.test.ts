@@ -210,6 +210,7 @@ describe('HTTP Server n8n Mode', () => {
       expect(handler).toBeTruthy();
 
       const { req, res } = createMockReqRes();
+      req.headers = { authorization: `Bearer ${TEST_AUTH_TOKEN}` };
       await handler(req, res);
 
       expect(res.json).toHaveBeenCalledWith({
@@ -219,13 +220,33 @@ describe('HTTP Server n8n Mode', () => {
           mcp: {
             method: 'POST',
             path: '/mcp',
-            description: 'Main MCP JSON-RPC endpoint',
+            description: 'Main MCP JSON-RPC endpoint (StreamableHTTP)',
             authentication: 'Bearer token required'
+          },
+          mcpDelete: {
+            method: 'DELETE',
+            path: '/mcp',
+            description: 'Terminate an active MCP session by Mcp-Session-Id header',
+            authentication: 'Bearer token required'
+          },
+          sse: {
+            method: 'GET',
+            path: '/sse',
+            description: 'DEPRECATED: SSE stream for legacy clients. Migrate to StreamableHTTP (POST /mcp).',
+            authentication: 'Bearer token required',
+            deprecated: true
+          },
+          messages: {
+            method: 'POST',
+            path: '/messages',
+            description: 'DEPRECATED: Message delivery for SSE sessions. Migrate to StreamableHTTP (POST /mcp).',
+            authentication: 'Bearer token required',
+            deprecated: true
           },
           health: {
             method: 'GET',
             path: '/health',
-            description: 'Health check endpoint',
+            description: 'Minimal liveness check (status, version, uptime)',
             authentication: 'None'
           },
           root: {
@@ -248,6 +269,7 @@ describe('HTTP Server n8n Mode', () => {
       expect(handler).toBeTruthy();
 
       const { req, res } = createMockReqRes();
+      req.headers = { authorization: `Bearer ${TEST_AUTH_TOKEN}` };
       await handler(req, res);
 
       // When N8N_MODE is true, should return protocol version and server info
@@ -412,12 +434,17 @@ describe('HTTP Server n8n Mode', () => {
         const { req, res } = createMockReqRes();
         await handler(req, res);
 
+        // After GHSA-75hx-xj24-mqrw, /health returns only minimal liveness
+        // fields regardless of N8N_MODE — no session IDs, no token metadata.
         expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
           status: 'ok',
-          mode: 'sdk-pattern-transports', // Updated mode name after refactoring
           version: '2.8.1'
         }));
-        
+        const body = (res.json as any).mock.calls[0][0];
+        expect(body).not.toHaveProperty('sessions');
+        expect(body).not.toHaveProperty('security');
+        expect(body).not.toHaveProperty('mode');
+
         await server.shutdown();
       }
     });
@@ -465,6 +492,7 @@ describe('HTTP Server n8n Mode', () => {
         expect(handler).toBeTruthy();
 
         const { req, res } = createMockReqRes();
+        req.headers = { authorization: `Bearer ${TEST_AUTH_TOKEN}` };
         await handler(req, res);
 
         // Only exactly 'true' should enable n8n mode
@@ -650,20 +678,22 @@ describe('HTTP Server n8n Mode', () => {
       expect(mockConsoleManager.wrapOperation).toHaveBeenCalled();
     });
 
-    it('should handle DELETE endpoint without session ID', async () => {
+    it('should handle authenticated DELETE without session ID', async () => {
       server = new SingleSessionHTTPServer();
       await server.start();
 
       const handler = findHandler('delete', '/mcp');
       expect(handler).toBeTruthy();
 
-      // Test DELETE without Mcp-Session-Id header (not auth-related)
+      // DELETE /mcp now requires auth (GHSA-75hx-xj24-mqrw). With a valid
+      // Bearer token but no Mcp-Session-Id header, the request should reach
+      // the 400 "header required" branch.
       const { req, res } = createMockReqRes();
       req.method = 'DELETE';
-      
+      req.headers = { authorization: `Bearer ${TEST_AUTH_TOKEN}` };
+
       await handler(req, res);
 
-      // DELETE endpoint returns 400 for missing Mcp-Session-Id header, not 401 for auth
       expect(res.status).toHaveBeenCalledWith(400);
       expect(res.json).toHaveBeenCalledWith({
         jsonrpc: '2.0',
@@ -673,6 +703,21 @@ describe('HTTP Server n8n Mode', () => {
         },
         id: null
       });
+    });
+
+    it('should reject unauthenticated DELETE /mcp', async () => {
+      // GHSA-75hx-xj24-mqrw regression guard
+      server = new SingleSessionHTTPServer();
+      await server.start();
+
+      const handler = findHandler('delete', '/mcp');
+      const { req, res } = createMockReqRes();
+      req.method = 'DELETE';
+      req.headers = { 'mcp-session-id': 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' };
+
+      await handler(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(401);
     });
 
     it('should provide proper error details for debugging', async () => {

@@ -12,6 +12,7 @@ class NodeRepository {
         this.db = dbOrService;
     }
     saveNode(node) {
+        const existing = this.db.prepare('SELECT npm_readme, ai_documentation_summary, ai_summary_generated_at FROM nodes WHERE node_type = ?').get(node.nodeType);
         const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO nodes (
         node_type, package_name, display_name, description,
@@ -21,10 +22,11 @@ class NodeRepository {
         properties_schema, operations, credentials_required,
         outputs, output_names,
         is_community, is_verified, author_name, author_github_url,
-        npm_package_name, npm_version, npm_downloads, community_fetched_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        npm_package_name, npm_version, npm_downloads, community_fetched_at,
+        npm_readme, ai_documentation_summary, ai_summary_generated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(node.nodeType, node.packageName, node.displayName, node.description, node.category, node.style, node.isAITool ? 1 : 0, node.isTrigger ? 1 : 0, node.isWebhook ? 1 : 0, node.isVersioned ? 1 : 0, node.isToolVariant ? 1 : 0, node.toolVariantOf || null, node.hasToolVariant ? 1 : 0, node.version, node.documentation || null, JSON.stringify(node.properties, null, 2), JSON.stringify(node.operations, null, 2), JSON.stringify(node.credentials, null, 2), node.outputs ? JSON.stringify(node.outputs, null, 2) : null, node.outputNames ? JSON.stringify(node.outputNames, null, 2) : null, node.isCommunity ? 1 : 0, node.isVerified ? 1 : 0, node.authorName || null, node.authorGithubUrl || null, node.npmPackageName || null, node.npmVersion || null, node.npmDownloads || 0, node.communityFetchedAt || null);
+        stmt.run(node.nodeType, node.packageName, node.displayName, node.description, node.category, node.style, node.isAITool ? 1 : 0, node.isTrigger ? 1 : 0, node.isWebhook ? 1 : 0, node.isVersioned ? 1 : 0, node.isToolVariant ? 1 : 0, node.toolVariantOf || null, node.hasToolVariant ? 1 : 0, node.version, node.documentation || null, JSON.stringify(node.properties, null, 2), JSON.stringify(node.operations, null, 2), JSON.stringify(node.credentials, null, 2), node.outputs ? JSON.stringify(node.outputs, null, 2) : null, node.outputNames ? JSON.stringify(node.outputNames, null, 2) : null, node.isCommunity ? 1 : 0, node.isVerified ? 1 : 0, node.authorName || null, node.authorGithubUrl || null, node.npmPackageName || null, node.npmVersion || null, node.npmDownloads || 0, node.communityFetchedAt || null, existing?.npm_readme || null, existing?.ai_documentation_summary || null, existing?.ai_summary_generated_at || null);
     }
     getNode(nodeType) {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
@@ -378,7 +380,7 @@ class NodeRepository {
             }
         }
         catch (error) {
-            console.error(`Error getting default operation for ${nodeType}:`, error);
+            console.error('Error getting default operation for', nodeType, error);
             return undefined;
         }
         return undefined;
@@ -566,6 +568,13 @@ class NodeRepository {
       ORDER BY severity DESC
     `).all(normalizedType, fromVersion, toVersion);
         return rows.map(row => this.parsePropertyChangeRow(row));
+    }
+    hasVersionMetadata(nodeType) {
+        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
+        const row = this.db.prepare(`
+      SELECT 1 FROM node_versions WHERE node_type = ? LIMIT 1
+    `).get(normalizedType);
+        return !!row;
     }
     hasVersionUpgradePath(nodeType, fromVersion, toVersion) {
         const versions = this.getNodeVersions(nodeType);

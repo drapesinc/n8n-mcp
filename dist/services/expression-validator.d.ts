@@ -12,7 +12,7 @@ interface ExpressionContext {
     hasInputData?: boolean;
 }
 export declare class ExpressionValidator {
-    private static readonly EXPRESSION_PATTERN;
+    private static readonly BARE_EXPRESSION_PATTERNS;
     private static readonly VARIABLE_PATTERNS;
     static validateExpression(expression: string, context: ExpressionContext): ExpressionValidationResult;
     private static checkSyntaxErrors;
@@ -21,6 +21,7 @@ export declare class ExpressionValidator {
     private static checkCommonMistakes;
     private static checkNodeReferences;
     static validateNodeExpressions(parameters: any, context: ExpressionContext): ExpressionValidationResult;
+    private static checkBareExpression;
     private static validateParametersRecursive;
 }
 export {};

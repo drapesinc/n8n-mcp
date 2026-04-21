@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SSRFProtection = void 0;
 const url_1 = require("url");
 const promises_1 = require("dns/promises");
+const net_1 = require("net");
 const logger_1 = require("./logger");
 const CLOUD_METADATA = new Set([
     '169.254.169.254',
@@ -28,6 +29,25 @@ const PRIVATE_IP_RANGES = [
     /^0\./,
 ];
 class SSRFProtection {
+    static isPrivateOrMappedIpv6(hostname) {
+        if (!(0, net_1.isIPv6)(hostname))
+            return false;
+        if (hostname.startsWith('::'))
+            return true;
+        if (hostname.startsWith('0:0:0:0:0:ffff:'))
+            return true;
+        if (hostname.startsWith('fe80:'))
+            return true;
+        if (/^fe[c-f]/.test(hostname))
+            return true;
+        if (/^f[cd]/.test(hostname))
+            return true;
+        if (hostname.startsWith('2002:'))
+            return true;
+        if (hostname.startsWith('64:ff9b:'))
+            return true;
+        return false;
+    }
     static async validateWebhookUrl(urlString) {
         try {
             const url = new url_1.URL(urlString);
@@ -94,12 +114,7 @@ class SSRFProtection {
                         : 'Private IP addresses not allowed (use WEBHOOK_SECURITY_MODE=permissive if needed)'
                 };
             }
-            if (resolvedIP === '::1' ||
-                resolvedIP === '::' ||
-                resolvedIP.startsWith('fe80:') ||
-                resolvedIP.startsWith('fc00:') ||
-                resolvedIP.startsWith('fd00:') ||
-                resolvedIP.startsWith('::ffff:')) {
+            if (SSRFProtection.isPrivateOrMappedIpv6(resolvedIP)) {
                 logger_1.logger.warn('SSRF blocked: IPv6 private address', {
                     hostname,
                     resolvedIP,
@@ -112,6 +127,50 @@ class SSRFProtection {
         catch (error) {
             return { valid: false, reason: 'Invalid URL format' };
         }
+    }
+    static validateUrlSync(urlString) {
+        if (typeof urlString !== 'string' || urlString.includes('#')) {
+            return { valid: false, reason: 'URL fragments are not allowed' };
+        }
+        let url;
+        try {
+            url = new url_1.URL(urlString);
+        }
+        catch {
+            return { valid: false, reason: 'Invalid URL format' };
+        }
+        if (!['http:', 'https:'].includes(url.protocol)) {
+            return { valid: false, reason: 'Invalid protocol. Only HTTP/HTTPS allowed.' };
+        }
+        if (url.username !== '' || url.password !== '') {
+            return { valid: false, reason: 'Userinfo in URL is not allowed' };
+        }
+        let hostname = url.hostname.toLowerCase();
+        if (hostname.startsWith('[') && hostname.endsWith(']')) {
+            hostname = hostname.slice(1, -1);
+        }
+        if (CLOUD_METADATA.has(hostname)) {
+            return { valid: false, reason: 'Cloud metadata endpoint blocked' };
+        }
+        const mode = (process.env.WEBHOOK_SECURITY_MODE || 'strict');
+        if (mode === 'permissive') {
+            return { valid: true };
+        }
+        if (mode === 'strict' && LOCALHOST_PATTERNS.has(hostname)) {
+            return { valid: false, reason: 'Localhost access is blocked in strict mode' };
+        }
+        if (PRIVATE_IP_RANGES.some(regex => regex.test(hostname))) {
+            return {
+                valid: false,
+                reason: mode === 'strict'
+                    ? 'Private IP addresses not allowed'
+                    : 'Private IP addresses not allowed (use WEBHOOK_SECURITY_MODE=permissive if needed)'
+            };
+        }
+        if (SSRFProtection.isPrivateOrMappedIpv6(hostname)) {
+            return { valid: false, reason: 'IPv6 private/mapped address not allowed' };
+        }
+        return { valid: true };
     }
 }
 exports.SSRFProtection = SSRFProtection;

@@ -1,10 +1,14 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getSharedDatabase = getSharedDatabase;
 exports.releaseSharedDatabase = releaseSharedDatabase;
 exports.closeSharedDatabase = closeSharedDatabase;
 exports.isSharedDatabaseInitialized = isSharedDatabaseInitialized;
 exports.getSharedDatabaseRefCount = getSharedDatabaseRefCount;
+const path_1 = __importDefault(require("path"));
 const database_adapter_1 = require("./database-adapter");
 const node_repository_1 = require("./node-repository");
 const template_service_1 = require("../templates/template-service");
@@ -13,18 +17,19 @@ const logger_1 = require("../utils/logger");
 let sharedState = null;
 let initializationPromise = null;
 async function getSharedDatabase(dbPath) {
-    if (sharedState && sharedState.initialized && sharedState.dbPath === dbPath) {
+    const normalizedPath = dbPath === ':memory:' ? dbPath : path_1.default.resolve(dbPath);
+    if (sharedState && sharedState.initialized && sharedState.dbPath === normalizedPath) {
         sharedState.refCount++;
         logger_1.logger.debug('Reusing shared database connection', {
             refCount: sharedState.refCount,
-            dbPath
+            dbPath: normalizedPath
         });
         return sharedState;
     }
-    if (sharedState && sharedState.initialized && sharedState.dbPath !== dbPath) {
+    if (sharedState && sharedState.initialized && sharedState.dbPath !== normalizedPath) {
         logger_1.logger.error('Attempted to initialize shared database with different path', {
             existingPath: sharedState.dbPath,
-            requestedPath: dbPath
+            requestedPath: normalizedPath
         });
         throw new Error(`Shared database already initialized with different path: ${sharedState.dbPath}`);
     }
@@ -34,7 +39,7 @@ async function getSharedDatabase(dbPath) {
             state.refCount++;
             logger_1.logger.debug('Reusing shared database (waited for init)', {
                 refCount: state.refCount,
-                dbPath
+                dbPath: normalizedPath
             });
             return state;
         }
@@ -43,7 +48,7 @@ async function getSharedDatabase(dbPath) {
             throw error;
         }
     }
-    initializationPromise = initializeSharedDatabase(dbPath);
+    initializationPromise = initializeSharedDatabase(normalizedPath);
     try {
         const state = await initializationPromise;
         initializationPromise = null;
