@@ -43,7 +43,6 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const tools_1 = require("./tools");
-const ui_1 = require("./ui");
 const tools_n8n_manager_1 = require("./tools-n8n-manager");
 const tools_n8n_friendly_1 = require("./tools-n8n-friendly");
 const workflow_examples_1 = require("./workflow-examples");
@@ -155,7 +154,6 @@ class N8NDocumentationMCPServer {
                 resources: {},
             },
         });
-        ui_1.UIAppRegistry.load();
         this.setupHandlers();
     }
     async close() {
@@ -434,7 +432,6 @@ class N8NDocumentationMCPServer {
                     description: tool.description
                 });
             });
-            ui_1.UIAppRegistry.injectToolMeta(tools);
             return { tools };
         });
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
@@ -595,37 +592,10 @@ class N8NDocumentationMCPServer {
             }
         });
         this.server.setRequestHandler(types_js_1.ListResourcesRequestSchema, async () => {
-            const apps = ui_1.UIAppRegistry.getAllApps();
-            return {
-                resources: apps
-                    .filter(app => app.html !== null)
-                    .map(app => ({
-                    uri: app.config.uri,
-                    name: app.config.displayName,
-                    description: app.config.description,
-                    mimeType: app.config.mimeType,
-                })),
-            };
+            return { resources: [] };
         });
         this.server.setRequestHandler(types_js_1.ReadResourceRequestSchema, async (request) => {
-            const uri = request.params.uri;
-            const match = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
-            if (!match) {
-                throw new Error(`Unknown resource URI: ${uri}`);
-            }
-            const app = ui_1.UIAppRegistry.getAppById(match[1]);
-            if (!app || !app.html) {
-                throw new Error(`UI app not found or not built: ${match[1]}`);
-            }
-            return {
-                contents: [
-                    {
-                        uri: app.config.uri,
-                        mimeType: app.config.mimeType,
-                        text: app.html,
-                    },
-                ],
-            };
+            throw new Error(`Unknown resource URI: ${request.params.uri}`);
         });
     }
     sanitizeValidationResult(result, toolName) {

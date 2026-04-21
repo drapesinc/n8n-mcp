@@ -10,7 +10,6 @@ import {
 import { existsSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
-import { UIAppRegistry } from './ui';
 import { n8nManagementTools, getN8nManagementToolsWithWorkspace } from './tools-n8n-manager';
 import { makeToolsN8nFriendly } from './tools-n8n-friendly';
 import { getWorkflowExampleString } from './workflow-examples';
@@ -252,7 +251,6 @@ export class N8NDocumentationMCPServer {
       }
     );
 
-    UIAppRegistry.load();
     this.setupHandlers();
   }
 
@@ -666,7 +664,6 @@ export class N8NDocumentationMCPServer {
         });
       });
       
-      UIAppRegistry.injectToolMeta(tools);
       return { tools };
     });
 
@@ -877,44 +874,12 @@ export class N8NDocumentationMCPServer {
       }
     });
 
-    // Handle ListResources for UI apps
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      const apps = UIAppRegistry.getAllApps();
-      return {
-        resources: apps
-          .filter(app => app.html !== null)
-          .map(app => ({
-            uri: app.config.uri,
-            name: app.config.displayName,
-            description: app.config.description,
-            mimeType: app.config.mimeType,
-          })),
-      };
+      return { resources: [] };
     });
 
-    // Handle ReadResource for UI apps
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      const uri = request.params.uri;
-      // Parse ui://n8n-mcp/{id} pattern
-      const match = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
-      if (!match) {
-        throw new Error(`Unknown resource URI: ${uri}`);
-      }
-
-      const app = UIAppRegistry.getAppById(match[1]);
-      if (!app || !app.html) {
-        throw new Error(`UI app not found or not built: ${match[1]}`);
-      }
-
-      return {
-        contents: [
-          {
-            uri: app.config.uri,
-            mimeType: app.config.mimeType,
-            text: app.html,
-          },
-        ],
-      };
+      throw new Error(`Unknown resource URI: ${request.params.uri}`);
     });
   }
 
