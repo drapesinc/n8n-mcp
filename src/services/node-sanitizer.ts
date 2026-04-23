@@ -31,6 +31,33 @@ const UNARY_OPERATORS = new Set([
 ]);
 
 /**
+ * Known fixedCollection paths where n8n stores collection-type parameters as
+ * `{itemName: [...entries]}` (multipleValues: true). When AI agents or external
+ * callers pass a bare array for the container, or wrap it incorrectly, n8n's
+ * runtime throws "propertyValues[itemName] is not iterable" and the editor UI
+ * crashes when rendering the node. This map lets us normalize the shape back
+ * to the form n8n expects before the workflow is persisted.
+ *
+ * Structure: nodeType (short form) -> container param name -> expected item name.
+ * Multiple container params per node are supported.
+ *
+ * IMPORTANT: Only register fixedCollections with `multipleValues: true` here.
+ * Single-value fixedCollections (like IF node's `conditions`) use a different
+ * on-disk shape and are handled by node-specific sanitizers.
+ */
+const FIXED_COLLECTION_SHAPES: Record<string, Record<string, string>> = {
+  // Notion is the primary trigger for this repair — propertiesUi corruption
+  // causes n8n to throw "propertyValues[itemName] is not iterable" and
+  // freezes the editor. Both propertiesUi and blockUi are top-level
+  // fixedCollection params with multipleValues: true in Notion's node
+  // descriptions.
+  'n8n-nodes-base.notion': {
+    propertiesUi: 'propertyValues',
+    blockUi: 'blockValues',
+  },
+};
+
+/**
  * Sanitize a single node by adding required metadata
  */
 export function sanitizeNode(node: WorkflowNode): WorkflowNode {
@@ -45,7 +72,137 @@ export function sanitizeNode(node: WorkflowNode): WorkflowNode {
     );
   }
 
+  // Generic fixedCollection shape repair — fires on every node so that
+  // ANY callsite that modifies node parameters gets a last-chance fix
+  // before the workflow is handed back to the n8n API. See #90 and the
+  // Notion propertiesUi regression for context.
+  sanitized.parameters = normalizeFixedCollections(
+    node.type,
+    sanitized.parameters as INodeParameters
+  );
+
   return sanitized;
+}
+
+/**
+ * Normalize fixedCollection-with-multipleValues parameters to the shape n8n
+ * expects on disk: `{container: {itemName: [...entries]}}`.
+ *
+ * Handles these corruption patterns (in order):
+ *   1. Bare array at container level:  `container = [...]` → `{itemName: [...]}`
+ *   2. Item is a single object (not array): `{itemName: {...}}` → `{itemName: [{...}]}`
+ *   3. Double-wrapped item: `{itemName: {itemName: [...]}}` → `{itemName: [...]}`
+ *   4. Mis-named item key: `{wrongName: [...]}` when only one key present and its
+ *      value is array-shaped → renamed to the expected `itemName`.
+ *
+ * Unknown node types and unknown container params are passed through untouched.
+ * This is safe-by-default: we never drop data, we only re-shape.
+ */
+export function normalizeFixedCollections(
+  nodeType: string,
+  parameters: INodeParameters
+): INodeParameters {
+  if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+    return parameters;
+  }
+
+  const shapes = FIXED_COLLECTION_SHAPES[nodeType];
+  if (!shapes) {
+    return parameters;
+  }
+
+  let mutated = false;
+  const result: INodeParameters = { ...parameters };
+
+  for (const [containerName, expectedItemName] of Object.entries(shapes)) {
+    if (!(containerName in result)) continue;
+
+    const container = result[containerName];
+    const repaired = reshapeFixedCollectionContainer(container, expectedItemName);
+
+    if (repaired !== container) {
+      logger.debug(
+        `normalizeFixedCollections: repaired ${nodeType}.${containerName} ` +
+          `shape (expected item "${expectedItemName}")`
+      );
+      // Cast through unknown — INodeParameters values are broadly typed but
+      // fixedCollection containers are always plain objects or arrays.
+      (result as Record<string, unknown>)[containerName] = repaired;
+      mutated = true;
+    }
+  }
+
+  return mutated ? result : parameters;
+}
+
+/**
+ * Reshape a single fixedCollection container value. Returns the original
+ * reference unchanged if no repair was needed (so callers can cheaply detect
+ * mutations via reference equality).
+ */
+function reshapeFixedCollectionContainer(
+  container: unknown,
+  expectedItemName: string
+): unknown {
+  // null / undefined / primitive — nothing to repair.
+  if (container === null || container === undefined) return container;
+  if (typeof container !== 'object') return container;
+
+  // Case 1: bare array. Wrap with the expected item name.
+  if (Array.isArray(container)) {
+    return { [expectedItemName]: container };
+  }
+
+  const obj = container as Record<string, unknown>;
+  const keys = Object.keys(obj);
+
+  // Case 2/3: expected key is present.
+  if (expectedItemName in obj) {
+    const item = obj[expectedItemName];
+
+    // Case 3: double-wrapped — `{itemName: {itemName: [...]}}`.
+    if (
+      item !== null &&
+      typeof item === 'object' &&
+      !Array.isArray(item) &&
+      expectedItemName in (item as Record<string, unknown>)
+    ) {
+      const inner = (item as Record<string, unknown>)[expectedItemName];
+      if (Array.isArray(inner)) {
+        return { ...obj, [expectedItemName]: inner };
+      }
+    }
+
+    // Case 2: item is a single entry object instead of an array. Wrap it.
+    // Guard: only wrap if it looks like an entry (has at least one own key)
+    // AND is NOT already a recognisable collection shape. Entries in n8n
+    // fixedCollections are always plain objects with primitive/expression
+    // leaf values, never arrays.
+    if (
+      item !== null &&
+      typeof item === 'object' &&
+      !Array.isArray(item) &&
+      Object.keys(item as Record<string, unknown>).length > 0
+    ) {
+      return { ...obj, [expectedItemName]: [item] };
+    }
+
+    return container; // Already in correct shape (array), pass through.
+  }
+
+  // Case 4: single mis-named key whose value is array-shaped. Rename it.
+  // This catches flatten-then-rewrap mistakes where the container got the
+  // right wrapper shape but a wrong inner key (e.g. "values" instead of
+  // "propertyValues").
+  if (keys.length === 1) {
+    const onlyKey = keys[0];
+    const onlyValue = obj[onlyKey];
+    if (Array.isArray(onlyValue)) {
+      return { [expectedItemName]: onlyValue };
+    }
+  }
+
+  return container;
 }
 
 /**

@@ -4,7 +4,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { sanitizeNode, validateNodeMetadata } from '../../../src/services/node-sanitizer';
+import {
+  sanitizeNode,
+  validateNodeMetadata,
+  normalizeFixedCollections,
+} from '../../../src/services/node-sanitizer';
 import { WorkflowNode } from '../../../src/types/n8n-api';
 
 describe('Node Sanitizer', () => {
@@ -489,6 +493,133 @@ describe('Node Sanitizer', () => {
       const issues = validateNodeMetadata(node);
 
       expect(issues).toEqual([]);
+    });
+  });
+
+  describe('normalizeFixedCollections - Notion propertiesUi', () => {
+    const buildNotionNode = (parameters: Record<string, unknown>): WorkflowNode => ({
+      id: 'notion-1',
+      name: 'Notion',
+      type: 'n8n-nodes-base.notion',
+      typeVersion: 2.2,
+      position: [0, 0],
+      parameters: parameters as any,
+    });
+
+    it('preserves a correctly-shaped propertiesUi round-trip', () => {
+      const entries = [
+        { key: 'Status|status', statusValue: 'Active' },
+        { key: 'Name|title', title: 'Test' },
+      ];
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        propertiesUi: { propertyValues: entries },
+      });
+
+      // First pass
+      const once = sanitizeNode(node);
+      expect(once.parameters.propertiesUi).toEqual({ propertyValues: entries });
+
+      // Round-trip: serialize and re-sanitize (mimics load -> save -> load)
+      const clone = JSON.parse(JSON.stringify(once));
+      const twice = sanitizeNode(clone);
+      expect(twice.parameters.propertiesUi).toEqual({ propertyValues: entries });
+    });
+
+    it('rewraps a bare array at propertiesUi back into {propertyValues: [...]}', () => {
+      const entries = [
+        { key: 'Email|email', emailValue: 'x@y.com' },
+        { key: 'Status|status', statusValue: 'Active' },
+      ];
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        propertiesUi: entries as any,
+      });
+
+      const sanitized = sanitizeNode(node);
+      expect(sanitized.parameters.propertiesUi).toEqual({ propertyValues: entries });
+    });
+
+    it('wraps a single-object propertyValues entry into an array', () => {
+      const entry = { key: 'Clock ID|rich_text', textContent: '123' };
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        propertiesUi: { propertyValues: entry },
+      });
+
+      const sanitized = sanitizeNode(node);
+      expect(sanitized.parameters.propertiesUi).toEqual({ propertyValues: [entry] });
+    });
+
+    it('unwraps a double-wrapped propertyValues container', () => {
+      const entries = [{ key: 'Push ID|rich_text', textContent: '999' }];
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        propertiesUi: { propertyValues: { propertyValues: entries } },
+      });
+
+      const sanitized = sanitizeNode(node);
+      expect(sanitized.parameters.propertiesUi).toEqual({ propertyValues: entries });
+    });
+
+    it('renames a single mis-named key holding an array to propertyValues', () => {
+      const entries = [{ key: 'Joined|date', date: '2026-01-01' }];
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        // Common AI-agent mistake: using "values" instead of "propertyValues"
+        propertiesUi: { values: entries } as any,
+      });
+
+      const sanitized = sanitizeNode(node);
+      expect(sanitized.parameters.propertiesUi).toEqual({ propertyValues: entries });
+    });
+
+    it('leaves unknown node types untouched', () => {
+      const params = { propertiesUi: [{ key: 'foo', value: 'bar' }] };
+      const result = normalizeFixedCollections(
+        'n8n-nodes-base.httpRequest',
+        params as any
+      );
+      expect(result).toBe(params);
+    });
+
+    it('leaves unknown container params untouched on known nodes', () => {
+      const params = {
+        resource: 'databasePage',
+        operation: 'create',
+        someOtherParam: [{ a: 1 }],
+      };
+      const result = normalizeFixedCollections('n8n-nodes-base.notion', params as any);
+      expect(result).toBe(params);
+    });
+
+    it('returns the same reference when no repair is needed (cheap path)', () => {
+      const params = {
+        propertiesUi: { propertyValues: [{ key: 'k', textContent: 'v' }] },
+      };
+      const result = normalizeFixedCollections('n8n-nodes-base.notion', params as any);
+      expect(result).toBe(params);
+    });
+
+    it('repairs blockUi alongside propertiesUi in the same pass', () => {
+      const propEntries = [{ key: 'Name|title', title: 'x' }];
+      const blockEntries = [{ type: 'paragraph', richText: [{ text: 'hello' }] }];
+      const node = buildNotionNode({
+        resource: 'databasePage',
+        operation: 'create',
+        // Both containers corrupted in different ways.
+        propertiesUi: propEntries as any,
+        blockUi: { blockValues: blockEntries[0] as any }, // single object, not array
+      });
+
+      const sanitized = sanitizeNode(node);
+      expect(sanitized.parameters.propertiesUi).toEqual({ propertyValues: propEntries });
+      expect(sanitized.parameters.blockUi).toEqual({ blockValues: blockEntries });
     });
   });
 });

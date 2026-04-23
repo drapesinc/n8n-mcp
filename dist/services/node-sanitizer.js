@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.sanitizeNode = sanitizeNode;
+exports.normalizeFixedCollections = normalizeFixedCollections;
 exports.sanitizeWorkflowNodes = sanitizeWorkflowNodes;
 exports.validateNodeMetadata = validateNodeMetadata;
 const logger_1 = require("../utils/logger");
@@ -17,12 +18,81 @@ const UNARY_OPERATORS = new Set([
     'exists',
     'notExists',
 ]);
+const FIXED_COLLECTION_SHAPES = {
+    'n8n-nodes-base.notion': {
+        propertiesUi: 'propertyValues',
+        blockUi: 'blockValues',
+    },
+};
 function sanitizeNode(node) {
     const sanitized = { ...node };
     if (isFilterBasedNode(node.type, node.typeVersion)) {
         sanitized.parameters = sanitizeFilterBasedNode(sanitized.parameters, node.type, node.typeVersion);
     }
+    sanitized.parameters = normalizeFixedCollections(node.type, sanitized.parameters);
     return sanitized;
+}
+function normalizeFixedCollections(nodeType, parameters) {
+    if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) {
+        return parameters;
+    }
+    const shapes = FIXED_COLLECTION_SHAPES[nodeType];
+    if (!shapes) {
+        return parameters;
+    }
+    let mutated = false;
+    const result = { ...parameters };
+    for (const [containerName, expectedItemName] of Object.entries(shapes)) {
+        if (!(containerName in result))
+            continue;
+        const container = result[containerName];
+        const repaired = reshapeFixedCollectionContainer(container, expectedItemName);
+        if (repaired !== container) {
+            logger_1.logger.debug(`normalizeFixedCollections: repaired ${nodeType}.${containerName} ` +
+                `shape (expected item "${expectedItemName}")`);
+            result[containerName] = repaired;
+            mutated = true;
+        }
+    }
+    return mutated ? result : parameters;
+}
+function reshapeFixedCollectionContainer(container, expectedItemName) {
+    if (container === null || container === undefined)
+        return container;
+    if (typeof container !== 'object')
+        return container;
+    if (Array.isArray(container)) {
+        return { [expectedItemName]: container };
+    }
+    const obj = container;
+    const keys = Object.keys(obj);
+    if (expectedItemName in obj) {
+        const item = obj[expectedItemName];
+        if (item !== null &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            expectedItemName in item) {
+            const inner = item[expectedItemName];
+            if (Array.isArray(inner)) {
+                return { ...obj, [expectedItemName]: inner };
+            }
+        }
+        if (item !== null &&
+            typeof item === 'object' &&
+            !Array.isArray(item) &&
+            Object.keys(item).length > 0) {
+            return { ...obj, [expectedItemName]: [item] };
+        }
+        return container;
+    }
+    if (keys.length === 1) {
+        const onlyKey = keys[0];
+        const onlyValue = obj[onlyKey];
+        if (Array.isArray(onlyValue)) {
+            return { [expectedItemName]: onlyValue };
+        }
+    }
+    return container;
 }
 function sanitizeWorkflowNodes(workflow) {
     if (!workflow.nodes || !Array.isArray(workflow.nodes)) {
