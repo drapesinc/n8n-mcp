@@ -84,6 +84,9 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
             if (!validation.valid) {
                 return this.errorResponse(input, `SSRF protection: ${validation.reason}`, startTime);
             }
+            const pinned = validation.address && validation.family
+                ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+                : undefined;
             const sessionId = input.sessionId || generateSessionId();
             const chatPayload = {
                 action: 'sendMessage',
@@ -101,6 +104,9 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
                 data: chatPayload,
                 timeout: input.timeout || (input.waitForResponse !== false ? 120000 : 30000),
                 validateStatus: (status) => status < 500,
+                maxRedirects: 0,
+                httpAgent: pinned?.httpAgent,
+                httpsAgent: pinned?.httpsAgent,
             };
             const response = await axios_1.default.request(config);
             const chatResponse = response.data;

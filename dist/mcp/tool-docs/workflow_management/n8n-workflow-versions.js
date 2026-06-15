@@ -13,11 +13,12 @@ exports.n8nWorkflowVersionsDoc = {
             'Use mode="list" to see all saved versions before rollback',
             'Rollback creates a backup version automatically',
             'Use prune to clean up old versions and save storage',
-            'truncate requires explicit confirmTruncate: true'
+            'Versions are scoped to your n8n instance; you only ever see your own',
+            'Old backups are pruned automatically (10 per workflow + an age-based retention window)'
         ]
     },
     full: {
-        description: `Comprehensive workflow version management system. Supports six operations:
+        description: `Comprehensive workflow version management system. Supports five operations:
 
 **list** - Show version history for a workflow
 - Returns all saved versions with timestamps, snapshot sizes, and metadata
@@ -40,15 +41,15 @@ exports.n8nWorkflowVersionsDoc = {
 - Keeps only the N most recent versions (default: 10)
 - Useful for managing storage and keeping history manageable
 
-**truncate** - Delete ALL versions for ALL workflows
-- Dangerous operation requiring explicit confirmation
-- Use for complete version history cleanup`,
+All version operations are scoped to your n8n instance — you can only see and act on backups created
+under your own credentials. Old backups are also removed automatically (10 most recent per workflow,
+plus an age-based retention window).`,
         parameters: {
             mode: {
                 type: 'string',
                 required: true,
-                description: 'Operation mode: "list", "get", "rollback", "delete", "prune", or "truncate"',
-                enum: ['list', 'get', 'rollback', 'delete', 'prune', 'truncate']
+                description: 'Operation mode: "list", "get", "rollback", "delete", or "prune"',
+                enum: ['list', 'get', 'rollback', 'delete', 'prune']
             },
             workflowId: {
                 type: 'string',
@@ -83,12 +84,6 @@ exports.n8nWorkflowVersionsDoc = {
                 required: false,
                 default: 10,
                 description: 'Keep N most recent versions (prune mode only)'
-            },
-            confirmTruncate: {
-                type: 'boolean',
-                required: false,
-                default: false,
-                description: 'REQUIRED: Must be true to truncate all versions (truncate mode only)'
             }
         },
         returns: `Response varies by mode:
@@ -110,10 +105,7 @@ exports.n8nWorkflowVersionsDoc = {
 
 **prune mode:**
 - prunedCount: Number of old versions removed
-- remainingCount: Number of versions kept
-
-**truncate mode:**
-- deletedCount: Total versions deleted across all workflows`,
+- remainingCount: Number of versions kept`,
         examples: [
             '// List version history\nn8n_workflow_versions({mode: "list", workflowId: "abc123", limit: 5})',
             '// Get specific version details\nn8n_workflow_versions({mode: "get", versionId: 42})',
@@ -121,8 +113,7 @@ exports.n8nWorkflowVersionsDoc = {
             '// Rollback to specific version\nn8n_workflow_versions({mode: "rollback", workflowId: "abc123", versionId: 42})',
             '// Delete specific version\nn8n_workflow_versions({mode: "delete", workflowId: "abc123", versionId: 42})',
             '// Delete all versions for workflow\nn8n_workflow_versions({mode: "delete", workflowId: "abc123", deleteAll: true})',
-            '// Prune to keep only 5 most recent\nn8n_workflow_versions({mode: "prune", workflowId: "abc123", maxVersions: 5})',
-            '// Truncate all versions (dangerous!)\nn8n_workflow_versions({mode: "truncate", confirmTruncate: true})'
+            '// Prune to keep only 5 most recent\nn8n_workflow_versions({mode: "prune", workflowId: "abc123", maxVersions: 5})'
         ],
         useCases: [
             'Recover from accidental workflow changes',
@@ -136,27 +127,24 @@ exports.n8nWorkflowVersionsDoc = {
 - get: Fast (~100ms) - single row retrieval
 - rollback: Moderate (~200-500ms) - includes backup creation and workflow update
 - delete: Fast (~50-100ms) - database delete operation
-- prune: Moderate (~100-300ms) - depends on number of versions to delete
-- truncate: Slow (1-5s) - deletes all records across all workflows`,
+- prune: Moderate (~100-300ms) - depends on number of versions to delete`,
         modeComparison: `| Mode | Required Params | Optional Params | Risk Level |
 |------|-----------------|-----------------|------------|
 | list | workflowId | limit | Low |
 | get | versionId | - | Low |
 | rollback | workflowId | versionId, validateBefore | Medium |
 | delete | workflowId | versionId, deleteAll | High |
-| prune | workflowId | maxVersions | Medium |
-| truncate | confirmTruncate=true | - | Critical |`,
+| prune | workflowId | maxVersions | Medium |`,
         bestPractices: [
             'Always list versions before rollback to pick the right one',
             'Enable validateBefore for rollback to catch structural issues',
             'Use prune regularly to keep version history manageable',
-            'Never use truncate in production without explicit need',
             'Document why you are rolling back for audit purposes'
         ],
         pitfalls: [
             'Rollback overwrites current workflow - backup is created automatically',
             'Deleted versions cannot be recovered',
-            'Truncate affects ALL workflows - use with extreme caution',
+            'Version operations are scoped to your instance - versions from other instances are not visible',
             'Version IDs are sequential but may have gaps after deletes',
             'Large workflows may have significant version storage overhead'
         ],

@@ -9,6 +9,7 @@ export declare class UIAppRegistry {
     static getAllApps(): UIAppEntry[];
     static injectToolMeta(tools: Array<{
         name: string;
+        _meta?: Record<string, unknown>;
         [key: string]: any;
     }>): void;
     static reset(): void;

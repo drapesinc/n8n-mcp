@@ -19,6 +19,10 @@ class MutationTracker {
             }
             const workflowBefore = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowBefore);
             const workflowAfter = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowAfter);
+            const sanitizedOperations = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.operations);
+            const sanitizedValidationBefore = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.validationBefore);
+            const sanitizedValidationAfter = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.validationAfter);
+            const sanitizedMutationError = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.mutationError);
             const sanitizedIntent = intent_sanitizer_js_1.intentSanitizer.sanitize(data.userIntent);
             if (mutation_validator_js_1.mutationValidator.shouldExclude(data)) {
                 logger_js_1.logger.debug('Mutation excluded from tracking based on quality criteria');
@@ -47,15 +51,15 @@ class MutationTracker {
                 userIntent: sanitizedIntent,
                 intentClassification,
                 toolName: data.toolName,
-                operations: data.operations,
+                operations: sanitizedOperations,
                 operationCount: data.operations.length,
                 operationTypes: this.extractOperationTypes(data.operations),
-                validationBefore: data.validationBefore,
-                validationAfter: data.validationAfter,
+                validationBefore: sanitizedValidationBefore,
+                validationAfter: sanitizedValidationAfter,
                 ...validationMetrics,
                 ...changeMetrics,
                 mutationSuccess: data.mutationSuccess,
-                mutationError: data.mutationError,
+                mutationError: sanitizedMutationError,
                 durationMs: data.durationMs,
             };
             this.addToRecentMutations(hashBefore, hashAfter, data.operations);

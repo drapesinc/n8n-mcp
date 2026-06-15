@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isInstanceContext = isInstanceContext;
 exports.validateInstanceContext = validateInstanceContext;
+exports.getInstanceScopeId = getInstanceScopeId;
+const crypto_1 = require("crypto");
 const ssrf_protection_1 = require("../utils/ssrf-protection");
 function isValidUrl(url) {
     try {
@@ -130,5 +132,15 @@ function validateInstanceContext(context) {
         valid: errors.length === 0,
         errors: errors.length > 0 ? errors : undefined
     };
+}
+function getInstanceScopeId(context) {
+    if (context?.n8nApiUrl && context?.n8nApiKey) {
+        const url = context.n8nApiUrl.trim().replace(/\/+$/, '').toLowerCase();
+        return (0, crypto_1.createHash)('sha256')
+            .update(`n8n-mcp-wv:${url}:${context.n8nApiKey}`)
+            .digest('hex')
+            .slice(0, 32);
+    }
+    return '';
 }
 //# sourceMappingURL=instance-context.js.map

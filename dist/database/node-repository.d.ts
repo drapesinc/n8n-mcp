@@ -14,6 +14,7 @@ export interface CommunityNodeFields {
 export declare class NodeRepository {
     private db;
     constructor(dbOrService: DatabaseAdapter | SQLiteStorageService);
+    pruneExpiredWorkflowVersions(): void;
     saveNode(node: ParsedNode & Partial<CommunityNodeFields>): void;
     getNode(nodeType: string): any;
     getAITools(): any[];
@@ -107,6 +108,7 @@ export declare class NodeRepository {
     private parseNodeVersionRow;
     private parsePropertyChangeRow;
     createWorkflowVersion(data: {
+        instanceId: string;
         workflowId: string;
         versionNumber: number;
         workflowName: string;
@@ -116,15 +118,15 @@ export declare class NodeRepository {
         fixTypes?: string[];
         metadata?: any;
     }): number;
-    getWorkflowVersions(workflowId: string, limit?: number): any[];
-    getWorkflowVersion(versionId: number): any | null;
-    getLatestWorkflowVersion(workflowId: string): any | null;
-    deleteWorkflowVersion(versionId: number): void;
-    deleteWorkflowVersionsByWorkflowId(workflowId: string): number;
-    pruneWorkflowVersions(workflowId: string, keepCount: number): number;
-    truncateWorkflowVersions(): number;
-    getWorkflowVersionCount(workflowId: string): number;
-    getVersionStorageStats(): any;
+    getWorkflowVersions(workflowId: string, instanceId: string, limit?: number): any[];
+    getWorkflowVersion(versionId: number, instanceId: string): any | null;
+    getLatestWorkflowVersion(workflowId: string, instanceId: string): any | null;
+    deleteWorkflowVersion(versionId: number, instanceId: string): number;
+    deleteWorkflowVersionsByWorkflowId(workflowId: string, instanceId: string): number;
+    pruneWorkflowVersions(workflowId: string, keepCount: number, instanceId: string): number;
+    deleteWorkflowVersionsOlderThan(cutoffIso: string): number;
+    getWorkflowVersionCount(workflowId: string, instanceId: string): number;
+    getVersionStorageStats(instanceId: string): any;
     private parseWorkflowVersionRow;
 }
 //# sourceMappingURL=node-repository.d.ts.map

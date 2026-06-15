@@ -40,12 +40,14 @@ exports.N8nApiClient = void 0;
 const axios_1 = __importDefault(require("axios"));
 const logger_1 = require("../utils/logger");
 const n8n_errors_1 = require("../utils/n8n-errors");
+const validation_schemas_1 = require("../utils/validation-schemas");
 const n8n_validation_1 = require("./n8n-validation");
 const n8n_version_1 = require("./n8n-version");
 class N8nApiClient {
     constructor(config) {
         this.versionInfo = null;
         this.versionPromise = null;
+        this.pinnedAgentsPromise = null;
         const { baseUrl, apiKey, timeout = 30000, maxRetries = 3 } = config;
         this.maxRetries = maxRetries;
         let normalizedBase;
@@ -70,8 +72,12 @@ class N8nApiClient {
                 'X-N8N-API-KEY': apiKey,
                 'Content-Type': 'application/json',
             },
+            maxRedirects: 0,
         });
-        this.client.interceptors.request.use((config) => {
+        this.client.interceptors.request.use(async (config) => {
+            const agents = await this.getPinnedAgents();
+            config.httpAgent = agents.httpAgent;
+            config.httpsAgent = agents.httpsAgent;
             const isSensitive = config.url?.includes('/credentials') && config.method !== 'get';
             logger_1.logger.debug(`n8n API Request: ${config.method?.toUpperCase()} ${config.url}`, {
                 params: config.params,
@@ -91,6 +97,25 @@ class N8nApiClient {
             return Promise.reject(n8nError);
         });
     }
+    getPinnedAgents() {
+        if (!this.pinnedAgentsPromise) {
+            const promise = (async () => {
+                const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('../utils/ssrf-protection')));
+                const validation = await SSRFProtection.validateWebhookUrl(this.baseUrl);
+                if (!validation.valid || !validation.address || !validation.family) {
+                    throw new Error(`SSRF protection: ${validation.reason || 'baseUrl rejected'}`);
+                }
+                return SSRFProtection.createPinnedAgents(validation.address, validation.family);
+            })();
+            promise.catch(() => {
+                if (this.pinnedAgentsPromise === promise) {
+                    this.pinnedAgentsPromise = null;
+                }
+            });
+            this.pinnedAgentsPromise = promise;
+        }
+        return this.pinnedAgentsPromise;
+    }
     async getVersion() {
         if (this.versionInfo) {
             return this.versionInfo;
@@ -108,7 +133,11 @@ class N8nApiClient {
         }
     }
     async fetchVersionOnce() {
-        return (0, n8n_version_1.getCachedVersion)(this.baseUrl) ?? await (0, n8n_version_1.fetchN8nVersion)(this.baseUrl);
+        const cached = (0, n8n_version_1.getCachedVersion)(this.baseUrl);
+        if (cached)
+            return cached;
+        const agents = await this.getPinnedAgents();
+        return await (0, n8n_version_1.fetchN8nVersion)(this.baseUrl, agents);
     }
     getCachedVersionInfo() {
         return this.versionInfo;
@@ -117,9 +146,13 @@ class N8nApiClient {
         try {
             const baseUrl = this.client.defaults.baseURL || '';
             const healthzUrl = baseUrl.replace(/\/api\/v\d+\/?$/, '') + '/healthz';
+            const agents = await this.getPinnedAgents();
             const response = await axios_1.default.get(healthzUrl, {
                 timeout: 5000,
-                validateStatus: (status) => status < 500
+                validateStatus: (status) => status < 500,
+                maxRedirects: 0,
+                httpAgent: agents.httpAgent,
+                httpsAgent: agents.httpsAgent,
             });
             const versionInfo = await this.getVersion();
             if (response.status === 200 && response.data?.status === 'ok') {
@@ -158,7 +191,7 @@ class N8nApiClient {
     }
     async getWorkflow(id) {
         try {
-            const response = await this.client.get(`/workflows/${id}`);
+            const response = await this.client.get(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}`);
             return response.data;
         }
         catch (error) {
@@ -176,14 +209,15 @@ class N8nApiClient {
             else {
                 logger_1.logger.warn('Could not determine n8n version, sending all known settings properties');
             }
+            const safeId = (0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId');
             try {
-                const response = await this.client.put(`/workflows/${id}`, cleanedWorkflow);
+                const response = await this.client.put(`/workflows/${safeId}`, cleanedWorkflow);
                 return response.data;
             }
             catch (putError) {
                 if (putError.response?.status === 405) {
                     logger_1.logger.debug('PUT method not supported, falling back to PATCH');
-                    const response = await this.client.patch(`/workflows/${id}`, cleanedWorkflow);
+                    const response = await this.client.patch(`/workflows/${safeId}`, cleanedWorkflow);
                     return response.data;
                 }
                 throw putError;
@@ -195,7 +229,7 @@ class N8nApiClient {
     }
     async deleteWorkflow(id) {
         try {
-            const response = await this.client.delete(`/workflows/${id}`);
+            const response = await this.client.delete(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}`);
             return response.data;
         }
         catch (error) {
@@ -204,7 +238,7 @@ class N8nApiClient {
     }
     async transferWorkflow(id, destinationProjectId) {
         try {
-            await this.client.put(`/workflows/${id}/transfer`, { destinationProjectId });
+            await this.client.put(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}/transfer`, { destinationProjectId });
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -212,7 +246,7 @@ class N8nApiClient {
     }
     async activateWorkflow(id) {
         try {
-            const response = await this.client.post(`/workflows/${id}/activate`, {});
+            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}/activate`, {});
             return response.data;
         }
         catch (error) {
@@ -221,7 +255,7 @@ class N8nApiClient {
     }
     async deactivateWorkflow(id) {
         try {
-            const response = await this.client.post(`/workflows/${id}/deactivate`, {});
+            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}/deactivate`, {});
             return response.data;
         }
         catch (error) {
@@ -271,7 +305,7 @@ class N8nApiClient {
     }
     async getExecution(id, includeData = false) {
         try {
-            const response = await this.client.get(`/executions/${id}`, {
+            const response = await this.client.get(`/executions/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'executionId')}`, {
                 params: { includeData },
             });
             return response.data;
@@ -291,7 +325,7 @@ class N8nApiClient {
     }
     async deleteExecution(id) {
         try {
-            await this.client.delete(`/executions/${id}`);
+            await this.client.delete(`/executions/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'executionId')}`);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -318,9 +352,15 @@ class N8nApiClient {
                 params: httpMethod === 'GET' ? data : undefined,
                 timeout: waitForResponse ? 120000 : 30000,
             };
+            const pinned = validation.address && validation.family
+                ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+                : undefined;
             const webhookClient = axios_1.default.create({
                 baseURL: new URL('/', webhookUrl).toString(),
                 validateStatus: (status) => status < 500,
+                maxRedirects: 0,
+                httpAgent: pinned?.httpAgent,
+                httpsAgent: pinned?.httpsAgent,
             });
             const response = await webhookClient.request(config);
             return {
@@ -343,9 +383,26 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
+    async listAllCredentials() {
+        const allCredentials = [];
+        let cursor;
+        const seenCursors = new Set();
+        const PAGE_SIZE = 100;
+        const MAX_PAGES = 50;
+        for (let page = 0; page < MAX_PAGES; page++) {
+            const params = { limit: PAGE_SIZE, cursor };
+            const response = await this.listCredentials(params);
+            allCredentials.push(...response.data);
+            if (!response.nextCursor || seenCursors.has(response.nextCursor))
+                break;
+            seenCursors.add(response.nextCursor);
+            cursor = response.nextCursor;
+        }
+        return allCredentials;
+    }
     async getCredential(id) {
         try {
-            const response = await this.client.get(`/credentials/${id}`);
+            const response = await this.client.get(`/credentials/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'credentialId')}`);
             return response.data;
         }
         catch (error) {
@@ -363,7 +420,7 @@ class N8nApiClient {
     }
     async updateCredential(id, credential) {
         try {
-            const response = await this.client.patch(`/credentials/${id}`, credential);
+            const response = await this.client.patch(`/credentials/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'credentialId')}`, credential);
             return response.data;
         }
         catch (error) {
@@ -372,7 +429,7 @@ class N8nApiClient {
     }
     async deleteCredential(id) {
         try {
-            await this.client.delete(`/credentials/${id}`);
+            await this.client.delete(`/credentials/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'credentialId')}`);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -380,7 +437,7 @@ class N8nApiClient {
     }
     async getCredentialSchema(typeName) {
         try {
-            const response = await this.client.get(`/credentials/schema/${typeName}`);
+            const response = await this.client.get(`/credentials/schema/${(0, validation_schemas_1.encodeApiPathSegment)(typeName, 'credentialTypeName')}`);
             return response.data;
         }
         catch (error) {
@@ -407,7 +464,7 @@ class N8nApiClient {
     }
     async updateTag(id, tag) {
         try {
-            const response = await this.client.patch(`/tags/${id}`, tag);
+            const response = await this.client.patch(`/tags/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'tagId')}`, tag);
             return response.data;
         }
         catch (error) {
@@ -416,7 +473,7 @@ class N8nApiClient {
     }
     async deleteTag(id) {
         try {
-            await this.client.delete(`/tags/${id}`);
+            await this.client.delete(`/tags/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'tagId')}`);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -424,7 +481,7 @@ class N8nApiClient {
     }
     async updateWorkflowTags(workflowId, tagIds) {
         try {
-            const response = await this.client.put(`/workflows/${workflowId}/tags`, tagIds.filter(id => id).map(id => ({ id })));
+            const response = await this.client.put(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/tags`, tagIds.filter(id => id).map(id => ({ id })));
             return response.data;
         }
         catch (error) {
@@ -482,7 +539,7 @@ class N8nApiClient {
     }
     async updateVariable(id, variable) {
         try {
-            const response = await this.client.patch(`/variables/${id}`, variable);
+            const response = await this.client.patch(`/variables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'variableId')}`, variable);
             return response.data;
         }
         catch (error) {
@@ -491,7 +548,7 @@ class N8nApiClient {
     }
     async deleteVariable(id) {
         try {
-            await this.client.delete(`/variables/${id}`);
+            await this.client.delete(`/variables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'variableId')}`);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -517,7 +574,7 @@ class N8nApiClient {
     }
     async getDataTable(id) {
         try {
-            const response = await this.client.get(`/data-tables/${id}`);
+            const response = await this.client.get(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}`);
             return response.data;
         }
         catch (error) {
@@ -526,7 +583,7 @@ class N8nApiClient {
     }
     async updateDataTable(id, params) {
         try {
-            const response = await this.client.patch(`/data-tables/${id}`, params);
+            const response = await this.client.patch(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}`, params);
             return response.data;
         }
         catch (error) {
@@ -535,7 +592,7 @@ class N8nApiClient {
     }
     async deleteDataTable(id) {
         try {
-            await this.client.delete(`/data-tables/${id}`);
+            await this.client.delete(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}`);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -543,7 +600,7 @@ class N8nApiClient {
     }
     async getDataTableRows(id, params = {}) {
         try {
-            const response = await this.client.get(`/data-tables/${id}/rows`, {
+            const response = await this.client.get(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows`, {
                 params,
                 paramsSerializer: (p) => this.serializeDataTableParams(p),
             });
@@ -555,7 +612,7 @@ class N8nApiClient {
     }
     async insertDataTableRows(id, params) {
         try {
-            const response = await this.client.post(`/data-tables/${id}/rows`, params);
+            const response = await this.client.post(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows`, params);
             return response.data;
         }
         catch (error) {
@@ -564,7 +621,7 @@ class N8nApiClient {
     }
     async updateDataTableRows(id, params) {
         try {
-            const response = await this.client.patch(`/data-tables/${id}/rows/update`, params);
+            const response = await this.client.patch(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows/update`, params);
             return response.data;
         }
         catch (error) {
@@ -573,7 +630,7 @@ class N8nApiClient {
     }
     async upsertDataTableRow(id, params) {
         try {
-            const response = await this.client.post(`/data-tables/${id}/rows/upsert`, params);
+            const response = await this.client.post(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows/upsert`, params);
             return response.data;
         }
         catch (error) {
@@ -582,7 +639,7 @@ class N8nApiClient {
     }
     async deleteDataTableRows(id, params) {
         try {
-            const response = await this.client.delete(`/data-tables/${id}/rows/delete`, {
+            const response = await this.client.delete(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows/delete`, {
                 params,
                 paramsSerializer: (p) => this.serializeDataTableParams(p),
             });
@@ -596,6 +653,8 @@ class N8nApiClient {
         const parts = [];
         for (const [key, value] of Object.entries(params)) {
             if (value === undefined || value === null)
+                continue;
+            if (typeof value === 'string' && value.trim() === '')
                 continue;
             parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
         }

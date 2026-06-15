@@ -132,6 +132,23 @@ describe('Data Table Handlers (n8n_manage_datatable)', () => {
       });
     });
 
+    // Issue #774: MCP clients (e.g. opencode) serialize optional fields as empty strings.
+    it('should coerce empty-string projectId to undefined (issue #774)', async () => {
+      const createdTable = { id: 'dt-empty', name: 'No Project' };
+      mockApiClient.createDataTable.mockResolvedValue(createdTable);
+
+      const result = await handlers.handleCreateTable({
+        name: 'No Project',
+        columns: [{ name: 'id', type: 'string' }],
+        projectId: '',
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.createDataTable).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: undefined })
+      );
+    });
+
     it('should create data table in a specific project when projectId is provided', async () => {
       const createdTable = {
         id: 'dt-789',
@@ -313,6 +330,18 @@ describe('Data Table Handlers (n8n_manage_datatable)', () => {
       expect(mockApiClient.listDataTables).toHaveBeenCalledWith({ limit: 10, cursor: 'cursor-abc' });
       expect(result.success).toBe(true);
       expect(result.data.nextCursor).toBe('cursor-next');
+    });
+
+    // Issue #774: MCP clients (e.g. opencode) serialize optional fields as empty strings.
+    it('should coerce empty-string cursor to undefined (issue #774)', async () => {
+      mockApiClient.listDataTables.mockResolvedValue({ data: [], nextCursor: null });
+
+      const result = await handlers.handleListTables({ cursor: '' });
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.listDataTables).toHaveBeenCalledWith(
+        expect.objectContaining({ cursor: undefined })
+      );
     });
 
     it('should handle API error', async () => {
@@ -513,6 +542,23 @@ describe('Data Table Handlers (n8n_manage_datatable)', () => {
       expect(mockApiClient.getDataTableRows).toHaveBeenCalledWith('dt-1', {
         filter: filterStr,
       });
+    });
+
+    // Issue #774: MCP clients (e.g. opencode) serialize optional fields as empty strings.
+    it('should coerce empty-string cursor/sortBy/search to undefined (issue #774)', async () => {
+      mockApiClient.getDataTableRows.mockResolvedValue({ data: [], nextCursor: null });
+
+      await handlers.handleGetRows({
+        tableId: 'dt-1',
+        cursor: '',
+        sortBy: '',
+        search: '',
+      });
+
+      const callArgs = mockApiClient.getDataTableRows.mock.calls[0][1];
+      expect(callArgs.cursor).toBeUndefined();
+      expect(callArgs.sortBy).toBeUndefined();
+      expect(callArgs.search).toBeUndefined();
     });
   });
 

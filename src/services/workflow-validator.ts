@@ -11,6 +11,7 @@ import { extractBracketExpressions } from '../utils/expression-utils';
 import { ExpressionFormatValidator } from './expression-format-validator';
 import { NodeSimilarityService, NodeSuggestion } from './node-similarity-service';
 import { NodeTypeNormalizer } from '../utils/node-type-normalizer';
+import { parseTypeVersion } from '../utils/typeversion';
 import { Logger } from '../utils/logger';
 import { validateAISpecificNodes, hasAINodes, AI_CONNECTION_TYPES } from './ai-node-validator';
 import { isAIToolSubNode } from './ai-tool-validators';
@@ -496,40 +497,59 @@ export class WorkflowValidator {
         // Otherwise, langchain nodes with invalid typeVersion (e.g., 99999) would pass validation
         // but fail at runtime in n8n. This was the bug fixed in v2.17.4.
         if (nodeInfo.isVersioned) {
-          // Check if typeVersion is missing
-          if (!node.typeVersion) {
-            result.errors.push({
-              type: 'error',
-              nodeId: node.id,
-              nodeName: node.name,
-              message: `Missing required property 'typeVersion'. Add typeVersion: ${nodeInfo.version || 1}`
-            });
-          }
-          // Check if typeVersion is invalid (must be non-negative number, version 0 is valid)
-          else if (typeof node.typeVersion !== 'number' || node.typeVersion < 0) {
-            result.errors.push({
-              type: 'error',
-              nodeId: node.id,
-              nodeName: node.name,
-              message: `Invalid typeVersion: ${node.typeVersion}. Must be a non-negative number`
-            });
-          }
-          // Check if typeVersion is outdated (less than latest)
-          else if (nodeInfo.version && node.typeVersion < nodeInfo.version) {
+          // Coerce nodeInfo.version (stored as TEXT in SQLite, may be a non-numeric
+          // npm-style string for community nodes — see #781) to a finite number for
+          // safe comparisons. If we can't, skip the min/max checks rather than silently
+          // comparing against NaN.
+          const maxVersion = parseTypeVersion(nodeInfo.version);
+          if (maxVersion === null && nodeInfo.version != null) {
+            // Stale seed data: stored version isn't a valid typeVersion. We can't
+            // tell whether `node.typeVersion` is in range, so surface the gap rather
+            // than silently passing it through.
             result.warnings.push({
               type: 'warning',
               nodeId: node.id,
               nodeName: node.name,
-              message: `Outdated typeVersion: ${node.typeVersion}. Latest is ${nodeInfo.version}`
+              message: `Cannot validate typeVersion for ${node.type}: stored version "${nodeInfo.version}" is not a valid typeVersion. Min/max checks were skipped — re-sync this node or verify typeVersion against the node descriptor manually.`
             });
           }
-          // Check if typeVersion exceeds maximum supported
-          else if (nodeInfo.version && node.typeVersion > nodeInfo.version) {
+
+          // Check if typeVersion is missing. Use an explicit nullish check so that
+          // a literal 0 isn't treated as missing, and so that NaN falls through to
+          // the "invalid" branch below (where it is reported as non-finite).
+          if (node.typeVersion === undefined || node.typeVersion === null) {
             result.errors.push({
               type: 'error',
               nodeId: node.id,
               nodeName: node.name,
-              message: `typeVersion ${node.typeVersion} exceeds maximum supported version ${nodeInfo.version}`
+              message: `Missing required property 'typeVersion'. Add typeVersion: ${maxVersion ?? 1}`
+            });
+          }
+          // Check if typeVersion is invalid (must be a finite, non-negative number; 0 is valid)
+          else if (typeof node.typeVersion !== 'number' || !Number.isFinite(node.typeVersion) || node.typeVersion < 0) {
+            result.errors.push({
+              type: 'error',
+              nodeId: node.id,
+              nodeName: node.name,
+              message: `Invalid typeVersion: ${node.typeVersion}. Must be a finite non-negative number`
+            });
+          }
+          // Check if typeVersion is outdated (less than latest)
+          else if (maxVersion !== null && node.typeVersion < maxVersion) {
+            result.warnings.push({
+              type: 'warning',
+              nodeId: node.id,
+              nodeName: node.name,
+              message: `Outdated typeVersion: ${node.typeVersion}. Latest is ${maxVersion}`
+            });
+          }
+          // Check if typeVersion exceeds maximum supported
+          else if (maxVersion !== null && node.typeVersion > maxVersion) {
+            result.errors.push({
+              type: 'error',
+              nodeId: node.id,
+              nodeName: node.name,
+              message: `typeVersion ${node.typeVersion} exceeds maximum supported version ${maxVersion}`
             });
           }
         }
@@ -1523,8 +1543,15 @@ export class WorkflowValidator {
         formatContext
       );
 
+      // Suppress missing-cachedResultName warnings at minimal profile only
+      // — the issue is UI-degrading, not runtime-blocking, so callers asking
+      // for the smallest possible result set don't need it (#715).
+      const filteredIssues = profile === 'minimal'
+        ? formatIssues.filter(i => i.issueType !== 'missing-cached-result-name')
+        : formatIssues;
+
       // Add format errors and warnings
-      formatIssues.forEach(issue => {
+      filteredIssues.forEach(issue => {
         const formattedMessage = ExpressionFormatValidator.formatErrorMessage(issue, formatContext);
 
         if (issue.severity === 'error') {

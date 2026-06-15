@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeRepository = void 0;
 const sqlite_storage_service_1 = require("../services/sqlite-storage-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
+const logger_1 = require("../utils/logger");
+const DEFAULT_WORKFLOW_VERSION_RETENTION_DAYS = 30;
 class NodeRepository {
     constructor(dbOrService) {
         if (dbOrService instanceof sqlite_storage_service_1.SQLiteStorageService) {
@@ -10,6 +12,22 @@ class NodeRepository {
             return;
         }
         this.db = dbOrService;
+    }
+    pruneExpiredWorkflowVersions() {
+        const days = parseInt(process.env.WORKFLOW_VERSION_RETENTION_DAYS || String(DEFAULT_WORKFLOW_VERSION_RETENTION_DAYS), 10);
+        if (!Number.isFinite(days) || days <= 0) {
+            return;
+        }
+        try {
+            const cutoffIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+            const removed = this.deleteWorkflowVersionsOlderThan(cutoffIso);
+            if (removed > 0) {
+                logger_1.logger.info(`Pruned ${removed} workflow version backup(s) older than ${days} days`);
+            }
+        }
+        catch (error) {
+            logger_1.logger.warn('Could not prune expired workflow versions', { error });
+        }
     }
     saveNode(node) {
         const existing = this.db.prepare('SELECT npm_readme, ai_documentation_summary, ai_summary_generated_at FROM nodes WHERE node_type = ?').get(node.nodeType);
@@ -634,63 +652,64 @@ class NodeRepository {
     createWorkflowVersion(data) {
         const stmt = this.db.prepare(`
       INSERT INTO workflow_versions (
-        workflow_id, version_number, workflow_name, workflow_snapshot,
+        instance_id, workflow_id, version_number, workflow_name, workflow_snapshot,
         trigger, operations, fix_types, metadata
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        const result = stmt.run(data.workflowId, data.versionNumber, data.workflowName, JSON.stringify(data.workflowSnapshot), data.trigger, data.operations ? JSON.stringify(data.operations) : null, data.fixTypes ? JSON.stringify(data.fixTypes) : null, data.metadata ? JSON.stringify(data.metadata) : null);
+        const result = stmt.run(data.instanceId, data.workflowId, data.versionNumber, data.workflowName, JSON.stringify(data.workflowSnapshot), data.trigger, data.operations ? JSON.stringify(data.operations) : null, data.fixTypes ? JSON.stringify(data.fixTypes) : null, data.metadata ? JSON.stringify(data.metadata) : null);
         return result.lastInsertRowid;
     }
-    getWorkflowVersions(workflowId, limit) {
+    getWorkflowVersions(workflowId, instanceId, limit) {
         let sql = `
       SELECT * FROM workflow_versions
-      WHERE workflow_id = ?
+      WHERE workflow_id = ? AND instance_id = ?
       ORDER BY version_number DESC
     `;
         if (limit) {
             sql += ` LIMIT ?`;
-            const rows = this.db.prepare(sql).all(workflowId, limit);
+            const rows = this.db.prepare(sql).all(workflowId, instanceId, limit);
             return rows.map(row => this.parseWorkflowVersionRow(row));
         }
-        const rows = this.db.prepare(sql).all(workflowId);
+        const rows = this.db.prepare(sql).all(workflowId, instanceId);
         return rows.map(row => this.parseWorkflowVersionRow(row));
     }
-    getWorkflowVersion(versionId) {
+    getWorkflowVersion(versionId, instanceId) {
         const row = this.db.prepare(`
-      SELECT * FROM workflow_versions WHERE id = ?
-    `).get(versionId);
+      SELECT * FROM workflow_versions WHERE id = ? AND instance_id = ?
+    `).get(versionId, instanceId);
         if (!row)
             return null;
         return this.parseWorkflowVersionRow(row);
     }
-    getLatestWorkflowVersion(workflowId) {
+    getLatestWorkflowVersion(workflowId, instanceId) {
         const row = this.db.prepare(`
       SELECT * FROM workflow_versions
-      WHERE workflow_id = ?
+      WHERE workflow_id = ? AND instance_id = ?
       ORDER BY version_number DESC
       LIMIT 1
-    `).get(workflowId);
+    `).get(workflowId, instanceId);
         if (!row)
             return null;
         return this.parseWorkflowVersionRow(row);
     }
-    deleteWorkflowVersion(versionId) {
-        this.db.prepare(`
-      DELETE FROM workflow_versions WHERE id = ?
-    `).run(versionId);
-    }
-    deleteWorkflowVersionsByWorkflowId(workflowId) {
+    deleteWorkflowVersion(versionId, instanceId) {
         const result = this.db.prepare(`
-      DELETE FROM workflow_versions WHERE workflow_id = ?
-    `).run(workflowId);
+      DELETE FROM workflow_versions WHERE id = ? AND instance_id = ?
+    `).run(versionId, instanceId);
         return result.changes;
     }
-    pruneWorkflowVersions(workflowId, keepCount) {
+    deleteWorkflowVersionsByWorkflowId(workflowId, instanceId) {
+        const result = this.db.prepare(`
+      DELETE FROM workflow_versions WHERE workflow_id = ? AND instance_id = ?
+    `).run(workflowId, instanceId);
+        return result.changes;
+    }
+    pruneWorkflowVersions(workflowId, keepCount, instanceId) {
         const versions = this.db.prepare(`
       SELECT id FROM workflow_versions
-      WHERE workflow_id = ?
+      WHERE workflow_id = ? AND instance_id = ?
       ORDER BY version_number DESC
-    `).all(workflowId);
+    `).all(workflowId, instanceId);
         if (versions.length <= keepCount) {
             return 0;
         }
@@ -704,25 +723,25 @@ class NodeRepository {
     `).run(...idsToDelete);
         return result.changes;
     }
-    truncateWorkflowVersions() {
+    deleteWorkflowVersionsOlderThan(cutoffIso) {
         const result = this.db.prepare(`
-      DELETE FROM workflow_versions
-    `).run();
+      DELETE FROM workflow_versions WHERE created_at < ?
+    `).run(cutoffIso);
         return result.changes;
     }
-    getWorkflowVersionCount(workflowId) {
+    getWorkflowVersionCount(workflowId, instanceId) {
         const result = this.db.prepare(`
-      SELECT COUNT(*) as count FROM workflow_versions WHERE workflow_id = ?
-    `).get(workflowId);
+      SELECT COUNT(*) as count FROM workflow_versions WHERE workflow_id = ? AND instance_id = ?
+    `).get(workflowId, instanceId);
         return result.count;
     }
-    getVersionStorageStats() {
+    getVersionStorageStats(instanceId) {
         const totalResult = this.db.prepare(`
-      SELECT COUNT(*) as count FROM workflow_versions
-    `).get();
+      SELECT COUNT(*) as count FROM workflow_versions WHERE instance_id = ?
+    `).get(instanceId);
         const sizeResult = this.db.prepare(`
-      SELECT SUM(LENGTH(workflow_snapshot)) as total_size FROM workflow_versions
-    `).get();
+      SELECT SUM(LENGTH(workflow_snapshot)) as total_size FROM workflow_versions WHERE instance_id = ?
+    `).get(instanceId);
         const byWorkflow = this.db.prepare(`
       SELECT
         workflow_id,
@@ -731,9 +750,10 @@ class NodeRepository {
         SUM(LENGTH(workflow_snapshot)) as total_size,
         MAX(created_at) as last_backup
       FROM workflow_versions
+      WHERE instance_id = ?
       GROUP BY workflow_id
       ORDER BY version_count DESC
-    `).all();
+    `).all(instanceId);
         return {
             totalVersions: totalResult.count,
             totalSize: sizeResult.total_size || 0,

@@ -1,8 +1,10 @@
 import { InstanceContext } from '../types/instance-context';
 import { GenerateWorkflowHandler } from '../types/generate-workflow';
+import type { AdditionalTool } from '../types/additional-tools';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 interface MCPServerOptions {
     generateWorkflowHandler?: GenerateWorkflowHandler;
+    additionalTools?: AdditionalTool[];
 }
 export declare class N8NDocumentationMCPServer {
     private server;
@@ -21,7 +23,11 @@ export declare class N8NDocumentationMCPServer {
     private sharedDbState;
     private isShutdown;
     private generateWorkflowHandler?;
+    private additionalToolsByName;
     constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions);
+    private registerAdditionalTools;
+    private getEnabledAdditionalTools;
+    private findToolSchema;
     close(): Promise<void>;
     private initializeDatabase;
     private initializeInMemorySchema;

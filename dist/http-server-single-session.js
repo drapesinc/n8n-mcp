@@ -90,6 +90,7 @@ class SingleSessionHTTPServer {
         this.authToken = null;
         this.cleanupTimer = null;
         this.generateWorkflowHandler = options?.generateWorkflowHandler;
+        this.additionalTools = options?.additionalTools;
         this.validateEnvironment();
         this.startSessionCleanup();
     }
@@ -212,6 +213,7 @@ class SingleSessionHTTPServer {
                 userAgent: req.get('user-agent'),
                 reason
             });
+            res.setHeader('WWW-Authenticate', (0, auth_1.buildBearerChallenge)(reason));
             res.status(401).json({
                 jsonrpc: '2.0',
                 error: { code: -32001, message: 'Unauthorized' },
@@ -227,6 +229,7 @@ class SingleSessionHTTPServer {
                 userAgent: req.get('user-agent'),
                 reason: 'invalid_token'
             });
+            res.setHeader('WWW-Authenticate', (0, auth_1.buildBearerChallenge)('invalid_token'));
             res.status(401).json({
                 jsonrpc: '2.0',
                 error: { code: -32001, message: 'Unauthorized' },
@@ -387,7 +390,10 @@ class SingleSessionHTTPServer {
                         return;
                     }
                     logger_1.logger.info('handleRequest: Creating new transport for initialize request');
-                    if (instanceContext?.instanceId) {
+                    let sessionIdToUse;
+                    const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
+                    const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
+                    if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
                         const sessionsToRemove = [];
                         for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
                             if (context?.instanceId === instanceContext.instanceId) {
@@ -406,9 +412,6 @@ class SingleSessionHTTPServer {
                             await this.removeSession(oldSessionId, 'instance_reconnect');
                         }
                     }
-                    let sessionIdToUse;
-                    const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
-                    const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
                     if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
                         const configHash = (0, crypto_1.createHash)('sha256')
                             .update(JSON.stringify({
@@ -429,6 +432,7 @@ class SingleSessionHTTPServer {
                     }
                     const server = new server_1.N8NDocumentationMCPServer(instanceContext, undefined, {
                         generateWorkflowHandler: this.generateWorkflowHandler,
+                        additionalTools: this.additionalTools,
                     });
                     transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
                         sessionIdGenerator: () => sessionIdToUse,
@@ -498,9 +502,9 @@ class SingleSessionHTTPServer {
                             return;
                         }
                         logger_1.logger.warn('handleRequest: Session removed between check and use (TOCTOU)', { sessionId });
-                        res.status(400).json({
+                        res.status(404).json({
                             jsonrpc: '2.0',
-                            error: { code: -32000, message: 'Bad Request: Session not found or expired' },
+                            error: { code: -32000, message: 'Session not found or expired' },
                             id: req.body?.id || null,
                         });
                         return;
@@ -529,13 +533,15 @@ class SingleSessionHTTPServer {
                     };
                     logger_1.logger.warn('handleRequest: Invalid request - no session ID and not initialize', errorDetails);
                     let errorMessage = 'Bad Request: No valid session ID provided and not an initialize request';
+                    let statusCode = 400;
                     if (sessionId && !this.isValidSessionId(sessionId)) {
                         errorMessage = 'Bad Request: Invalid session ID format';
                     }
                     else if (sessionId && !this.transports[sessionId]) {
-                        errorMessage = 'Bad Request: Session not found or expired';
+                        errorMessage = 'Session not found or expired';
+                        statusCode = 404;
                     }
-                    res.status(400).json({
+                    res.status(statusCode).json({
                         jsonrpc: '2.0',
                         error: {
                             code: -32000,
@@ -594,6 +600,7 @@ class SingleSessionHTTPServer {
         }
         const server = new server_1.N8NDocumentationMCPServer(undefined, undefined, {
             generateWorkflowHandler: this.generateWorkflowHandler,
+            additionalTools: this.additionalTools,
         });
         const transport = new sse_js_1.SSEServerTransport('/messages', res);
         const sessionId = transport.sessionId;
@@ -957,6 +964,21 @@ class SingleSessionHTTPServer {
                 const headers = extractMultiTenantHeaders(req);
                 const hasUrl = headers['x-n8n-url'];
                 const hasKey = headers['x-n8n-key'];
+                if (process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey)) {
+                    logger_1.logger.warn('Multi-tenant request missing tenant headers', {
+                        hasUrl: !!hasUrl,
+                        hasKey: !!hasKey
+                    });
+                    res.status(400).json({
+                        jsonrpc: '2.0',
+                        error: {
+                            code: -32602,
+                            message: 'Multi-tenant headers required'
+                        },
+                        id: req.body?.id ?? null
+                    });
+                    return;
+                }
                 if (hasUrl || hasKey) {
                     const candidate = {
                         n8nApiUrl: hasUrl || undefined,

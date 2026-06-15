@@ -57,6 +57,7 @@ class UIAppRegistry {
             const entry = this.toolIndex.get(tool.name);
             if (entry && entry.html) {
                 tool._meta = {
+                    ...(tool._meta ?? {}),
                     ui: { resourceUri: entry.config.uri },
                     'ui/resourceUri': entry.config.uri,
                 };

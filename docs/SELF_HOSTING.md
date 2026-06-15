@@ -172,7 +172,7 @@ Add to Claude Desktop config:
 
 ### Local n8n Instance Configuration
 
-If you're running n8n locally (e.g., `http://localhost:5678` or Docker), you need to allow localhost webhooks:
+If you're running n8n locally (e.g., `http://localhost:5678` or Docker), you need to allow localhost in the SSRF gate. This applies to both webhook triggers and the n8n API client (`N8N_API_URL`):
 
 ```json
 {
@@ -194,7 +194,7 @@ If you're running n8n locally (e.g., `http://localhost:5678` or Docker), you nee
 }
 ```
 
-> ⚠️ **Important:** Set `WEBHOOK_SECURITY_MODE=moderate` to allow webhooks to your local n8n instance. This is safe for local development while still blocking private networks and cloud metadata.
+> ⚠️ **Important:** Set `WEBHOOK_SECURITY_MODE=moderate` whenever `N8N_API_URL` points at localhost or `host.docker.internal`. The same SSRF gate covers webhook triggers and the n8n API client; default `strict` mode rejects loopback addresses for both. `moderate` allows localhost while still blocking RFC1918 private networks and cloud metadata.
 
 **Important:** The `-i` flag is required for MCP stdio communication.
 

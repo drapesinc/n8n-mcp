@@ -7,6 +7,7 @@ class N8NMCPEngine {
     constructor(options = {}) {
         this.server = new http_server_single_session_1.SingleSessionHTTPServer({
             generateWorkflowHandler: options.generateWorkflowHandler,
+            additionalTools: options.additionalTools,
         });
         this.startTime = new Date();
         if (options.logLevel) {

@@ -43,9 +43,9 @@ exports.handleGetWorkflow = handleGetWorkflow;
 exports.handleGetWorkflowDetails = handleGetWorkflowDetails;
 exports.handleGetWorkflowStructure = handleGetWorkflowStructure;
 exports.handleGetWorkflowMinimal = handleGetWorkflowMinimal;
+exports.handleGetWorkflowActive = handleGetWorkflowActive;
 exports.handleUpdateWorkflow = handleUpdateWorkflow;
 exports.handleDeleteWorkflow = handleDeleteWorkflow;
-exports.handleActivateWorkflow = handleActivateWorkflow;
 exports.handleListWorkflows = handleListWorkflows;
 exports.handleValidateWorkflow = handleValidateWorkflow;
 exports.handleAutofixWorkflow = handleAutofixWorkflow;
@@ -96,7 +96,7 @@ const telemetry_1 = require("../telemetry");
 const cache_utils_1 = require("../utils/cache-utils");
 const execution_processor_1 = require("../services/execution-processor");
 const npm_version_checker_1 = require("../utils/npm-version-checker");
-const workspace_api_client_1 = require("../services/workspace-api-client");
+const mcp_input_normalizer_1 = require("../utils/mcp-input-normalizer");
 let defaultApiClient = null;
 let lastDefaultConfigUrl = null;
 const cacheMutex = new cache_utils_1.CacheMutex();
@@ -157,6 +157,10 @@ function getN8nApiClient(context) {
         }
         return null;
     }
+    if (process.env.ENABLE_MULTI_TENANT === 'true') {
+        logger_1.logger.warn('Refusing env-credential fallback in multi-tenant mode');
+        return null;
+    }
     logger_1.logger.info('Falling back to environment configuration for n8n API client');
     const config = (0, n8n_api_1.getN8nApiConfig)();
     if (!config) {
@@ -184,6 +188,16 @@ function ensureApiConfigured(context) {
     }
     return client;
 }
+function resolveN8nApiConfigForResponse(context) {
+    const fromContext = context ? (0, n8n_api_1.getN8nApiConfigFromContext)(context) : null;
+    if (fromContext) {
+        return fromContext;
+    }
+    if (process.env.ENABLE_MULTI_TENANT === 'true') {
+        return null;
+    }
+    return (0, n8n_api_1.getN8nApiConfig)();
+}
 function tryParseJson(val) {
     if (typeof val !== 'string')
         return val;
@@ -194,11 +208,17 @@ function tryParseJson(val) {
         return val;
     }
 }
+function stripActiveVersion(workflow) {
+    const { activeVersion, ...rest } = workflow;
+    return rest;
+}
+const emptyToUndefined = (v) => typeof v === 'string' && v.trim() === '' ? undefined : v;
+const optionalEmptyAware = (schema) => zod_1.z.preprocess(emptyToUndefined, schema.optional());
 const createWorkflowSchema = zod_1.z.object({
     name: zod_1.z.string(),
-    nodes: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.any())),
-    connections: zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z.any())),
-    settings: zod_1.z.preprocess(tryParseJson, zod_1.z.object({
+    nodes: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowNodes, zod_1.z.array(zod_1.z.any())),
+    connections: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowConnections, zod_1.z.record(zod_1.z.string(), zod_1.z.any())),
+    settings: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.object({
         executionOrder: zod_1.z.enum(['v0', 'v1']).optional(),
         timezone: zod_1.z.string().optional(),
         saveDataErrorExecution: zod_1.z.enum(['all', 'none']).optional(),
@@ -213,18 +233,18 @@ const createWorkflowSchema = zod_1.z.object({
 const updateWorkflowSchema = zod_1.z.object({
     id: zod_1.z.string(),
     name: zod_1.z.string().optional(),
-    nodes: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.any())).optional(),
-    connections: zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z.any())).optional(),
-    settings: zod_1.z.preprocess(tryParseJson, zod_1.z.any()).optional(),
+    nodes: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowNodes, zod_1.z.array(zod_1.z.any())).optional(),
+    connections: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowConnections, zod_1.z.record(zod_1.z.string(), zod_1.z.any())).optional(),
+    settings: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
     createBackup: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
 const listWorkflowsSchema = zod_1.z.object({
     limit: zod_1.z.number().min(1).max(100).optional(),
-    cursor: zod_1.z.string().optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
     active: zod_1.z.boolean().optional(),
-    tags: zod_1.z.preprocess(tryParseJson, zod_1.z.array(zod_1.z.string())).optional(),
-    projectId: zod_1.z.string().optional(),
+    tags: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.array(zod_1.z.string())).optional(),
+    projectId: optionalEmptyAware(zod_1.z.string()),
     excludePinnedData: zod_1.z.boolean().optional(),
 });
 const validateWorkflowSchema = zod_1.z.object({
@@ -259,11 +279,11 @@ const autofixWorkflowSchema = zod_1.z.object({
 });
 const testWorkflowSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
-    triggerType: zod_1.z.enum(['webhook', 'form', 'chat']).optional(),
-    httpMethod: zod_1.z.enum(['GET', 'POST', 'PUT', 'DELETE']).optional(),
-    webhookPath: zod_1.z.string().optional(),
-    message: zod_1.z.string().optional(),
-    sessionId: zod_1.z.string().optional(),
+    triggerType: optionalEmptyAware(zod_1.z.enum(['webhook', 'form', 'chat'])),
+    httpMethod: optionalEmptyAware(zod_1.z.enum(['GET', 'POST', 'PUT', 'DELETE'])),
+    webhookPath: optionalEmptyAware(zod_1.z.string()),
+    message: optionalEmptyAware(zod_1.z.string()),
+    sessionId: optionalEmptyAware(zod_1.z.string()),
     data: zod_1.z.record(zod_1.z.unknown()).optional(),
     headers: zod_1.z.record(zod_1.z.string()).optional(),
     timeout: zod_1.z.number().optional(),
@@ -271,21 +291,20 @@ const testWorkflowSchema = zod_1.z.object({
 });
 const listExecutionsSchema = zod_1.z.object({
     limit: zod_1.z.number().min(1).max(100).optional(),
-    cursor: zod_1.z.string().optional(),
-    workflowId: zod_1.z.string().optional(),
-    projectId: zod_1.z.string().optional(),
-    status: zod_1.z.enum(['success', 'error', 'waiting']).optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
+    workflowId: optionalEmptyAware(zod_1.z.string()),
+    projectId: optionalEmptyAware(zod_1.z.string()),
+    status: optionalEmptyAware(zod_1.z.enum(['success', 'error', 'waiting'])),
     includeData: zod_1.z.boolean().optional(),
 });
 const workflowVersionsSchema = zod_1.z.object({
-    mode: zod_1.z.enum(['list', 'get', 'rollback', 'delete', 'prune', 'truncate']),
+    mode: zod_1.z.enum(['list', 'get', 'rollback', 'delete', 'prune']),
     workflowId: zod_1.z.string().optional(),
     versionId: zod_1.z.number().optional(),
     limit: zod_1.z.number().default(10).optional(),
     validateBefore: zod_1.z.boolean().default(true).optional(),
     deleteAll: zod_1.z.boolean().default(false).optional(),
     maxVersions: zod_1.z.number().default(10).optional(),
-    confirmTruncate: zod_1.z.boolean().default(false).optional(),
 });
 async function handleCreateWorkflow(args, context) {
     try {
@@ -372,7 +391,7 @@ async function handleGetWorkflow(args, context) {
         const workflow = await client.getWorkflow(id);
         return {
             success: true,
-            data: workflow
+            data: stripActiveVersion(workflow)
         };
     }
     catch (error) {
@@ -414,7 +433,7 @@ async function handleGetWorkflowDetails(args, context) {
         return {
             success: true,
             data: {
-                workflow,
+                workflow: stripActiveVersion(workflow),
                 executionStats: stats,
                 hasWebhookTrigger: (0, n8n_validation_1.hasWebhookTrigger)(workflow),
                 webhookPath: (0, n8n_validation_1.getWebhookUrl)(workflow)
@@ -528,6 +547,75 @@ async function handleGetWorkflowMinimal(args, context) {
         };
     }
 }
+async function handleGetWorkflowActive(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id } = zod_1.z.object({ id: zod_1.z.string() }).parse(args);
+        const workflow = await client.getWorkflow(id);
+        const activeVersion = workflow.activeVersion;
+        const baseMeta = {
+            id: workflow.id,
+            name: workflow.name,
+            active: workflow.active,
+            isArchived: workflow.isArchived,
+            tags: workflow.tags || [],
+            settings: workflow.settings,
+            createdAt: workflow.createdAt,
+            updatedAt: workflow.updatedAt,
+        };
+        if (workflow.activeVersionId && activeVersion) {
+            return {
+                success: true,
+                data: {
+                    ...baseMeta,
+                    activeVersionId: workflow.activeVersionId,
+                    versionCreatedAt: activeVersion.createdAt ?? null,
+                    versionName: activeVersion.name ?? null,
+                    nodes: activeVersion.nodes,
+                    connections: activeVersion.connections,
+                }
+            };
+        }
+        if (workflow.active === true) {
+            return {
+                success: true,
+                data: {
+                    ...baseMeta,
+                    activeVersionId: null,
+                    versionCreatedAt: null,
+                    versionName: null,
+                    nodes: workflow.nodes,
+                    connections: workflow.connections,
+                }
+            };
+        }
+        return {
+            success: false,
+            error: 'No published version. Workflow is inactive and has never been activated. Use mode="full" to see the draft.',
+            code: 'NO_ACTIVE_VERSION'
+        };
+    }
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError) {
+            return {
+                success: false,
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+                code: error.code
+            };
+        }
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
 async function handleUpdateWorkflow(args, repository, context) {
     const startTime = Date.now();
     const sessionId = `mutation_${Date.now()}_${(0, crypto_1.randomUUID)()}`;
@@ -538,30 +626,41 @@ async function handleUpdateWorkflow(args, repository, context) {
         const input = updateWorkflowSchema.parse(args);
         const { id, createBackup, intent, ...updateData } = input;
         userIntent = intent || 'Full workflow update';
-        if (updateData.nodes || updateData.connections) {
-            const current = await client.getWorkflow(id);
-            workflowBefore = JSON.parse(JSON.stringify(current));
-            if (updateData.nodes && current.nodes) {
-                const currentById = new Map();
-                const currentByName = new Map();
-                for (const node of current.nodes) {
-                    if (node.id)
-                        currentById.set(node.id, node);
-                    currentByName.set(node.name, node);
-                }
-                for (const node of updateData.nodes) {
-                    const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
-                    if (!hasCredentials) {
-                        const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
-                        if (match?.credentials) {
-                            node.credentials = match.credentials;
-                        }
+        const current = await client.getWorkflow(id);
+        workflowBefore = JSON.parse(JSON.stringify(current));
+        if (updateData.nodes && current.nodes) {
+            const currentById = new Map();
+            const currentByName = new Map();
+            for (const node of current.nodes) {
+                if (node.id)
+                    currentById.set(node.id, node);
+                currentByName.set(node.name, node);
+            }
+            for (const node of updateData.nodes) {
+                const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
+                if (!hasCredentials) {
+                    const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
+                    if (match?.credentials) {
+                        node.credentials = match.credentials;
                     }
                 }
             }
+        }
+        const { settings: settingsUpdate, ...nonSettingsUpdate } = updateData;
+        const fullWorkflow = {
+            ...current,
+            ...nonSettingsUpdate
+        };
+        if (settingsUpdate && typeof settingsUpdate === 'object') {
+            fullWorkflow.settings = {
+                ...(current.settings ?? {}),
+                ...settingsUpdate,
+            };
+        }
+        if (updateData.nodes || updateData.connections) {
             if (createBackup !== false) {
                 try {
-                    const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client);
+                    const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client, (0, instance_context_1.getInstanceScopeId)(context));
                     const backupResult = await versioningService.createBackup(id, current, {
                         trigger: 'full_update'
                     });
@@ -579,10 +678,6 @@ async function handleUpdateWorkflow(args, repository, context) {
                     });
                 }
             }
-            const fullWorkflow = {
-                ...current,
-                ...updateData
-            };
             const errors = (0, n8n_validation_1.validateWorkflowStructure)(fullWorkflow);
             if (errors.length > 0) {
                 return {
@@ -592,7 +687,7 @@ async function handleUpdateWorkflow(args, repository, context) {
                 };
             }
         }
-        const workflow = await client.updateWorkflow(id, updateData);
+        const workflow = await client.updateWorkflow(id, fullWorkflow);
         if (workflowBefore) {
             trackWorkflowMutationForFullUpdate({
                 sessionId,
@@ -677,44 +772,6 @@ async function handleDeleteWorkflow(args, context) {
                 deleted: true
             },
             message: `Workflow "${deleted?.name || id}" deleted successfully.`
-        };
-    }
-    catch (error) {
-        if (error instanceof zod_1.z.ZodError) {
-            return {
-                success: false,
-                error: 'Invalid input',
-                details: { errors: error.errors }
-            };
-        }
-        if (error instanceof n8n_errors_1.N8nApiError) {
-            return {
-                success: false,
-                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
-                code: error.code
-            };
-        }
-        return {
-            success: false,
-            error: error instanceof Error ? error.message : 'Unknown error occurred'
-        };
-    }
-}
-async function handleActivateWorkflow(args, context) {
-    try {
-        const client = ensureApiConfigured(context);
-        const { id, active } = zod_1.z.object({ id: zod_1.z.string(), active: zod_1.z.boolean() }).parse(args);
-        const workflow = active
-            ? await client.activateWorkflow(id)
-            : await client.deactivateWorkflow(id);
-        return {
-            success: true,
-            data: {
-                id: workflow.id,
-                name: workflow.name,
-                active: workflow.active,
-            },
-            message: `Workflow "${workflow.name || id}" ${active ? 'activated' : 'deactivated'} successfully.`
         };
     }
     catch (error) {
@@ -1294,7 +1351,7 @@ async function handleHealthCheck(context) {
             instanceId: health.instanceId,
             n8nVersion: health.n8nVersion,
             features: health.features,
-            apiUrl: (0, n8n_api_1.getN8nApiConfig)()?.baseUrl,
+            apiUrl: resolveN8nApiConfigForResponse(context)?.baseUrl,
             mcpVersion,
             supportedN8nVersion,
             versionCheck: {
@@ -1345,7 +1402,7 @@ async function handleHealthCheck(context) {
                 error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
                 code: error.code,
                 details: {
-                    apiUrl: (0, n8n_api_1.getN8nApiConfig)()?.baseUrl,
+                    apiUrl: resolveN8nApiConfigForResponse(context)?.baseUrl,
                     hint: 'Check if n8n is running and API is enabled',
                     troubleshooting: [
                         '1. Verify n8n instance is running',
@@ -1530,9 +1587,10 @@ async function handleDiagnostic(request, context) {
     const mcpMode = process.env.MCP_MODE || 'stdio';
     const isDocker = process.env.IS_DOCKER === 'true';
     const cloudPlatform = detectCloudPlatform();
+    const isMultiTenant = process.env.ENABLE_MULTI_TENANT === 'true';
     const envVars = {
-        N8N_API_URL: process.env.N8N_API_URL || null,
-        N8N_API_KEY: process.env.N8N_API_KEY ? '***configured***' : null,
+        N8N_API_URL: isMultiTenant ? null : (process.env.N8N_API_URL || null),
+        N8N_API_KEY: isMultiTenant ? null : (process.env.N8N_API_KEY ? '***configured***' : null),
         NODE_ENV: process.env.NODE_ENV || 'production',
         MCP_MODE: mcpMode,
         isDocker,
@@ -1540,12 +1598,8 @@ async function handleDiagnostic(request, context) {
         nodeVersion: process.version,
         platform: process.platform
     };
-    const workspaceManager = (0, workspace_api_client_1.getWorkspaceApiClientManager)();
-    const availableWorkspaces = workspaceManager.getAvailableWorkspaces();
-    const defaultWorkspace = workspaceManager.getDefaultWorkspace();
-    const isMultiWorkspace = workspaceManager.isMultiWorkspace();
-    const apiConfig = (0, n8n_api_1.getN8nApiConfig)();
-    const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
+    const apiConfig = resolveN8nApiConfigForResponse(context);
+    const apiConfigured = apiConfig !== null;
     const apiClient = getN8nApiClient(context);
     let apiStatus = {
         configured: apiConfigured,
@@ -1564,7 +1618,7 @@ async function handleDiagnostic(request, context) {
         }
     }
     const documentationTools = 7;
-    const managementTools = apiConfigured ? 18 : 0;
+    const managementTools = apiConfigured ? 14 : 0;
     const totalTools = documentationTools + managementTools;
     const versionCheck = await (0, npm_version_checker_1.checkNpmVersion)();
     const cacheMetricsData = getInstanceCacheMetrics();
@@ -1579,19 +1633,7 @@ async function handleDiagnostic(request, context) {
                 baseUrl: apiConfig.baseUrl,
                 timeout: apiConfig.timeout,
                 maxRetries: apiConfig.maxRetries
-            } : null,
-            workspaceMode: availableWorkspaces.length === 0 ? 'none'
-                : availableWorkspaces.length === 1 ? 'single'
-                    : 'multi',
-            workspaces: availableWorkspaces.length > 0 ? {
-                available: availableWorkspaces,
-                default: defaultWorkspace,
-                count: availableWorkspaces.length
-            } : null,
-            activeContext: context ? {
-                url: context.n8nApiUrl?.replace(/^(https?:\/\/[^\/]+).*/, '$1'),
-                instanceId: context.instanceId
-            } : (defaultWorkspace ? `Using default workspace: ${defaultWorkspace}` : 'No context available')
+            } : null
         },
         versionInfo: {
             current: versionCheck.currentVersion,
@@ -1610,10 +1652,8 @@ async function handleDiagnostic(request, context) {
                 count: managementTools,
                 enabled: apiConfigured,
                 description: apiConfigured ?
-                    (isMultiWorkspace
-                        ? `Management tools are ENABLED - using ${availableWorkspaces.length} workspaces${defaultWorkspace ? ` (default: ${defaultWorkspace})` : ''}`
-                        : 'Management tools are ENABLED - create, update, execute workflows')
-                    : 'Management tools are DISABLED - configure N8N_URL_* and N8N_TOKEN_* env vars (or N8N_API_URL + N8N_API_KEY for single instance)'
+                    'Management tools are ENABLED - create, update, execute workflows' :
+                    'Management tools are DISABLED - configure N8N_API_URL and N8N_API_KEY to enable'
             },
             totalAvailable: totalTools
         },
@@ -1772,8 +1812,14 @@ async function handleDiagnostic(request, context) {
 async function handleWorkflowVersions(args, repository, context) {
     try {
         const input = workflowVersionsSchema.parse(args);
+        if (process.env.ENABLE_MULTI_TENANT === 'true' && (0, instance_context_1.getInstanceScopeId)(context) === '') {
+            return {
+                success: false,
+                error: 'Workflow version storage is not available for this tenant context'
+            };
+        }
         const client = context ? getN8nApiClient(context) : null;
-        const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined);
+        const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, (0, instance_context_1.getInstanceScopeId)(context));
         switch (input.mode) {
             case 'list': {
                 if (!input.workflowId) {
@@ -1886,22 +1932,6 @@ async function handleWorkflowVersions(args, repository, context) {
                     }
                 };
             }
-            case 'truncate': {
-                if (!input.confirmTruncate) {
-                    return {
-                        success: false,
-                        error: 'confirmTruncate must be true to truncate all versions. This action cannot be undone.'
-                    };
-                }
-                const result = await versioningService.truncateAllVersions(true);
-                return {
-                    success: true,
-                    data: {
-                        deleted: result.deleted,
-                        message: result.message
-                    }
-                };
-            }
             default:
                 return {
                     success: false,
@@ -2007,7 +2037,7 @@ async function handleDeployTemplate(args, templateService, repository, context) 
             connections: workflow.connections,
             settings: workflow.settings || { executionOrder: 'v1' }
         });
-        const apiConfig = context ? (0, n8n_api_1.getN8nApiConfigFromContext)(context) : (0, n8n_api_1.getN8nApiConfig)();
+        const apiConfig = resolveN8nApiConfigForResponse(context);
         const baseUrl = apiConfig?.baseUrl?.replace('/api/v1', '') || '';
         let fixesApplied = [];
         let fixSummary = '';
@@ -2083,7 +2113,7 @@ async function handleDeployTemplate(args, templateService, repository, context) 
 async function handleTriggerWebhookWorkflow(args, context) {
     const triggerWebhookSchema = zod_1.z.object({
         webhookUrl: zod_1.z.string().url(),
-        httpMethod: zod_1.z.enum(['GET', 'POST', 'PUT', 'DELETE']).optional(),
+        httpMethod: optionalEmptyAware(zod_1.z.enum(['GET', 'POST', 'PUT', 'DELETE'])),
         data: zod_1.z.record(zod_1.z.unknown()).optional(),
         headers: zod_1.z.record(zod_1.z.string()).optional(),
         waitForResponse: zod_1.z.boolean().optional(),
@@ -2164,11 +2194,11 @@ const createTableSchema = zod_1.z.object({
         name: zod_1.z.string().min(1, 'Column name cannot be empty'),
         type: zod_1.z.enum(['string', 'number', 'boolean', 'date']).optional(),
     })).min(1, 'At least one column is required'),
-    projectId: zod_1.z.string().optional(),
+    projectId: optionalEmptyAware(zod_1.z.string()),
 });
 const listTablesSchema = zod_1.z.object({
     limit: zod_1.z.number().min(1).max(100).optional(),
-    cursor: zod_1.z.string().optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
 });
 const updateTableSchema = tableIdSchema.extend({
     name: zod_1.z.string().min(1, 'New table name cannot be empty'),
@@ -2178,10 +2208,10 @@ const coerceJsonObject = zod_1.z.preprocess(tryParseJson, zod_1.z.record(zod_1.z
 const coerceJsonFilter = zod_1.z.preprocess(tryParseJson, dataTableFilterSchema);
 const getRowsSchema = tableIdSchema.extend({
     limit: zod_1.z.number().min(1).max(100).optional(),
-    cursor: zod_1.z.string().optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
     filter: zod_1.z.union([coerceJsonFilter, zod_1.z.string()]).optional(),
-    sortBy: zod_1.z.string().optional(),
-    search: zod_1.z.string().optional(),
+    sortBy: optionalEmptyAware(zod_1.z.string()),
+    search: optionalEmptyAware(zod_1.z.string()),
 });
 const insertRowsSchema = tableIdSchema.extend({
     data: coerceJsonArray.pipe(zod_1.z.array(zod_1.z.record(zod_1.z.unknown())).min(1, 'At least one row is required')),
@@ -2380,10 +2410,49 @@ async function handleDeleteRows(args, context) {
         return handleCrudError(error);
     }
 }
-const listCredentialsSchema = zod_1.z.object({}).passthrough();
+const listCredentialsSchema = zod_1.z.object({
+    includeUsage: zod_1.z.boolean().optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
+    limit: zod_1.z.number().min(1).max(100).optional(),
+}).passthrough();
 const getCredentialSchema = zod_1.z.object({
     id: zod_1.z.string({ required_error: 'Credential ID is required' }),
+    includeUsage: zod_1.z.boolean().optional(),
 });
+async function buildCredentialUsageMap(client) {
+    const usage = new Map();
+    const workflows = await client.listAllWorkflows();
+    for (const wf of workflows) {
+        if (!wf.id)
+            continue;
+        const entry = {
+            id: wf.id,
+            name: wf.name,
+            active: wf.active ?? false,
+        };
+        const seenForThisWorkflow = new Set();
+        for (const node of wf.nodes ?? []) {
+            if (!node.credentials)
+                continue;
+            for (const credConfig of Object.values(node.credentials)) {
+                const credId = credConfig?.id;
+                if (typeof credId !== 'string' || credId === '')
+                    continue;
+                if (seenForThisWorkflow.has(credId))
+                    continue;
+                seenForThisWorkflow.add(credId);
+                const list = usage.get(credId);
+                if (list) {
+                    list.push(entry);
+                }
+                else {
+                    usage.set(credId, [entry]);
+                }
+            }
+        }
+    }
+    return usage;
+}
 const createCredentialSchema = zod_1.z.object({
     name: zod_1.z.string({ required_error: 'Credential name is required' }),
     type: zod_1.z.string({ required_error: 'Credential type is required' }),
@@ -2401,61 +2470,154 @@ const deleteCredentialSchema = zod_1.z.object({
 const getCredentialSchemaTypeSchema = zod_1.z.object({
     type: zod_1.z.string({ required_error: 'Credential type is required' }),
 });
+function stripCredentialData(credential) {
+    const { data: _sensitiveData, ...safeCred } = credential;
+    return safeCred;
+}
+function isCredentialReadUnsupported(error) {
+    if (typeof error !== 'object' || error === null) {
+        return false;
+    }
+    const status = error.statusCode;
+    if (status === 405 || status === 403) {
+        return true;
+    }
+    if (status !== undefined) {
+        return false;
+    }
+    const message = error instanceof Error ? error.message.toLowerCase() : '';
+    return message.includes('not allowed');
+}
+function credentialReadUnsupportedResponse(error) {
+    return {
+        success: false,
+        error: 'This n8n instance\'s public API rejected the credential read. On older n8n versions the public API ' +
+            'does not expose GET /credentials at all; on newer ones this can mean the API key or instance settings ' +
+            'do not permit credential reads. The create, delete, and getSchema actions generally still work, and ' +
+            'update does too where the API version supports it (it needs a known credential ID, not list/get). ' +
+            'To find an existing credential\'s ID, open it in the n8n UI — the ID is in the URL.',
+        code: 'NOT_SUPPORTED',
+        details: {
+            statusCode: error.statusCode,
+            cause: error instanceof Error ? error.message : String(error),
+        },
+    };
+}
 async function handleListCredentials(args, context) {
     try {
         const client = ensureApiConfigured(context);
-        listCredentialsSchema.parse(args);
-        const result = await client.listCredentials();
+        const { includeUsage, cursor, limit } = listCredentialsSchema.parse(args);
+        if (includeUsage) {
+            const allCredentials = await client.listAllCredentials();
+            let credentials = allCredentials.map(stripCredentialData);
+            let usageScanError;
+            try {
+                const usageMap = await buildCredentialUsageMap(client);
+                credentials = credentials.map((cred) => {
+                    const usedIn = (cred.id ? usageMap.get(cred.id) : undefined) ?? [];
+                    return { ...cred, usedIn, usageCount: usedIn.length };
+                });
+            }
+            catch (scanError) {
+                usageScanError = scanError instanceof Error ? scanError.message : String(scanError);
+            }
+            return {
+                success: true,
+                data: {
+                    credentials,
+                    count: credentials.length,
+                    ...(usageScanError ? { usageScanError } : {}),
+                },
+            };
+        }
+        const result = await client.listCredentials({ cursor, limit });
+        const credentials = result.data.map(stripCredentialData);
         return {
             success: true,
             data: {
-                credentials: result.data,
-                count: result.data.length,
+                credentials,
+                count: credentials.length,
                 nextCursor: result.nextCursor || undefined,
             },
         };
     }
     catch (error) {
+        if (isCredentialReadUnsupported(error)) {
+            return credentialReadUnsupportedResponse(error);
+        }
         return handleCrudError(error);
     }
 }
 async function handleGetCredential(args, context) {
     try {
         const client = ensureApiConfigured(context);
-        const { id } = getCredentialSchema.parse(args);
+        const { id, includeUsage } = getCredentialSchema.parse(args);
         let credential;
         try {
             credential = await client.getCredential(id);
         }
         catch (getError) {
-            const status = getError.statusCode;
-            const msg = getError.message ?? '';
-            const isUnsupported = status === 405 || status === 403 || msg.includes('not allowed');
-            if (!isUnsupported) {
+            if (!isCredentialReadUnsupported(getError)) {
                 throw getError;
             }
-            const list = await client.listCredentials();
-            credential = list.data.find((c) => c.id === id);
+            const all = await client.listAllCredentials();
+            credential = all.find((c) => c.id === id);
             if (!credential) {
                 return { success: false, error: `Credential ${id} not found` };
             }
         }
         const { data: _sensitiveData, ...safeCred } = credential;
+        let enriched = safeCred;
+        let usageScanError;
+        if (includeUsage) {
+            try {
+                const usageMap = await buildCredentialUsageMap(client);
+                const usedIn = usageMap.get(id) ?? [];
+                enriched = { ...safeCred, usedIn, usageCount: usedIn.length };
+            }
+            catch (scanError) {
+                usageScanError = scanError instanceof Error ? scanError.message : String(scanError);
+            }
+        }
         return {
             success: true,
-            data: safeCred,
+            data: usageScanError ? { ...enriched, usageScanError } : enriched,
         };
     }
     catch (error) {
+        if (isCredentialReadUnsupported(error)) {
+            return credentialReadUnsupportedResponse(error);
+        }
         return handleCrudError(error);
     }
+}
+function applyCredentialDataShims(type, data) {
+    if (!data || type !== 'oAuth2Api' || data.grantType !== 'clientCredentials') {
+        return data;
+    }
+    const shimmed = { ...data };
+    if ('useDynamicClientRegistration' in shimmed && !shimmed.useDynamicClientRegistration) {
+        delete shimmed.useDynamicClientRegistration;
+    }
+    if (!('sendAdditionalBodyProperties' in shimmed)) {
+        shimmed.sendAdditionalBodyProperties = false;
+    }
+    if (!('additionalBodyProperties' in shimmed)) {
+        shimmed.additionalBodyProperties = '';
+    }
+    const dcrActive = shimmed.useDynamicClientRegistration === true;
+    if (!dcrActive && !('serverUrl' in shimmed)) {
+        shimmed.serverUrl = '';
+    }
+    return shimmed;
 }
 async function handleCreateCredential(args, context) {
     try {
         const client = ensureApiConfigured(context);
         const { name, type, data } = createCredentialSchema.parse(args);
+        const shimmedData = applyCredentialDataShims(type, data);
         logger_1.logger.info(`Creating credential: name="${name}", type="${type}"`);
-        const credential = await client.createCredential({ name, type, data });
+        const credential = await client.createCredential({ name, type, data: shimmedData });
         const { data: _sensitiveData, ...safeCred } = credential;
         return {
             success: true,
@@ -2477,8 +2639,18 @@ async function handleUpdateCredential(args, context) {
             updatePayload.name = name;
         if (type !== undefined)
             updatePayload.type = type;
-        if (data !== undefined)
-            updatePayload.data = data;
+        if (data !== undefined) {
+            let derivedType = type;
+            if (derivedType === undefined && data?.grantType === 'clientCredentials') {
+                try {
+                    const existing = await client.getCredential(id);
+                    derivedType = existing?.type;
+                }
+                catch {
+                }
+            }
+            updatePayload.data = applyCredentialDataShims(derivedType ?? '', data);
+        }
         const credential = await client.updateCredential(id, updatePayload);
         const { data: _sensitiveData, ...safeCred } = credential;
         return {
@@ -2539,8 +2711,8 @@ async function handleAuditInstance(args, context) {
         const warnings = [];
         let builtinAudit = null;
         let builtinAuditMs = 0;
+        const auditStart = Date.now();
         try {
-            const auditStart = Date.now();
             builtinAudit = await client.generateAudit({
                 categories: input.categories,
                 daysAbandonedWorkflow: input.daysAbandonedWorkflow,
@@ -2548,10 +2720,19 @@ async function handleAuditInstance(args, context) {
             builtinAuditMs = Date.now() - auditStart;
         }
         catch (auditError) {
-            builtinAuditMs = Date.now() - totalStart;
-            const msg = auditError?.statusCode === 404
-                ? 'Built-in audit endpoint not available on this n8n version.'
-                : `Built-in audit failed: ${auditError?.message || 'unknown error'}`;
+            builtinAuditMs = Date.now() - auditStart;
+            const status = auditError?.statusCode;
+            const reason = auditError?.message || 'unknown error';
+            let msg;
+            if (status === 404) {
+                msg = 'Built-in audit endpoint not available on this n8n version.';
+            }
+            else if (status !== undefined) {
+                msg = `Built-in audit failed (HTTP ${status}): ${reason}`;
+            }
+            else {
+                msg = `Built-in audit failed (no response from n8n): ${reason}`;
+            }
             warnings.push(msg);
             logger_1.logger.warn(`Audit: ${msg}`);
         }
@@ -2575,9 +2756,7 @@ async function handleAuditInstance(args, context) {
             }
         }
         const totalMs = Date.now() - totalStart;
-        const apiConfig = context?.n8nApiUrl
-            ? { baseUrl: context.n8nApiUrl }
-            : (0, n8n_api_1.getN8nApiConfig)();
+        const apiConfig = resolveN8nApiConfigForResponse(context);
         const instanceUrl = apiConfig?.baseUrl || 'unknown';
         const report = (0, audit_report_builder_1.buildAuditReport)({
             builtinAudit,

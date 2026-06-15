@@ -38,6 +38,22 @@ class ExpressionFormatValidator {
         }
         return correctedValue;
     }
+    static checkCachedResultName(value, path) {
+        if (!this.MODES_USING_CACHED_NAME.includes(value.mode)) {
+            return null;
+        }
+        if (typeof value.cachedResultName === 'string' && value.cachedResultName !== '') {
+            return null;
+        }
+        return {
+            fieldPath: path,
+            currentValue: value,
+            correctedValue: { ...value, cachedResultName: '<set to the resource display name>' },
+            issueType: 'missing-cached-result-name',
+            explanation: 'resource locator is missing cachedResultName. The workflow will run, but the n8n UI dropdown will show "Choose..." instead of the selected value, and dependent metadata fetches (e.g. column lists) will not fire. Set cachedResultName to the human-readable display name of the resource. (#715)',
+            severity: 'warning'
+        };
+    }
     static validateAndFix(value, fieldPath, context) {
         if (typeof value !== 'string' && !this.isResourceLocator(value)) {
             return null;
@@ -152,10 +168,15 @@ class ExpressionFormatValidator {
         }
         else if (obj && typeof obj === 'object') {
             if (this.isResourceLocator(obj)) {
+                const cachedNameIssue = this.checkCachedResultName(obj, path);
+                if (cachedNameIssue)
+                    issues.push(cachedNameIssue);
                 return;
             }
             Object.entries(obj).forEach(([key, value]) => {
                 if (key.startsWith('__'))
+                    return;
+                if (key === 'jsCode' || key === 'pythonCode' || key === 'functionCode')
                     return;
                 const newPath = path ? `${path}.${key}` : key;
                 this.validateRecursive(value, newPath, context, issues, visited, depth + 1);
@@ -172,7 +193,10 @@ class ExpressionFormatValidator {
         else {
             message += `"${issue.fieldPath}": ${JSON.stringify(issue.currentValue, null, 2)}\n\n`;
         }
-        message += `Fixed (correct):\n`;
+        const fixedLabel = issue.issueType === 'missing-cached-result-name'
+            ? 'Suggested shape (replace the placeholder with the actual resource display name):'
+            : 'Fixed (correct):';
+        message += `${fixedLabel}\n`;
         if (typeof issue.correctedValue === 'string') {
             message += `"${issue.fieldPath}": "${issue.correctedValue}"`;
         }
@@ -206,4 +230,5 @@ ExpressionFormatValidator.RESOURCE_LOCATOR_FIELDS = {
     'ssh': ['path', 'fileName'],
     'redis': ['key'],
 };
+ExpressionFormatValidator.MODES_USING_CACHED_NAME = ['id', 'list', 'name'];
 //# sourceMappingURL=expression-format-validator.js.map

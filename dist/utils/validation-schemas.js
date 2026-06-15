@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ToolValidation = exports.Validator = exports.ValidationError = void 0;
+exports.encodeApiPathSegment = encodeApiPathSegment;
 class ValidationError extends Error {
     constructor(message, field, value) {
         super(message);
@@ -10,6 +11,20 @@ class ValidationError extends Error {
     }
 }
 exports.ValidationError = ValidationError;
+const API_PATH_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/;
+const API_PATH_SEGMENT_MAX_LENGTH = 128;
+function encodeApiPathSegment(value, fieldName) {
+    if (typeof value !== 'string' || value.length === 0) {
+        throw new ValidationError(`${fieldName} is required and must be a non-empty string`, fieldName, value);
+    }
+    if (value.length > API_PATH_SEGMENT_MAX_LENGTH) {
+        throw new ValidationError(`${fieldName} exceeds maximum length of ${API_PATH_SEGMENT_MAX_LENGTH} characters`, fieldName);
+    }
+    if (!API_PATH_SEGMENT_PATTERN.test(value)) {
+        throw new ValidationError(`Invalid ${fieldName}: must contain only alphanumeric characters, hyphens, or underscores`, fieldName, value);
+    }
+    return encodeURIComponent(value);
+}
 class Validator {
     static validateString(value, fieldName, required = true) {
         const errors = [];

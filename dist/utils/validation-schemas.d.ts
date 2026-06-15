@@ -3,6 +3,7 @@ export declare class ValidationError extends Error {
     value?: any | undefined;
     constructor(message: string, field?: string | undefined, value?: any | undefined);
 }
+export declare function encodeApiPathSegment(value: unknown, fieldName: string): string;
 export interface ValidationResult {
     valid: boolean;
     errors: Array<{

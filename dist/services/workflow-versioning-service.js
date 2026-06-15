@@ -4,15 +4,17 @@ exports.WorkflowVersioningService = void 0;
 const workflow_validator_1 = require("./workflow-validator");
 const enhanced_config_validator_1 = require("./enhanced-config-validator");
 class WorkflowVersioningService {
-    constructor(nodeRepository, apiClient) {
+    constructor(nodeRepository, apiClient, instanceId = '') {
         this.nodeRepository = nodeRepository;
         this.apiClient = apiClient;
+        this.instanceId = instanceId;
         this.DEFAULT_MAX_VERSIONS = 10;
     }
     async createBackup(workflowId, workflow, context) {
-        const versions = this.nodeRepository.getWorkflowVersions(workflowId, 1);
+        const versions = this.nodeRepository.getWorkflowVersions(workflowId, this.instanceId, 1);
         const nextVersion = versions.length > 0 ? versions[0].versionNumber + 1 : 1;
         const versionId = this.nodeRepository.createWorkflowVersion({
+            instanceId: this.instanceId,
             workflowId,
             versionNumber: nextVersion,
             workflowName: workflow.name || 'Unnamed Workflow',
@@ -22,7 +24,7 @@ class WorkflowVersioningService {
             fixTypes: context.fixTypes,
             metadata: context.metadata
         });
-        const pruned = this.nodeRepository.pruneWorkflowVersions(workflowId, this.DEFAULT_MAX_VERSIONS);
+        const pruned = this.nodeRepository.pruneWorkflowVersions(workflowId, this.DEFAULT_MAX_VERSIONS, this.instanceId);
         return {
             versionId,
             versionNumber: nextVersion,
@@ -33,7 +35,7 @@ class WorkflowVersioningService {
         };
     }
     async getVersionHistory(workflowId, limit = 10) {
-        const versions = this.nodeRepository.getWorkflowVersions(workflowId, limit);
+        const versions = this.nodeRepository.getWorkflowVersions(workflowId, this.instanceId, limit);
         return versions.map(v => ({
             id: v.id,
             workflowId: v.workflowId,
@@ -47,7 +49,7 @@ class WorkflowVersioningService {
         }));
     }
     async getVersion(versionId) {
-        return this.nodeRepository.getWorkflowVersion(versionId);
+        return this.nodeRepository.getWorkflowVersion(versionId, this.instanceId);
     }
     async restoreVersion(workflowId, versionId, validateBefore = true) {
         if (!this.apiClient) {
@@ -61,10 +63,10 @@ class WorkflowVersioningService {
         }
         let versionToRestore = null;
         if (versionId) {
-            versionToRestore = this.nodeRepository.getWorkflowVersion(versionId);
+            versionToRestore = this.nodeRepository.getWorkflowVersion(versionId, this.instanceId);
         }
         else {
-            versionToRestore = this.nodeRepository.getLatestWorkflowVersion(workflowId);
+            versionToRestore = this.nodeRepository.getLatestWorkflowVersion(workflowId, this.instanceId);
         }
         if (!versionToRestore) {
             return {
@@ -140,53 +142,40 @@ class WorkflowVersioningService {
         }
     }
     async deleteVersion(versionId) {
-        const version = this.nodeRepository.getWorkflowVersion(versionId);
+        const version = this.nodeRepository.getWorkflowVersion(versionId, this.instanceId);
         if (!version) {
             return {
                 success: false,
                 message: `Version ${versionId} not found`
             };
         }
-        this.nodeRepository.deleteWorkflowVersion(versionId);
+        this.nodeRepository.deleteWorkflowVersion(versionId, this.instanceId);
         return {
             success: true,
             message: `Deleted version ${version.versionNumber} for workflow ${version.workflowId}`
         };
     }
     async deleteAllVersions(workflowId) {
-        const count = this.nodeRepository.getWorkflowVersionCount(workflowId);
+        const count = this.nodeRepository.getWorkflowVersionCount(workflowId, this.instanceId);
         if (count === 0) {
             return {
                 deleted: 0,
                 message: `No versions found for workflow ${workflowId}`
             };
         }
-        const deleted = this.nodeRepository.deleteWorkflowVersionsByWorkflowId(workflowId);
+        const deleted = this.nodeRepository.deleteWorkflowVersionsByWorkflowId(workflowId, this.instanceId);
         return {
             deleted,
             message: `Deleted ${deleted} version(s) for workflow ${workflowId}`
         };
     }
     async pruneVersions(workflowId, maxVersions = 10) {
-        const pruned = this.nodeRepository.pruneWorkflowVersions(workflowId, maxVersions);
-        const remaining = this.nodeRepository.getWorkflowVersionCount(workflowId);
+        const pruned = this.nodeRepository.pruneWorkflowVersions(workflowId, maxVersions, this.instanceId);
+        const remaining = this.nodeRepository.getWorkflowVersionCount(workflowId, this.instanceId);
         return { pruned, remaining };
     }
-    async truncateAllVersions(confirm) {
-        if (!confirm) {
-            return {
-                deleted: 0,
-                message: 'Truncate operation not confirmed - no action taken'
-            };
-        }
-        const deleted = this.nodeRepository.truncateWorkflowVersions();
-        return {
-            deleted,
-            message: `Truncated workflow_versions table - deleted ${deleted} version(s)`
-        };
-    }
     async getStorageStats() {
-        const stats = this.nodeRepository.getVersionStorageStats();
+        const stats = this.nodeRepository.getVersionStorageStats(this.instanceId);
         return {
             totalVersions: stats.totalVersions,
             totalSize: stats.totalSize,
@@ -202,8 +191,8 @@ class WorkflowVersioningService {
         };
     }
     async compareVersions(versionId1, versionId2) {
-        const v1 = this.nodeRepository.getWorkflowVersion(versionId1);
-        const v2 = this.nodeRepository.getWorkflowVersion(versionId2);
+        const v1 = this.nodeRepository.getWorkflowVersion(versionId1, this.instanceId);
+        const v2 = this.nodeRepository.getWorkflowVersion(versionId2, this.instanceId);
         if (!v1 || !v2) {
             throw new Error(`One or both versions not found: ${versionId1}, ${versionId2}`);
         }

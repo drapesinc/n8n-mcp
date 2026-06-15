@@ -5,11 +5,16 @@ import {
   ListToolsRequestSchema,
   InitializeRequestSchema,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { ToolDefinition } from '../types';
 import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
+import { UIAppRegistry } from './ui';
+import { SkillResourceRegistry } from './skills';
 import { n8nManagementTools, getN8nManagementToolsWithWorkspace } from './tools-n8n-manager';
 import { makeToolsN8nFriendly } from './tools-n8n-friendly';
 import { getWorkflowExampleString } from './workflow-examples';
@@ -36,6 +41,7 @@ import { getToolDocumentation, getToolsOverview } from './tools-documentation';
 import { PROJECT_VERSION } from '../utils/version';
 import { getNodeTypeAlternatives, getWorkflowNodeType } from '../utils/node-utils';
 import { NodeTypeNormalizer } from '../utils/node-type-normalizer';
+import { parseTypeVersion } from '../utils/typeversion';
 import { ToolValidation, Validator, ValidationError } from '../utils/validation-schemas';
 import {
   negotiateProtocolVersion,
@@ -44,6 +50,7 @@ import {
 } from '../utils/protocol-version';
 import { InstanceContext } from '../types/instance-context';
 import { GenerateWorkflowHandler, GenerateWorkflowHelpers } from '../types/generate-workflow';
+import type { AdditionalTool, AdditionalToolContext } from '../types/additional-tools';
 import { telemetry } from '../telemetry';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 import { STARTUP_CHECKPOINTS } from '../telemetry/startup-checkpoints';
@@ -159,6 +166,7 @@ type NodeInfoResponse = NodeMinimalInfo | NodeStandardInfo | NodeFullInfo | Vers
 
 interface MCPServerOptions {
   generateWorkflowHandler?: GenerateWorkflowHandler;
+  additionalTools?: AdditionalTool[];
 }
 
 export class N8NDocumentationMCPServer {
@@ -178,11 +186,13 @@ export class N8NDocumentationMCPServer {
   private sharedDbState: SharedDatabaseState | null = null;  // Reference to shared DB state for release
   private isShutdown: boolean = false;  // Prevent double-shutdown
   private generateWorkflowHandler?: GenerateWorkflowHandler;
+  private additionalToolsByName: Map<string, AdditionalTool> = new Map();
 
   constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions) {
     this.instanceContext = instanceContext;
     this.earlyLogger = earlyLogger || null;
     this.generateWorkflowHandler = options?.generateWorkflowHandler;
+    this.registerAdditionalTools(options?.additionalTools || []);
     // Check for test environment first
     const envDbPath = process.env.NODE_DB_PATH;
     let dbPath: string | null = null;
@@ -275,7 +285,52 @@ export class N8NDocumentationMCPServer {
       }
     );
 
+    UIAppRegistry.load();
+    SkillResourceRegistry.load();
     this.setupHandlers();
+  }
+
+  private registerAdditionalTools(additionalTools: AdditionalTool[]): void {
+    const builtInToolNames = new Set([
+      ...n8nDocumentationToolsFinal.map(tool => tool.name),
+      ...n8nManagementTools.map(tool => tool.name),
+    ]);
+
+    for (const additionalTool of additionalTools) {
+      const toolName = additionalTool.tool.name;
+      if (builtInToolNames.has(toolName)) {
+        throw new Error(`Additional tool "${toolName}" collides with a built-in tool`);
+      }
+
+      if (this.additionalToolsByName.has(toolName)) {
+        throw new Error(`Duplicate additional tool "${toolName}" provided`);
+      }
+
+      // Defensive deep copy of the tool definition so per-session servers that
+      // share the same engine-level additionalTools array cannot mutate each
+      // other's tool descriptors (cross-tenant isolation).
+      this.additionalToolsByName.set(toolName, {
+        tool: structuredClone(additionalTool.tool),
+        handler: additionalTool.handler,
+      });
+    }
+  }
+
+  private getEnabledAdditionalTools(disabledTools: Set<string>): Tool[] {
+    return Array.from(this.additionalToolsByName.values())
+      .map(toolDef => toolDef.tool)
+      .filter(tool => !disabledTools.has(tool.name));
+  }
+
+  /**
+   * Look up a tool's schema by name across built-in and host-provided tools.
+   * Used by the arg preprocessing pipeline so additional tools receive the
+   * same client-bug coercion and schema validation as built-ins.
+   */
+  private findToolSchema(name: string): { name: string; inputSchema?: any } | undefined {
+    return n8nDocumentationToolsFinal.find(t => t.name === name)
+      ?? n8nManagementTools.find(t => t.name === name)
+      ?? this.additionalToolsByName.get(name)?.tool;
   }
 
   /**
@@ -353,6 +408,9 @@ export class N8NDocumentationMCPServer {
       if (dbPath === ':memory:') {
         this.db = await createDatabaseAdapter(dbPath);
         logger.debug('Database adapter created (in-memory mode)');
+        // In-memory schema already includes workflow_versions.instance_id, so no
+        // migration is needed; and being ephemeral, the age-retention sweep that
+        // initializeSharedDatabase() runs would have nothing to prune here.
         await this.initializeInMemorySchema();
         logger.debug('In-memory schema initialized');
         this.repository = new NodeRepository(this.db);
@@ -661,9 +719,14 @@ export class N8NDocumentationMCPServer {
         });
       }
 
+      // Cast: MCP `Tool.description` is optional, `ToolDefinition.description` is required.
+      tools.push(...(this.getEnabledAdditionalTools(disabledTools) as unknown as ToolDefinition[]));
+
       // Log filtered tools count if any tools are disabled
       if (disabledTools.size > 0) {
-        const totalAvailableTools = n8nDocumentationToolsFinal.length + (shouldIncludeManagementTools ? n8nManagementTools.length : 0);
+        const totalAvailableTools = n8nDocumentationToolsFinal.length +
+          (shouldIncludeManagementTools ? n8nManagementTools.length : 0) +
+          this.additionalToolsByName.size;
         logger.debug(`Filtered ${disabledTools.size} disabled tools, ${tools.length}/${totalAvailableTools} tools available`);
       }
       
@@ -782,6 +845,8 @@ export class N8NDocumentationMCPServer {
         processedArgs = JSON.parse(JSON.stringify(processedArgs));
       }
 
+      const isAdditionalTool = this.additionalToolsByName.has(name);
+
       try {
         // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
         logger.debug(`Executing tool: ${name}`, summarizeToolCallArgs(processedArgs));
@@ -802,6 +867,11 @@ export class N8NDocumentationMCPServer {
         // Update previous tool tracking
         this.previousTool = name;
         this.previousToolTimestamp = Date.now();
+
+        if (isAdditionalTool) {
+          // Host controls the response shape.
+          return result;
+        }
         
         // Ensure the result is properly formatted for MCP
         let responseText: string;
@@ -868,6 +938,22 @@ export class N8NDocumentationMCPServer {
         this.previousTool = name;
         this.previousToolTimestamp = Date.now();
 
+        if (isAdditionalTool) {
+          // Host controls error response shape. Skip the n8n-specific guidance
+          // and arg-type diagnostic the built-in branch appends — those leak
+          // n8n vocabulary into host tool surfaces. Handlers that want a
+          // structured error response should return one instead of throwing.
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error executing tool ${name}: ${errorMessage}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+
         // Provide more helpful error messages for common n8n issues
         let helpfulMessage = `Error executing tool ${name}: ${errorMessage}`;
 
@@ -904,12 +990,65 @@ export class N8NDocumentationMCPServer {
       }
     });
 
+    // Handle ListResources: UI apps + skill markdown
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      return { resources: [] };
+      const apps = UIAppRegistry.getAllApps();
+      const skills = SkillResourceRegistry.getAll();
+      return {
+        resources: [
+          ...apps
+            .filter(app => app.html !== null)
+            .map(app => ({
+              uri: app.config.uri,
+              name: app.config.displayName,
+              description: app.config.description,
+              mimeType: app.config.mimeType,
+            })),
+          ...skills.map(skill => ({
+            uri: skill.uri,
+            name: skill.name,
+            description: skill.description,
+            mimeType: skill.mimeType,
+          })),
+        ],
+      };
     });
 
+    // Advertise URI templates so capable clients can construct skill URIs
+    this.server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+      resourceTemplates: SkillResourceRegistry.getTemplates(),
+    }));
+
+    // Handle ReadResource for UI apps and skill markdown
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-      throw new Error(`Unknown resource URI: ${request.params.uri}`);
+      const uri = request.params.uri;
+
+      const uiMatch = uri.match(/^ui:\/\/n8n-mcp\/(.+)$/);
+      if (uiMatch) {
+        const app = UIAppRegistry.getAppById(uiMatch[1]);
+        if (!app || !app.html) {
+          throw new Error(`UI app not found or not built: ${uiMatch[1]}`);
+        }
+        return {
+          contents: [
+            { uri: app.config.uri, mimeType: app.config.mimeType, text: app.html },
+          ],
+        };
+      }
+
+      if (uri.startsWith('skill://n8n-mcp/')) {
+        const skill = SkillResourceRegistry.getByUri(uri);
+        if (!skill) {
+          throw new Error(`Skill resource not found: ${uri}`);
+        }
+        return {
+          contents: [
+            { uri: skill.uri, mimeType: skill.mimeType, text: skill.content },
+          ],
+        };
+      }
+
+      throw new Error(`Unknown resource URI: ${uri}`);
     });
   }
 
@@ -1151,9 +1290,9 @@ export class N8NDocumentationMCPServer {
       return false;
     }
 
-    // Get all available tools
-    const allTools = [...n8nDocumentationToolsFinal, ...n8nManagementTools];
-    const tool = allTools.find(t => t.name === toolName);
+    // Look up tool schema across built-in and additional tools so host-injected
+    // tools receive the same schema-driven validation as built-ins.
+    const tool = this.findToolSchema(toolName);
     if (!tool || !tool.inputSchema) {
       return true; // If no schema, assume valid
     }
@@ -1233,8 +1372,10 @@ export class N8NDocumentationMCPServer {
   ): Record<string, any> | undefined {
     if (!args || typeof args !== 'object') return args;
 
-    const allTools = [...n8nDocumentationToolsFinal, ...n8nManagementTools];
-    const tool = allTools.find(t => t.name === toolName);
+    // Look up tool schema across built-in and additional tools so host-injected
+    // tools receive the same client-bug coercion (string→object, string→number,
+    // etc.) that built-ins do.
+    const tool = this.findToolSchema(toolName);
     if (!tool?.inputSchema?.properties) return args;
 
     const properties = tool.inputSchema.properties;
@@ -1350,6 +1491,11 @@ export class N8NDocumentationMCPServer {
     // Validate that args is actually an object
     if (typeof args !== 'object' || args === null) {
       throw new Error(`Invalid arguments for tool ${name}: expected object, got ${typeof args}`);
+    }
+
+    const additionalTool = this.additionalToolsByName.get(name);
+    if (additionalTool) {
+      return additionalTool.handler(args, { instanceContext: this.instanceContext } satisfies AdditionalToolContext);
     }
 
     switch (name) {
@@ -1499,6 +1645,8 @@ export class N8NDocumentationMCPServer {
             return n8nHandlers.handleGetWorkflowStructure(args, ctx);
           case 'minimal':
             return n8nHandlers.handleGetWorkflowMinimal(args, ctx);
+          case 'active':
+            return n8nHandlers.handleGetWorkflowActive(args, ctx);
           case 'full':
           default:
             return n8nHandlers.handleGetWorkflow(args, ctx);
@@ -2853,8 +3001,17 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Get operations (already parsed by repository)
     const operations = node.operations || [];
     
-    // Get the latest version - this is important for AI to use correct typeVersion
-    const latestVersion = node.version ?? '1';
+    // Resolve typeVersion. The DB stores version as TEXT and may contain stale npm
+    // package strings (e.g. "0.2.21") for community nodes seeded before #781 was fixed.
+    // Coerce to a finite number so AI clients always receive a value usable as
+    // `typeVersion: <number>` in workflow JSON.
+    const isCommunityNode = (node as any).isCommunity === true;
+    const parsedVersion = parseTypeVersion(node.version);
+    const latestVersion: number = parsedVersion ?? 1;
+    const versionWasCoerced = parsedVersion === null && node.version != null;
+    const versionNotice = isCommunityNode
+      ? `⚠️ Use typeVersion: ${latestVersion} when creating this node. Community node typeVersion comes from the node descriptor (typically 1) and is independent of the npm package version.`
+      : `⚠️ Use typeVersion: ${latestVersion} when creating this node`;
 
     const result: any = {
       nodeType: node.nodeType,
@@ -2864,8 +3021,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
       category: node.category,
       version: latestVersion,
       isVersioned: node.isVersioned ?? false,
-      // Prominent warning to use the correct typeVersion
-      versionNotice: `⚠️ Use typeVersion: ${latestVersion} when creating this node`,
+      versionNotice,
       requiredProperties: essentials.required,
       commonProperties: essentials.common,
       operations: operations.map((op: any) => ({
@@ -2885,6 +3041,20 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         developmentStyle: node.developmentStyle ?? 'programmatic'
       }
     };
+
+    if (isCommunityNode) {
+      result.isCommunity = true;
+      const npmVersion = (node as any).npmVersion;
+      if (npmVersion) result.npmVersion = npmVersion;
+      // Surface stale-DB cases so callers don't silently inherit bad seed data.
+      if (versionWasCoerced) {
+        result.metadata.versionCoerced = {
+          stored: node.version,
+          resolved: latestVersion,
+          reason: 'Stored version is not a valid typeVersion (likely an npm package version). Defaulted to 1.',
+        };
+      }
+    }
 
     // Add tool variant guidance if applicable
     const toolVariantInfo = this.buildToolVariantGuidance(node);

@@ -117,7 +117,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_get_workflow',
-    description: `Get workflow by ID with different detail levels. Use mode='full' for complete workflow, 'details' for metadata+stats, 'structure' for nodes/connections only, 'minimal' for id/name/active/tags.`,
+    description: `Get workflow by ID with different detail levels. n8n has a draft/publish model: the workflow body holds the draft (latest edits); use mode='active' to see the published graph that is actually running. Modes: 'full' (draft + metadata), 'details' (full + execution stats), 'active' (published graph only), 'structure' (nodes/connections topology), 'minimal' (id/name/active/tags).`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -127,9 +127,9 @@ export const n8nManagementTools: ToolDefinition[] = [
         },
         mode: {
           type: 'string',
-          enum: ['full', 'details', 'structure', 'minimal'],
+          enum: ['full', 'details', 'structure', 'minimal', 'active'],
           default: 'full',
-          description: 'Detail level: full=complete workflow, details=full+execution stats, structure=nodes/connections topology, minimal=metadata only'
+          description: 'Detail level: full=draft + metadata (activeVersionId pointer kept, heavy activeVersion payload stripped), details=full+execution stats, active=published graph (errors if workflow has no live version), structure=nodes/connections topology, minimal=metadata only'
         }
       },
       required: ['id']
@@ -139,6 +139,13 @@ export const n8nManagementTools: ToolDefinition[] = [
       readOnlyHint: true,
       idempotentHint: true,
       openWorldHint: true,
+    },
+    // Claude Code default per-tool cap is 25k tokens; raise it so large but legitimate
+    // workflows still come back inline rather than being persisted to a disk file the model
+    // cannot read. The protocol ceiling is 500k chars; we leave ~10% headroom for the
+    // MCP/JSON-RPC envelope wrapping our payload. See code.claude.com/docs/en/mcp.
+    _meta: {
+      'anthropic/maxResultSizeChars': 450000,
     },
   },
   {
@@ -570,19 +577,19 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_workflow_versions',
-    description: `Manage workflow version history, rollback, and cleanup. Six modes:
+    description: `Manage workflow version history, rollback, and cleanup. Versions are scoped to your n8n instance. Five modes:
 - list: Show version history for a workflow
 - get: Get details of specific version
 - rollback: Restore workflow to previous version (creates backup first)
 - delete: Delete specific version or all versions for a workflow
 - prune: Manually trigger pruning to keep N most recent versions
-- truncate: Delete ALL versions for ALL workflows (requires confirmation)`,
+Old backups are also pruned automatically (10 most recent per workflow, plus an age-based retention window).`,
     inputSchema: {
       type: 'object',
       properties: {
         mode: {
           type: 'string',
-          enum: ['list', 'get', 'rollback', 'delete', 'prune', 'truncate'],
+          enum: ['list', 'get', 'rollback', 'delete', 'prune'],
           description: 'Operation mode'
         },
         workflowId: {
@@ -612,11 +619,6 @@ export const n8nManagementTools: ToolDefinition[] = [
           type: 'number',
           default: 10,
           description: 'Keep N most recent versions (prune mode only)'
-        },
-        confirmTruncate: {
-          type: 'boolean',
-          default: false,
-          description: 'REQUIRED: Must be true to truncate all versions (truncate mode only)'
         }
       },
       required: ['mode']
@@ -719,7 +721,7 @@ export const n8nManagementTools: ToolDefinition[] = [
   },
   {
     name: 'n8n_manage_credentials',
-    description: 'Manage n8n credentials. Actions: list, get, create, update, delete, getSchema. Use getSchema to discover required fields before creating. SECURITY: credential data values are never logged.',
+    description: 'Manage n8n credentials. Actions: list, get, create, update, delete, getSchema. Use getSchema to discover required fields before creating. For list, page beyond 100 results with cursor (from the previous response\'s nextCursor). NOTE: list/get need an n8n deployment whose public API permits credential reads — older n8n versions, restricted API keys, or instance settings can reject them, returning NOT_SUPPORTED (create, delete, getSchema — and update where the API version supports it — still work). SECURITY: credential data values are never logged.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -728,6 +730,9 @@ export const n8nManagementTools: ToolDefinition[] = [
         name: { type: 'string', description: 'Credential name (required for create)' },
         type: { type: 'string', description: 'Credential type e.g. httpHeaderAuth, httpBasicAuth, oAuth2Api (required for create, getSchema)' },
         data: { type: 'object', description: 'Credential data fields - use getSchema to discover required fields (required for create, optional for update)' },
+        includeUsage: { type: 'boolean', description: 'For list/get: also return workflows that reference each credential (id, name, active). On list, triggers a full scan of all credential pages (up to 5000 credentials; ignores cursor/limit, no nextCursor returned). Slower on large instances. Default: false.' },
+        cursor: { type: 'string', description: 'For list: pagination cursor from a previous response\'s nextCursor. Ignored when includeUsage is true.' },
+        limit: { type: 'number', description: 'For list: max results per page (1-100, default 100). Ignored when includeUsage is true.' },
       },
       required: ['action'],
     },

@@ -12,7 +12,7 @@ import { N8NDocumentationMCPServer } from './mcp/server';
 import { ConsoleManager } from './utils/console-manager';
 import { logger } from './utils/logger';
 import { redactHeaders, summarizeMcpBody } from './utils/redaction';
-import { AuthManager } from './utils/auth';
+import { AuthManager, buildBearerChallenge } from './utils/auth';
 import { readFileSync } from 'fs';
 import dotenv from 'dotenv';
 import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
@@ -28,6 +28,7 @@ import {
 import { InstanceContext, validateInstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
 import { GenerateWorkflowHandler } from './types/generate-workflow';
+import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
 
 dotenv.config();
@@ -92,6 +93,7 @@ function logSecurityEvent(
 
 export interface SingleSessionHTTPServerOptions {
   generateWorkflowHandler?: GenerateWorkflowHandler;
+  additionalTools?: AdditionalTool[];
 }
 
 export class SingleSessionHTTPServer {
@@ -118,9 +120,11 @@ export class SingleSessionHTTPServer {
   private authToken: string | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private generateWorkflowHandler?: GenerateWorkflowHandler;
+  private additionalTools?: AdditionalTool[];
 
   constructor(options?: SingleSessionHTTPServerOptions) {
     this.generateWorkflowHandler = options?.generateWorkflowHandler;
+    this.additionalTools = options?.additionalTools;
     // Validate environment on construction
     this.validateEnvironment();
     // No longer pre-create session - will be created per initialize request following SDK pattern
@@ -339,6 +343,7 @@ export class SingleSessionHTTPServer {
         userAgent: req.get('user-agent'),
         reason
       });
+      res.setHeader('WWW-Authenticate', buildBearerChallenge(reason));
       res.status(401).json({
         jsonrpc: '2.0',
         error: { code: -32001, message: 'Unauthorized' },
@@ -356,6 +361,7 @@ export class SingleSessionHTTPServer {
         userAgent: req.get('user-agent'),
         reason: 'invalid_token'
       });
+      res.setHeader('WWW-Authenticate', buildBearerChallenge('invalid_token'));
       res.status(401).json({
         jsonrpc: '2.0',
         error: { code: -32001, message: 'Unauthorized' },
@@ -593,9 +599,16 @@ export class SingleSessionHTTPServer {
           // For initialize requests: always create new transport and server
           logger.info('handleRequest: Creating new transport for initialize request');
 
-          // EAGER CLEANUP: Remove existing sessions for the same instance
-          // This prevents memory buildup when clients reconnect without proper cleanup
-          if (instanceContext?.instanceId) {
+          // Generate session ID based on multi-tenant configuration
+          let sessionIdToUse: string;
+
+          const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
+          const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
+
+          // EAGER CLEANUP: Remove existing sessions for the same instance only
+          // when instance-scoped sessions are requested. Shared strategy allows
+          // multiple MCP clients to use the same tenant/instance concurrently.
+          if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
             const sessionsToRemove: string[] = [];
             for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
               if (context?.instanceId === instanceContext.instanceId) {
@@ -615,12 +628,6 @@ export class SingleSessionHTTPServer {
               await this.removeSession(oldSessionId, 'instance_reconnect');
             }
           }
-
-          // Generate session ID based on multi-tenant configuration
-          let sessionIdToUse: string;
-
-          const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
-          const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
 
           if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
             // In multi-tenant mode with instance strategy, create session per instance
@@ -647,6 +654,7 @@ export class SingleSessionHTTPServer {
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
             generateWorkflowHandler: this.generateWorkflowHandler,
+            additionalTools: this.additionalTools,
           });
 
           transport = new StreamableHTTPServerTransport({
@@ -734,9 +742,9 @@ export class SingleSessionHTTPServer {
               return;
             }
             logger.warn('handleRequest: Session removed between check and use (TOCTOU)', { sessionId });
-            res.status(400).json({
+            res.status(404).json({
               jsonrpc: '2.0',
-              error: { code: -32000, message: 'Bad Request: Session not found or expired' },
+              error: { code: -32000, message: 'Session not found or expired' },
               id: req.body?.id || null,
             });
             return;
@@ -765,7 +773,9 @@ export class SingleSessionHTTPServer {
             return;
           }
 
-          // Only return 400 for actual requests that need a valid session
+          // Missing or malformed session IDs are bad requests. A valid-looking
+          // but unknown session ID means the session was terminated, and MCP
+          // clients use 404 as the signal to initialize a new session.
           const errorDetails = {
             hasSessionId: !!sessionId,
             isInitialize: isInitialize,
@@ -776,13 +786,15 @@ export class SingleSessionHTTPServer {
           logger.warn('handleRequest: Invalid request - no session ID and not initialize', errorDetails);
 
           let errorMessage = 'Bad Request: No valid session ID provided and not an initialize request';
+          let statusCode = 400;
           if (sessionId && !this.isValidSessionId(sessionId)) {
             errorMessage = 'Bad Request: Invalid session ID format';
           } else if (sessionId && !this.transports[sessionId]) {
-            errorMessage = 'Bad Request: Session not found or expired';
+            errorMessage = 'Session not found or expired';
+            statusCode = 404;
           }
 
-          res.status(400).json({
+          res.status(statusCode).json({
             jsonrpc: '2.0',
             error: {
               code: -32000,
@@ -855,6 +867,7 @@ export class SingleSessionHTTPServer {
     // The SaaS backend uses StreamableHTTP exclusively.
     const server = new N8NDocumentationMCPServer(undefined, undefined, {
       generateWorkflowHandler: this.generateWorkflowHandler,
+      additionalTools: this.additionalTools,
     });
 
     const transport = new SSEServerTransport('/messages', res);
@@ -1321,6 +1334,25 @@ export class SingleSessionHTTPServer {
         const headers = extractMultiTenantHeaders(req);
         const hasUrl = headers['x-n8n-url'];
         const hasKey = headers['x-n8n-key'];
+
+        // SECURITY (GHSA-jxx9-px88-pj69, GHSA-2cf7-hpwf-47h9): in multi-tenant
+        // mode both tenant headers are required; an incomplete context is
+        // rejected.
+        if (process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey)) {
+          logger.warn('Multi-tenant request missing tenant headers', {
+            hasUrl: !!hasUrl,
+            hasKey: !!hasKey
+          });
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32602,
+              message: 'Multi-tenant headers required'
+            },
+            id: req.body?.id ?? null
+          });
+          return;
+        }
 
         if (hasUrl || hasKey) {
           // Create context with proper type handling

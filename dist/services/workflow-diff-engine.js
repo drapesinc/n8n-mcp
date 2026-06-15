@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.WorkflowDiffEngine = void 0;
 const uuid_1 = require("uuid");
+const workflow_diff_1 = require("../types/workflow-diff");
 const logger_1 = require("../utils/logger");
 const node_sanitizer_1 = require("./node-sanitizer");
 const node_type_utils_1 = require("../utils/node-type-utils");
@@ -39,6 +40,40 @@ function countOccurrences(str, search) {
     }
     return count;
 }
+function operationReferencesAddedNode(operation, addedNode) {
+    if (operation.type === 'addConnection') {
+        return operation.source === addedNode.name
+            || operation.source === addedNode.id
+            || operation.target === addedNode.name
+            || operation.target === addedNode.id;
+    }
+    if (operation.type === 'rewireConnection') {
+        return operation.source === addedNode.name
+            || operation.source === addedNode.id
+            || operation.from === addedNode.name
+            || operation.from === addedNode.id
+            || operation.to === addedNode.name
+            || operation.to === addedNode.id;
+    }
+    return false;
+}
+function buildExecutionEntries(operations) {
+    const entries = operations.map((operation, index) => ({ operation, index }));
+    for (let currentIndex = 0; currentIndex < entries.length; currentIndex++) {
+        const entry = entries[currentIndex];
+        if (entry.operation.type !== 'addNode')
+            continue;
+        const addedNode = entry.operation.node;
+        const referencedBeforeAdd = entries.findIndex((candidate, candidateIndex) => candidateIndex < currentIndex
+            && (0, workflow_diff_1.isConnectionOperation)(candidate.operation)
+            && operationReferencesAddedNode(candidate.operation, addedNode));
+        if (referencedBeforeAdd === -1)
+            continue;
+        entries.splice(currentIndex, 1);
+        entries.splice(referencedBeforeAdd, 0, entry);
+    }
+    return entries;
+}
 class WorkflowDiffEngine {
     constructor() {
         this.renameMap = new Map();
@@ -58,23 +93,14 @@ class WorkflowDiffEngine {
             this.tagsToRemove = [];
             this.transferToProjectId = undefined;
             const workflowCopy = JSON.parse(JSON.stringify(workflow));
-            const nodeOperationTypes = ['addNode', 'removeNode', 'updateNode', 'patchNodeField', 'moveNode', 'enableNode', 'disableNode'];
-            const nodeOperations = [];
-            const otherOperations = [];
-            request.operations.forEach((operation, index) => {
-                if (nodeOperationTypes.includes(operation.type)) {
-                    nodeOperations.push({ operation, index });
-                }
-                else {
-                    otherOperations.push({ operation, index });
-                }
-            });
-            const allOperations = [...nodeOperations, ...otherOperations];
+            const operationEntries = buildExecutionEntries(request.operations);
+            const nodeOperationCount = request.operations.filter(workflow_diff_1.isNodeOperation).length;
+            const otherOperationCount = request.operations.length - nodeOperationCount;
             const errors = [];
             const appliedIndices = [];
             const failedIndices = [];
             if (request.continueOnError) {
-                for (const { operation, index } of allOperations) {
+                for (const { operation, index } of operationEntries) {
                     const error = this.validateOperation(workflowCopy, operation);
                     if (error) {
                         errors.push({
@@ -87,6 +113,7 @@ class WorkflowDiffEngine {
                     }
                     try {
                         this.applyOperation(workflowCopy, operation);
+                        this.flushPendingRenames(workflowCopy);
                         appliedIndices.push(index);
                     }
                     catch (error) {
@@ -99,13 +126,10 @@ class WorkflowDiffEngine {
                         failedIndices.push(index);
                     }
                 }
-                if (this.renameMap.size > 0 && appliedIndices.length > 0) {
-                    this.updateConnectionReferences(workflowCopy);
-                    logger.debug(`Auto-updated ${this.renameMap.size} node name references in connections (continueOnError mode)`);
-                }
                 if (request.validateOnly) {
                     return {
                         success: errors.length === 0,
+                        workflow: workflowCopy,
                         message: errors.length === 0
                             ? 'Validation successful. All operations are valid.'
                             : `Validation completed with ${errors.length} errors.`,
@@ -137,7 +161,7 @@ class WorkflowDiffEngine {
                 };
             }
             else {
-                for (const { operation, index } of nodeOperations) {
+                for (const { operation, index } of operationEntries) {
                     const error = this.validateOperation(workflowCopy, operation);
                     if (error) {
                         return {
@@ -151,36 +175,7 @@ class WorkflowDiffEngine {
                     }
                     try {
                         this.applyOperation(workflowCopy, operation);
-                    }
-                    catch (error) {
-                        return {
-                            success: false,
-                            errors: [{
-                                    operation: index,
-                                    message: `Failed to apply operation: ${error instanceof Error ? error.message : 'Unknown error'}`,
-                                    details: operation
-                                }]
-                        };
-                    }
-                }
-                if (this.renameMap.size > 0) {
-                    this.updateConnectionReferences(workflowCopy);
-                    logger.debug(`Auto-updated ${this.renameMap.size} node name references in connections`);
-                }
-                for (const { operation, index } of otherOperations) {
-                    const error = this.validateOperation(workflowCopy, operation);
-                    if (error) {
-                        return {
-                            success: false,
-                            errors: [{
-                                    operation: index,
-                                    message: error,
-                                    details: operation
-                                }]
-                        };
-                    }
-                    try {
-                        this.applyOperation(workflowCopy, operation);
+                        this.flushPendingRenames(workflowCopy);
                     }
                     catch (error) {
                         return {
@@ -205,6 +200,7 @@ class WorkflowDiffEngine {
                 if (request.validateOnly) {
                     return {
                         success: true,
+                        workflow: workflowCopy,
                         message: 'Validation successful. Operations are valid but not applied.'
                     };
                 }
@@ -217,7 +213,7 @@ class WorkflowDiffEngine {
                     success: true,
                     workflow: workflowCopy,
                     operationsApplied,
-                    message: `Successfully applied ${operationsApplied} operations (${nodeOperations.length} node ops, ${otherOperations.length} other ops)`,
+                    message: `Successfully applied ${operationsApplied} operations (${nodeOperationCount} node ops, ${otherOperationCount} other ops)`,
                     warnings: this.warnings.length > 0 ? this.warnings : undefined,
                     shouldActivate: shouldActivate || undefined,
                     shouldDeactivate: shouldDeactivate || undefined,
@@ -526,12 +522,12 @@ class WorkflowDiffEngine {
                 .join(', ');
             return `Target node not found: "${operation.target}". Available nodes: ${availableNodes}. Tip: Use node ID for names with special characters (apostrophes, quotes).`;
         }
-        const sourceOutput = operation.sourceOutput || 'main';
+        const { sourceOutput, sourceIndex } = this.resolveSmartParameters(workflow, operation, { silent: true });
         const existing = workflow.connections[sourceNode.name]?.[sourceOutput];
         if (existing) {
-            const hasConnection = existing.some(connections => connections.some(c => c.node === targetNode.name));
-            if (hasConnection) {
-                return `Connection already exists from "${sourceNode.name}" to "${targetNode.name}"`;
+            const slot = existing[sourceIndex];
+            if (Array.isArray(slot) && slot.some(c => c.node === targetNode.name)) {
+                return `Connection already exists from "${sourceNode.name}" (output "${sourceOutput}", index ${sourceIndex}) to "${targetNode.name}"`;
             }
         }
         return null;
@@ -596,7 +592,7 @@ class WorkflowDiffEngine {
                 .join(', ');
             return `"To" node not found: "${operation.to}". Available nodes: ${availableNodes}. Tip: Use node ID for names with special characters.`;
         }
-        const { sourceOutput, sourceIndex } = this.resolveSmartParameters(workflow, operation);
+        const { sourceOutput, sourceIndex } = this.resolveSmartParameters(workflow, operation, { silent: true });
         const connections = workflow.connections[sourceNode.name]?.[sourceOutput];
         if (!connections) {
             return `No connections found from "${sourceNode.name}" on output "${sourceOutput}"`;
@@ -665,12 +661,9 @@ class WorkflowDiffEngine {
         if (!node)
             return;
         this.modifiedNodeIds.add(node.id);
-        if (operation.updates.name && operation.updates.name !== node.name) {
-            const oldName = node.name;
-            const newName = operation.updates.name;
-            this.renameMap.set(oldName, newName);
-            logger.debug(`Tracking rename: "${oldName}" → "${newName}"`);
-        }
+        const pendingRename = operation.updates.name && operation.updates.name !== node.name
+            ? { oldName: node.name, newName: operation.updates.name }
+            : undefined;
         Object.entries(operation.updates).forEach(([path, value]) => {
             if (value !== null && typeof value === 'object' && !Array.isArray(value)
                 && '__patch_find_replace' in value) {
@@ -694,6 +687,10 @@ class WorkflowDiffEngine {
         });
         const sanitized = (0, node_sanitizer_1.sanitizeNode)(node);
         Object.assign(node, sanitized);
+        if (pendingRename && node.name === pendingRename.newName) {
+            this.renameMap.set(pendingRename.oldName, pendingRename.newName);
+            logger.debug(`Tracking rename: "${pendingRename.oldName}" → "${pendingRename.newName}"`);
+        }
     }
     applyPatchNodeField(workflow, operation) {
         const node = this.findNode(workflow, operation.nodeId, operation.nodeName);
@@ -758,7 +755,7 @@ class WorkflowDiffEngine {
             return;
         node.disabled = true;
     }
-    resolveSmartParameters(workflow, operation) {
+    resolveSmartParameters(workflow, operation, options = {}) {
         const sourceNode = this.findNode(workflow, operation.source, operation.source);
         let sourceOutput = String(operation.sourceOutput ?? 'main');
         let sourceIndex = operation.sourceIndex ?? 0;
@@ -777,7 +774,7 @@ class WorkflowDiffEngine {
         if (operation.case !== undefined && operation.sourceIndex === undefined) {
             sourceIndex = operation.case;
         }
-        if (sourceNode && operation.sourceIndex !== undefined && operation.branch === undefined && operation.case === undefined) {
+        if (!options.silent && sourceNode && operation.sourceIndex !== undefined && operation.branch === undefined && operation.case === undefined) {
             if (sourceNode.type === 'n8n-nodes-base.if') {
                 this.warnings.push({
                     operation: -1,
@@ -1041,6 +1038,13 @@ class WorkflowDiffEngine {
     }
     applyReplaceConnections(workflow, operation) {
         workflow.connections = operation.connections;
+    }
+    flushPendingRenames(workflow) {
+        if (this.renameMap.size === 0)
+            return;
+        this.updateConnectionReferences(workflow);
+        logger.debug(`Auto-updated ${this.renameMap.size} node name references in connections`);
+        this.renameMap.clear();
     }
     updateConnectionReferences(workflow) {
         if (this.renameMap.size === 0)

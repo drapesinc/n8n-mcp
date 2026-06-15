@@ -340,6 +340,85 @@ describe('HTTP Server Session Management', () => {
       const canCreate3 = (server as any).canCreateSession();
       expect(canCreate3).toBe(true); // Should be true when under limit
     });
+
+    it('should keep same-instance sessions alive in shared multi-tenant mode', async () => {
+      mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
+        return await fn();
+      });
+      process.env.ENABLE_MULTI_TENANT = 'true';
+      process.env.MULTI_TENANT_SESSION_STRATEGY = 'shared';
+      server = new SingleSessionHTTPServer();
+
+      const instanceContext = {
+        instanceId: 'tenant-a'
+      };
+
+      const existingTransport = {
+        close: vi.fn().mockResolvedValue(undefined)
+      };
+      (server as any).transports['session-a'] = existingTransport;
+      (server as any).servers['session-a'] = {};
+      (server as any).sessionMetadata['session-a'] = {
+        lastAccess: new Date(),
+        createdAt: new Date()
+      };
+      (server as any).sessionContexts['session-a'] = instanceContext;
+
+      const second = createMockReqRes();
+      second.req.headers = { 'mcp-session-id': 'session-b' };
+      second.req.method = 'POST';
+      second.req.body = {
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {},
+        id: 2
+      };
+
+      await server.handleRequest(second.req as any, second.res as any, instanceContext);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect((server as any).transports['session-a']).toBe(existingTransport);
+      expect(existingTransport.close).not.toHaveBeenCalled();
+    });
+
+    it('should replace same-instance sessions in instance multi-tenant mode', async () => {
+      mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
+        return await fn();
+      });
+      process.env.ENABLE_MULTI_TENANT = 'true';
+      process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
+      server = new SingleSessionHTTPServer();
+
+      const instanceContext = {
+        instanceId: 'tenant-a'
+      };
+
+      const oldTransport = {
+        close: vi.fn().mockResolvedValue(undefined)
+      };
+      (server as any).transports['session-a'] = oldTransport;
+      (server as any).servers['session-a'] = {};
+      (server as any).sessionMetadata['session-a'] = {
+        lastAccess: new Date(),
+        createdAt: new Date()
+      };
+      (server as any).sessionContexts['session-a'] = instanceContext;
+
+      const second = createMockReqRes();
+      second.req.method = 'POST';
+      second.req.body = {
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {},
+        id: 2
+      };
+
+      await server.handleRequest(second.req as any, second.res as any, instanceContext);
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect((server as any).transports['session-a']).toBeUndefined();
+      expect(oldTransport.close).toHaveBeenCalled();
+    });
   });
 
   describe('Session Expiration and Cleanup', () => {
@@ -1343,7 +1422,7 @@ describe('HTTP Server Session Management', () => {
       expect(res.end).toHaveBeenCalled();
     });
 
-    it('should return 400 for request (with id) with stale session ID', async () => {
+    it('should return 404 for request (with id) with stale session ID', async () => {
       server = new SingleSessionHTTPServer();
 
       const { req, res } = createMockReqRes();
@@ -1358,10 +1437,10 @@ describe('HTTP Server Session Management', () => {
 
       await server.handleRequest(req as any, res as any);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(404);
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
         error: expect.objectContaining({
-          message: 'Bad Request: Session not found or expired',
+          message: 'Session not found or expired',
         }),
       }));
     });
@@ -1399,7 +1478,7 @@ describe('HTTP Server Session Management', () => {
       expect(res.status).toHaveBeenCalledWith(400);
     });
 
-    it('should return 400 for mixed batch (notification + request) with stale session', async () => {
+    it('should return 404 for mixed batch (notification + request) with stale session', async () => {
       server = new SingleSessionHTTPServer();
 
       const { req, res } = createMockReqRes();
@@ -1412,7 +1491,7 @@ describe('HTTP Server Session Management', () => {
 
       await server.handleRequest(req as any, res as any);
 
-      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.status).toHaveBeenCalledWith(404);
     });
   });
 });

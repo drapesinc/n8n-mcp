@@ -22,6 +22,7 @@ export declare class WorkflowSanitizer {
     private static readonly SENSITIVE_PATTERNS;
     private static readonly SENSITIVE_FIELDS;
     static sanitizeWorkflow(workflow: any): SanitizedWorkflow;
+    static sanitizeTelemetryObject<T = any>(value: any): T;
     private static sanitizeNode;
     private static sanitizeObject;
     private static sanitizeString;

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { WorkflowNode, WorkflowConnection, Workflow } from '../types/n8n-api';
-export declare const workflowNodeSchema: z.ZodObject<{
+export declare const workflowNodeSchema: z.ZodEffects<z.ZodObject<{
     id: z.ZodString;
     name: z.ZodString;
     type: z.ZodString;
@@ -51,8 +51,25 @@ export declare const workflowNodeSchema: z.ZodObject<{
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
     executeOnce?: boolean | undefined;
-}>;
-export declare const workflowConnectionSchema: z.ZodRecord<z.ZodString, z.ZodObject<{
+}>, {
+    type: string;
+    id: string;
+    name: string;
+    typeVersion: number;
+    position: [number, number];
+    parameters: Record<string, unknown>;
+    credentials?: Record<string, unknown> | undefined;
+    retryOnFail?: boolean | undefined;
+    continueOnFail?: boolean | undefined;
+    maxTries?: number | undefined;
+    waitBetweenTries?: number | undefined;
+    alwaysOutputData?: boolean | undefined;
+    disabled?: boolean | undefined;
+    notes?: string | undefined;
+    notesInFlow?: boolean | undefined;
+    executeOnce?: boolean | undefined;
+}, unknown>;
+export declare const workflowConnectionSchema: z.ZodEffects<z.ZodRecord<z.ZodString, z.ZodObject<{
     main: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
         node: z.ZodString;
         type: z.ZodString;
@@ -364,7 +381,111 @@ export declare const workflowConnectionSchema: z.ZodRecord<z.ZodString, z.ZodObj
     type: string;
     node: string;
     index: number;
-}>, "many">, "many">, "strip">>>;
+}>, "many">, "many">, "strip">>>, Record<string, z.objectOutputType<{
+    main: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    error: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    ai_tool: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    ai_languageModel: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    ai_memory: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    ai_embedding: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+    ai_vectorStore: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
+        node: z.ZodString;
+        type: z.ZodString;
+        index: z.ZodNumber;
+    }, "strip", z.ZodTypeAny, {
+        type: string;
+        node: string;
+        index: number;
+    }, {
+        type: string;
+        node: string;
+        index: number;
+    }>, "many">, "many">>;
+}, z.ZodArray<z.ZodArray<z.ZodObject<{
+    node: z.ZodString;
+    type: z.ZodString;
+    index: z.ZodNumber;
+}, "strip", z.ZodTypeAny, {
+    type: string;
+    node: string;
+    index: number;
+}, {
+    type: string;
+    node: string;
+    index: number;
+}>, "many">, "many">, "strip">>, unknown>;
 export declare const workflowSettingsSchema: z.ZodObject<{
     executionOrder: z.ZodDefault<z.ZodEnum<["v0", "v1"]>>;
     timezone: z.ZodOptional<z.ZodString>;

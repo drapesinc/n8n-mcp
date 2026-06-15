@@ -19,4 +19,5 @@ __exportStar(require("./type-structures"), exports);
 __exportStar(require("./instance-context"), exports);
 __exportStar(require("./session-state"), exports);
 __exportStar(require("./generate-workflow"), exports);
+__exportStar(require("./additional-tools"), exports);
 //# sourceMappingURL=index.js.map

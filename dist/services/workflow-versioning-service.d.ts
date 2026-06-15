@@ -67,8 +67,9 @@ export interface VersionDiff {
 export declare class WorkflowVersioningService {
     private nodeRepository;
     private apiClient?;
+    private instanceId;
     private readonly DEFAULT_MAX_VERSIONS;
-    constructor(nodeRepository: NodeRepository, apiClient?: N8nApiClient | undefined);
+    constructor(nodeRepository: NodeRepository, apiClient?: N8nApiClient | undefined, instanceId?: string);
     createBackup(workflowId: string, workflow: any, context: {
         trigger: 'partial_update' | 'full_update' | 'autofix';
         operations?: any[];
@@ -89,10 +90,6 @@ export declare class WorkflowVersioningService {
     pruneVersions(workflowId: string, maxVersions?: number): Promise<{
         pruned: number;
         remaining: number;
-    }>;
-    truncateAllVersions(confirm: boolean): Promise<{
-        deleted: number;
-        message: string;
     }>;
     getStorageStats(): Promise<StorageStats>;
     compareVersions(versionId1: number, versionId2: number): Promise<VersionDiff>;

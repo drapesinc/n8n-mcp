@@ -194,6 +194,9 @@ class FormHandler extends base_handler_1.BaseTriggerHandler {
             if (!validation.valid) {
                 return this.errorResponse(input, `SSRF protection: ${validation.reason}`, startTime);
             }
+            const pinned = validation.address && validation.family
+                ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+                : undefined;
             const formData = new form_data_1.default();
             const warnings = [];
             for (const fieldDef of formFieldDefs) {
@@ -315,6 +318,9 @@ class FormHandler extends base_handler_1.BaseTriggerHandler {
                 data: formData,
                 timeout: input.timeout || (input.waitForResponse !== false ? 120000 : 30000),
                 validateStatus: (status) => status < 500,
+                maxRedirects: 0,
+                httpAgent: pinned?.httpAgent,
+                httpsAgent: pinned?.httpsAgent,
             };
             const response = await axios_1.default.request(config);
             const result = this.normalizeResponse(response.data, input, startTime, {

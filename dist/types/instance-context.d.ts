@@ -12,4 +12,5 @@ export declare function validateInstanceContext(context: InstanceContext): {
     valid: boolean;
     errors?: string[];
 };
+export declare function getInstanceScopeId(context?: InstanceContext): string;
 //# sourceMappingURL=instance-context.d.ts.map

@@ -3,6 +3,7 @@ export * from './type-structures';
 export * from './instance-context';
 export * from './session-state';
 export * from './generate-workflow';
+export * from './additional-tools';
 export interface MCPServerConfig {
     port: number;
     host: string;
@@ -35,6 +36,8 @@ export interface ToolDefinition {
         ui?: {
             resourceUri?: string;
         };
+        'anthropic/maxResultSizeChars'?: number;
+        [key: string]: unknown;
     };
 }
 export interface ResourceDefinition {

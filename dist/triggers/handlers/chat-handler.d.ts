@@ -15,23 +15,23 @@ export declare class ChatHandler extends BaseTriggerHandler<ChatTriggerInput> {
         timeout: z.ZodOptional<z.ZodNumber>;
         waitForResponse: z.ZodOptional<z.ZodBoolean>;
     }, "strip", z.ZodTypeAny, {
-        message: string;
         workflowId: string;
         triggerType: "chat";
+        message: string;
         data?: Record<string, unknown> | undefined;
-        timeout?: number | undefined;
-        headers?: Record<string, string> | undefined;
-        waitForResponse?: boolean | undefined;
         sessionId?: string | undefined;
+        headers?: Record<string, string> | undefined;
+        timeout?: number | undefined;
+        waitForResponse?: boolean | undefined;
     }, {
-        message: string;
         workflowId: string;
         triggerType: "chat";
+        message: string;
         data?: Record<string, unknown> | undefined;
-        timeout?: number | undefined;
-        headers?: Record<string, string> | undefined;
-        waitForResponse?: boolean | undefined;
         sessionId?: string | undefined;
+        headers?: Record<string, string> | undefined;
+        timeout?: number | undefined;
+        waitForResponse?: boolean | undefined;
     }>;
     execute(input: ChatTriggerInput, workflow: Workflow, triggerInfo?: DetectedTrigger): Promise<TriggerResponse>;
 }

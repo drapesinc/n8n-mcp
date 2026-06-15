@@ -595,6 +595,154 @@ describe('WorkflowDiffEngine', () => {
       expect(result.warnings).toBeDefined();
       expect(result.warnings!.some(w => w.message.includes('not found'))).toBe(true);
     });
+
+    it.each([false, true])('should validate connection operations before later rename projections when validateOnly=%s', async (validateOnly) => {
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        validateOnly,
+        operations: [
+          {
+            type: 'removeConnection',
+            source: 'Webhook',
+            target: 'HTTP Request'
+          },
+          {
+            type: 'removeConnection',
+            source: 'HTTP Request',
+            target: 'Slack'
+          },
+          {
+            type: 'removeNode',
+            nodeName: 'HTTP Request'
+          },
+          {
+            type: 'updateNode',
+            nodeName: 'Webhook',
+            updates: {
+              name: 'HTTP Request'
+            }
+          },
+          {
+            type: 'addConnection',
+            source: 'HTTP Request',
+            target: 'Slack'
+          }
+        ]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.errors).toBeUndefined();
+
+      const renamedNode = result.workflow!.nodes.find((node: any) => node.id === 'webhook-1');
+      expect(renamedNode?.name).toBe('HTTP Request');
+      expect(result.workflow!.nodes.some((node: any) => node.name === 'Webhook')).toBe(false);
+      expect(result.workflow!.connections['HTTP Request']?.main?.[0]).toEqual([
+        { node: 'Slack', type: 'main', index: 0 }
+      ]);
+    });
+
+    it('should apply the #788 rename batch under continueOnError mode', async () => {
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        continueOnError: true,
+        operations: [
+          { type: 'removeConnection', source: 'Webhook', target: 'HTTP Request' },
+          { type: 'removeConnection', source: 'HTTP Request', target: 'Slack' },
+          { type: 'removeNode', nodeName: 'HTTP Request' },
+          { type: 'updateNode', nodeName: 'Webhook', updates: { name: 'HTTP Request' } },
+          { type: 'addConnection', source: 'HTTP Request', target: 'Slack' }
+        ]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.errors).toBeUndefined();
+      expect(result.applied).toEqual([0, 1, 2, 3, 4]);
+      expect(result.workflow!.connections['HTTP Request']?.main?.[0]).toEqual([
+        { node: 'Slack', type: 'main', index: 0 }
+      ]);
+    });
+
+    it('should hoist a later addNode referenced by an earlier addConnection (legacy pattern)', async () => {
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        operations: [
+          { type: 'addConnection', source: 'Slack', target: 'Notifier' },
+          {
+            type: 'addNode',
+            node: {
+              name: 'Notifier',
+              type: 'n8n-nodes-base.set',
+              position: [800, 300],
+              parameters: {}
+            }
+          }
+        ]
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.errors).toBeUndefined();
+      expect(result.workflow!.nodes.some((n: any) => n.name === 'Notifier')).toBe(true);
+      expect(result.workflow!.connections['Slack']?.main?.[0]).toEqual([
+        { node: 'Notifier', type: 'main', index: 0 }
+      ]);
+    });
+
+    it('should reject a removeConnection that references a node added later in the batch', async () => {
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        operations: [
+          { type: 'removeConnection', source: 'Phantom', target: 'Slack' },
+          {
+            type: 'addNode',
+            node: {
+              name: 'Phantom',
+              type: 'n8n-nodes-base.set',
+              position: [800, 300],
+              parameters: {}
+            }
+          }
+        ]
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.errors?.[0]?.operation).toBe(0);
+      expect(result.errors?.[0]?.message).toContain('Source node not found');
+    });
+
+    it('should not leak rename tracking when an updateNode apply throws after the rename was recorded', async () => {
+      // updateNode validation does not reject forbidden path keys, but
+      // setNestedProperty throws on them. With the keys ordered so the
+      // forbidden path is iterated before "name", applyUpdateNode throws
+      // *after* recording the rename intent but *before* the rename actually
+      // lands on node.name. Without the commit-after-success guard, the next
+      // successful op's flushPendingRenames would rewrite connection
+      // references to a name no node carries — silently corrupting the graph.
+      const result = await diffEngine.applyDiff(baseWorkflow, {
+        id: 'test-workflow',
+        continueOnError: true,
+        operations: [
+          {
+            type: 'updateNode',
+            nodeName: 'Webhook',
+            updates: {
+              '__proto__.polluted': 'x',
+              name: 'CodeRunner'
+            }
+          } as any,
+          // Drives flushPendingRenames. If renameMap leaked, the connection
+          // key "Webhook" would be rewritten to "CodeRunner" — leaving an
+          // orphaned key referencing a node that doesn't exist under that name.
+          { type: 'addTag', tag: 'sentinel' }
+        ]
+      });
+
+      expect(result.failed).toContain(0);
+      expect(result.applied).toContain(1);
+      // Source workflow's "Webhook" must still own its outgoing connection.
+      expect(result.workflow!.connections['Webhook']).toBeDefined();
+      expect(result.workflow!.connections['CodeRunner']).toBeUndefined();
+      expect(result.workflow!.nodes.some((n: any) => n.name === 'CodeRunner')).toBe(false);
+    });
   });
 
   describe('PatchNodeField Operation', () => {
@@ -1274,9 +1422,108 @@ describe('WorkflowDiffEngine', () => {
       };
 
       const result = await diffEngine.applyDiff(baseWorkflow, request);
-      
+
       expect(result.success).toBe(false);
       expect(result.errors![0].message).toContain('Connection already exists');
+    });
+
+    describe('Switch / multi-output → shared target (Issue #738)', () => {
+      // Reproduces the false-positive "Connection already exists" when wiring multiple
+      // Switch outputs to the same downstream node. Pre-fix the validator scanned ALL
+      // sourceIndex slots; now it only checks the resolved slot.
+      const buildSwitchToSharedTarget = (): Workflow => {
+        const wf = JSON.parse(JSON.stringify(baseWorkflow)) as Workflow;
+        wf.nodes.push({
+          id: 'switch-1',
+          name: 'Switch',
+          type: 'n8n-nodes-base.switch',
+          typeVersion: 3,
+          position: [600, 600],
+          parameters: {}
+        } as any);
+        wf.nodes.push({
+          id: 'merge-1',
+          name: 'Merge',
+          type: 'n8n-nodes-base.merge',
+          typeVersion: 3,
+          position: [900, 600],
+          parameters: {}
+        } as any);
+        // Pre-wire Switch output 0 to Merge so the slot 0 already has a connection.
+        wf.connections['Switch'] = {
+          main: [
+            [{ node: 'Merge', type: 'main', index: 0 }]
+          ]
+        };
+        return wf;
+      };
+
+      it('allows additional Switch outputs to wire to the same target via sourceIndex', async () => {
+        const workflow = buildSwitchToSharedTarget();
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [
+            { type: 'addConnection', source: 'Switch', target: 'Merge', sourceIndex: 1 },
+            { type: 'addConnection', source: 'Switch', target: 'Merge', sourceIndex: 2 }
+          ]
+        });
+
+        expect(result.success).toBe(true);
+        const switchMain = result.workflow!.connections['Switch'].main;
+        expect(switchMain[0][0].node).toBe('Merge');
+        expect(switchMain[1][0].node).toBe('Merge');
+        expect(switchMain[2][0].node).toBe('Merge');
+      });
+
+      it('allows additional Switch outputs to wire to the same target via case', async () => {
+        const workflow = buildSwitchToSharedTarget();
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [
+            { type: 'addConnection', source: 'Switch', target: 'Merge', case: 1 } as any,
+            { type: 'addConnection', source: 'Switch', target: 'Merge', case: 2 } as any
+          ]
+        });
+
+        expect(result.success).toBe(true);
+        const switchMain = result.workflow!.connections['Switch'].main;
+        expect(switchMain[1][0].node).toBe('Merge');
+        expect(switchMain[2][0].node).toBe('Merge');
+      });
+
+      it('still rejects an exact duplicate at the same (source, sourceIndex, target)', async () => {
+        const workflow = buildSwitchToSharedTarget();
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [
+            { type: 'addConnection', source: 'Switch', target: 'Merge', sourceIndex: 0 }
+          ]
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.errors![0].message).toContain('Connection already exists');
+        expect(result.errors![0].message).toContain('index 0');
+      });
+
+      it('emits the Switch sourceIndex warning exactly once per operation', async () => {
+        // Guards against the silent-resolve regression: pre-fix, validate AND apply
+        // both pushed the same warning, so a single addConnection emitted 2 warnings.
+        const workflow = buildSwitchToSharedTarget();
+
+        const result = await diffEngine.applyDiff(workflow, {
+          id: 'test',
+          operations: [
+            { type: 'addConnection', source: 'Switch', target: 'Merge', sourceIndex: 1 }
+          ]
+        });
+
+        expect(result.success).toBe(true);
+        const switchWarnings = (result.warnings || []).filter(w => w.message.includes('Switch'));
+        expect(switchWarnings.length).toBe(1);
+      });
     });
 
     it('should reject connection to non-existent source node', async () => {
@@ -2879,10 +3126,12 @@ describe('WorkflowDiffEngine', () => {
       };
 
       const result = await diffEngine.applyDiff(baseWorkflow, request);
-      
+
       expect(result.success).toBe(true);
       expect(result.message).toContain('Validation successful');
-      expect(result.workflow).toBeUndefined();
+      // Post #744: validateOnly returns the simulated post-diff workflow so callers
+      // can run structural validation. Original workflow is unchanged.
+      expect(result.workflow).toBeDefined();
     });
 
     it('should return validation errors in validateOnly mode', async () => {
@@ -3958,7 +4207,8 @@ describe('WorkflowDiffEngine', () => {
 
         const result = await diffEngine.applyDiff(workflow, request);
 
-        expect(result.workflow).toBeUndefined();
+        // Post #744: validateOnly + continueOnError returns the simulated post-diff workflow
+        expect(result.workflow).toBeDefined();
         expect(result.message).toContain('Validation completed');
         expect(result.applied).toEqual([0, 2]);
         expect(result.failed).toEqual([1]);
@@ -4488,7 +4738,8 @@ describe('WorkflowDiffEngine', () => {
         const result = await diffEngine.applyDiff(workflow, request);
 
         expect(result.success).toBe(true);
-        expect(result.workflow).toBeUndefined();
+        // Post #744: validateOnly returns the simulated post-diff workflow snapshot
+        expect(result.workflow).toBeDefined();
         expect(result.message).toContain('Validation successful');
         expect(result.message).toContain('not applied');
       });
@@ -4614,7 +4865,8 @@ describe('WorkflowDiffEngine', () => {
         expect(result.success).toBe(false);
         expect(result.message).toContain('Validation completed');
         expect(result.errors).toHaveLength(2);
-        expect(result.workflow).toBeUndefined();
+        // Post #744: validateOnly returns the simulated post-diff workflow even on errors
+        expect(result.workflow).toBeDefined();
       });
 
 
