@@ -46,6 +46,7 @@ exports.handleGetWorkflowMinimal = handleGetWorkflowMinimal;
 exports.handleGetWorkflowActive = handleGetWorkflowActive;
 exports.handleUpdateWorkflow = handleUpdateWorkflow;
 exports.handleDeleteWorkflow = handleDeleteWorkflow;
+exports.handleActivateWorkflow = handleActivateWorkflow;
 exports.handleListWorkflows = handleListWorkflows;
 exports.handleValidateWorkflow = handleValidateWorkflow;
 exports.handleAutofixWorkflow = handleAutofixWorkflow;
@@ -96,6 +97,7 @@ const telemetry_1 = require("../telemetry");
 const cache_utils_1 = require("../utils/cache-utils");
 const execution_processor_1 = require("../services/execution-processor");
 const npm_version_checker_1 = require("../utils/npm-version-checker");
+const workspace_api_client_1 = require("../services/workspace-api-client");
 const mcp_input_normalizer_1 = require("../utils/mcp-input-normalizer");
 let defaultApiClient = null;
 let lastDefaultConfigUrl = null;
@@ -772,6 +774,44 @@ async function handleDeleteWorkflow(args, context) {
                 deleted: true
             },
             message: `Workflow "${deleted?.name || id}" deleted successfully.`
+        };
+    }
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError) {
+            return {
+                success: false,
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+                code: error.code
+            };
+        }
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
+async function handleActivateWorkflow(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id, active } = zod_1.z.object({ id: zod_1.z.string(), active: zod_1.z.boolean() }).parse(args);
+        const workflow = active
+            ? await client.activateWorkflow(id)
+            : await client.deactivateWorkflow(id);
+        return {
+            success: true,
+            data: {
+                id: workflow.id,
+                name: workflow.name,
+                active: workflow.active,
+            },
+            message: `Workflow "${workflow.name || id}" ${active ? 'activated' : 'deactivated'} successfully.`
         };
     }
     catch (error) {
@@ -1598,8 +1638,12 @@ async function handleDiagnostic(request, context) {
         nodeVersion: process.version,
         platform: process.platform
     };
-    const apiConfig = resolveN8nApiConfigForResponse(context);
-    const apiConfigured = apiConfig !== null;
+    const workspaceManager = (0, workspace_api_client_1.getWorkspaceApiClientManager)();
+    const availableWorkspaces = workspaceManager.getAvailableWorkspaces();
+    const defaultWorkspace = workspaceManager.getDefaultWorkspace();
+    const isMultiWorkspace = workspaceManager.isMultiWorkspace();
+    const apiConfig = (0, n8n_api_1.getN8nApiConfig)();
+    const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
     const apiClient = getN8nApiClient(context);
     let apiStatus = {
         configured: apiConfigured,
@@ -1618,7 +1662,7 @@ async function handleDiagnostic(request, context) {
         }
     }
     const documentationTools = 7;
-    const managementTools = apiConfigured ? 14 : 0;
+    const managementTools = apiConfigured ? 18 : 0;
     const totalTools = documentationTools + managementTools;
     const versionCheck = await (0, npm_version_checker_1.checkNpmVersion)();
     const cacheMetricsData = getInstanceCacheMetrics();
@@ -1633,7 +1677,19 @@ async function handleDiagnostic(request, context) {
                 baseUrl: apiConfig.baseUrl,
                 timeout: apiConfig.timeout,
                 maxRetries: apiConfig.maxRetries
-            } : null
+            } : null,
+            workspaceMode: availableWorkspaces.length === 0 ? 'none'
+                : availableWorkspaces.length === 1 ? 'single'
+                    : 'multi',
+            workspaces: availableWorkspaces.length > 0 ? {
+                available: availableWorkspaces,
+                default: defaultWorkspace,
+                count: availableWorkspaces.length
+            } : null,
+            activeContext: context ? {
+                url: context.n8nApiUrl?.replace(/^(https?:\/\/[^\/]+).*/, '$1'),
+                instanceId: context.instanceId
+            } : (defaultWorkspace ? `Using default workspace: ${defaultWorkspace}` : 'No context available')
         },
         versionInfo: {
             current: versionCheck.currentVersion,
@@ -1652,8 +1708,10 @@ async function handleDiagnostic(request, context) {
                 count: managementTools,
                 enabled: apiConfigured,
                 description: apiConfigured ?
-                    'Management tools are ENABLED - create, update, execute workflows' :
-                    'Management tools are DISABLED - configure N8N_API_URL and N8N_API_KEY to enable'
+                    (isMultiWorkspace
+                        ? `Management tools are ENABLED - using ${availableWorkspaces.length} workspaces${defaultWorkspace ? ` (default: ${defaultWorkspace})` : ''}`
+                        : 'Management tools are ENABLED - create, update, execute workflows')
+                    : 'Management tools are DISABLED - configure N8N_URL_* and N8N_TOKEN_* env vars (or N8N_API_URL + N8N_API_KEY for single instance)'
             },
             totalAvailable: totalTools
         },

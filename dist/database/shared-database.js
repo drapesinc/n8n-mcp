@@ -11,6 +11,7 @@ exports.getSharedDatabaseRefCount = getSharedDatabaseRefCount;
 const path_1 = __importDefault(require("path"));
 const database_adapter_1 = require("./database-adapter");
 const node_repository_1 = require("./node-repository");
+const add_workflow_versions_instance_id_1 = require("./migrations/add-workflow-versions-instance-id");
 const template_service_1 = require("../templates/template-service");
 const enhanced_config_validator_1 = require("../services/enhanced-config-validator");
 const logger_1 = require("../utils/logger");
@@ -62,7 +63,9 @@ async function getSharedDatabase(dbPath) {
 async function initializeSharedDatabase(dbPath) {
     logger_1.logger.info('Initializing shared database connection', { dbPath });
     const db = await (0, database_adapter_1.createDatabaseAdapter)(dbPath);
+    (0, add_workflow_versions_instance_id_1.migrateWorkflowVersionsInstanceId)(db);
     const repository = new node_repository_1.NodeRepository(db);
+    repository.pruneExpiredWorkflowVersions();
     const templateService = new template_service_1.TemplateService(db);
     enhanced_config_validator_1.EnhancedConfigValidator.initializeSimilarityServices(repository);
     sharedState = {

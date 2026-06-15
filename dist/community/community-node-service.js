@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CommunityNodeService = void 0;
 const logger_1 = require("../utils/logger");
+const typeversion_1 = require("../utils/typeversion");
 const community_node_fetcher_1 = require("./community-node-fetcher");
 class CommunityNodeService {
     constructor(repository, environment = 'production') {
@@ -141,7 +142,7 @@ class CommunityNodeService {
                 nodeDesc.group?.includes('webhook') ||
                 false,
             isVersioned: (attributes.nodeVersions?.length || 0) > 1,
-            version: nodeDesc.version?.toString() || attributes.npmVersion || '1',
+            version: ((0, typeversion_1.parseTypeVersion)(nodeDesc.version) ?? 1).toString(),
             outputs: nodeDesc.outputs,
             outputNames: nodeDesc.outputNames,
             isCommunity: true,
@@ -172,7 +173,7 @@ class CommunityNodeService {
             isTrigger: pkgInfo.name.includes('trigger'),
             isWebhook: pkgInfo.name.includes('webhook'),
             isVersioned: false,
-            version: pkgInfo.version,
+            version: '1',
             isCommunity: true,
             isVerified: false,
             authorName: pkgInfo.author?.name || pkgInfo.publisher?.username,

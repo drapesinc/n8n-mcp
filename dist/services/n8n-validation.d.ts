@@ -59,14 +59,14 @@ export declare const workflowNodeSchema: z.ZodEffects<z.ZodObject<{
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
-    retryOnFail?: boolean | undefined;
-    continueOnFail?: boolean | undefined;
-    maxTries?: number | undefined;
-    waitBetweenTries?: number | undefined;
-    alwaysOutputData?: boolean | undefined;
     disabled?: boolean | undefined;
     notes?: string | undefined;
     notesInFlow?: boolean | undefined;
+    continueOnFail?: boolean | undefined;
+    retryOnFail?: boolean | undefined;
+    maxTries?: number | undefined;
+    waitBetweenTries?: number | undefined;
+    alwaysOutputData?: boolean | undefined;
     executeOnce?: boolean | undefined;
 }, unknown>;
 export declare const workflowConnectionSchema: z.ZodEffects<z.ZodRecord<z.ZodString, z.ZodObject<{
