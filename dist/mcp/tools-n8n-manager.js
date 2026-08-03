@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.n8nManagementTools = void 0;
+exports.DESTRUCTIVE_TOOL_OPERATIONS = exports.TOOL_OPERATION_PARAM = exports.n8nManagementTools = void 0;
 exports.getN8nManagementToolsWithWorkspace = getN8nManagementToolsWithWorkspace;
 const workspace_api_client_1 = require("../services/workspace-api-client");
 function addWorkspaceParam(inputSchema) {
@@ -82,6 +82,20 @@ exports.n8nManagementTools = [
                         errorWorkflow: { type: 'string' }
                     }
                 },
+                nodeGroups: {
+                    type: 'array',
+                    description: 'Optional canvas groups (n8n 2.28+): named frames around a connected run of non-trigger nodes. Members are node IDs from nodes[]. Dropped automatically on older n8n.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            id: { type: 'string', description: 'Optional; generated when omitted' },
+                            name: { type: 'string' },
+                            nodeIds: { type: 'array', items: { type: 'string' } },
+                            description: { type: 'string', description: 'Optional, max 155 chars (n8n 2.32+)' }
+                        },
+                        required: ['name', 'nodeIds']
+                    }
+                },
                 projectId: {
                     type: 'string',
                     description: 'Optional project ID to create the workflow in (enterprise feature)'
@@ -98,7 +112,7 @@ exports.n8nManagementTools = [
     },
     {
         name: 'n8n_get_workflow',
-        description: `Get workflow by ID with different detail levels. n8n has a draft/publish model: the workflow body holds the draft (latest edits); use mode='active' to see the published graph that is actually running. Modes: 'full' (draft + metadata), 'details' (full + execution stats), 'active' (published graph only), 'structure' (nodes/connections topology), 'minimal' (id/name/active/tags).`,
+        description: `Get workflow by ID with different detail levels. n8n has a draft/publish model: the workflow body holds the draft (latest edits); use mode='active' to see the published graph that is actually running. Modes: 'full' (draft + metadata), 'details' (full + execution stats), 'active' (published graph only), 'structure' (nodes/connections topology), 'filtered' (full config of only the nodes named in nodeNames - use to read one heavy node without the whole workflow), 'minimal' (id/name/active/tags).`,
         inputSchema: {
             type: 'object',
             properties: {
@@ -108,9 +122,15 @@ exports.n8nManagementTools = [
                 },
                 mode: {
                     type: 'string',
-                    enum: ['full', 'details', 'structure', 'minimal', 'active'],
+                    enum: ['full', 'details', 'structure', 'minimal', 'active', 'filtered'],
                     default: 'full',
-                    description: 'Detail level: full=draft + metadata (activeVersionId pointer kept, heavy activeVersion payload stripped), details=full+execution stats, active=published graph (errors if workflow has no live version), structure=nodes/connections topology, minimal=metadata only'
+                    description: 'Detail level: full=draft + metadata (activeVersionId pointer kept, heavy activeVersion payload stripped), details=full+execution stats, active=published graph (errors if workflow has no live version), structure=nodes/connections topology, filtered=full config of only the nodes listed in nodeNames, minimal=metadata only'
+                },
+                nodeNames: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    minItems: 1,
+                    description: "For mode='filtered': node names or node IDs to return with full config. Returns only matching nodes (avoids client-side truncation on large workflows with long Code-node source). Discover names with mode='structure' first."
                 }
             },
             required: ['id']
@@ -154,6 +174,20 @@ exports.n8nManagementTools = [
                 settings: {
                     type: 'object',
                     description: 'Workflow settings to update'
+                },
+                nodeGroups: {
+                    type: 'array',
+                    description: 'Canvas groups (n8n 2.28+). Omit to keep the existing groups; pass [] to ungroup everything. Members are node IDs.',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            id: { type: 'string', description: 'Optional; generated when omitted' },
+                            name: { type: 'string' },
+                            nodeIds: { type: 'array', items: { type: 'string' } },
+                            description: { type: 'string', description: 'Optional, max 155 chars (n8n 2.32+)' }
+                        },
+                        required: ['name', 'nodeIds']
+                    }
                 }
             },
             required: ['id']
@@ -168,7 +202,7 @@ exports.n8nManagementTools = [
     },
     {
         name: 'n8n_update_partial_workflow',
-        description: `Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, patchNodeField, moveNode, enable/disableNode, addConnection, removeConnection, updateSettings, updateName, add/removeTag, activate/deactivateWorkflow, transferWorkflow. patchNodeField requires fieldPath (dot path, e.g. "parameters.jsCode") and patches: [{find, replace}]. See tools_documentation("n8n_update_partial_workflow", "full") for details.`,
+        description: `Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, patchNodeField, moveNode, enable/disableNode, addConnection, removeConnection, rewireConnection, cleanStaleConnections, replaceConnections, updateSettings, updateName, setNodeGroups, add/removeTag, activate/deactivateWorkflow, transferWorkflow. patchNodeField requires fieldPath (dot path, e.g. "parameters.jsCode") and patches: [{find, replace}]. setNodeGroups replaces all canvas groups: [{name, nodeNames|nodeIds}] (or [] to ungroup). See tools_documentation("n8n_update_partial_workflow", "full") for details.`,
         inputSchema: {
             type: 'object',
             additionalProperties: true,
@@ -517,6 +551,48 @@ exports.n8nManagementTools = [
         },
     },
     {
+        name: 'n8n_evaluations',
+        description: `Run and read evaluation test runs for a workflow. Reading requires n8n >= 2.30, run/cancel require n8n >= 2.32, and the API key must be created on the matching release to carry the testRun scopes; run/cancel also need the key owner to hold workflow:execute on the workflow. Actions: list_runs=list runs for a workflow, get_run=single run with aggregated metrics, list_cases=per-case results (paginate - cases can be large), run=trigger a run on a workflow with an evaluation trigger, cancel=stop a running run.`,
+        inputSchema: {
+            type: 'object',
+            properties: {
+                action: {
+                    type: 'string',
+                    enum: ['list_runs', 'get_run', 'list_cases', 'run', 'cancel'],
+                    description: 'Operation: list_runs=list test runs, get_run=run details with metrics, list_cases=per-case results, run=trigger a run, cancel=stop a running run'
+                },
+                workflowId: {
+                    type: 'string',
+                    description: 'Workflow ID the test runs belong to (required)'
+                },
+                runId: {
+                    type: 'string',
+                    description: 'Test run ID (required for action=get_run, list_cases, or cancel)'
+                },
+                status: {
+                    type: 'string',
+                    enum: ['new', 'running', 'completed', 'error', 'cancelled'],
+                    description: 'For action=list_runs: filter by run status'
+                },
+                limit: {
+                    type: 'number',
+                    description: 'Results per page (1-250). Defaults: n8n server default (100) for list_runs, 20 for list_cases (per-case inputs/outputs can be large)'
+                },
+                cursor: {
+                    type: 'string',
+                    description: 'Pagination cursor from previous response'
+                }
+            },
+            required: ['action', 'workflowId']
+        },
+        annotations: {
+            title: 'Manage Evaluation Test Runs',
+            readOnlyHint: false,
+            destructiveHint: true,
+            openWorldHint: true,
+        },
+    },
+    {
         name: 'n8n_health_check',
         description: `Check n8n instance health and API connectivity. Use mode='diagnostic' for detailed troubleshooting with env vars and tool status.`,
         inputSchema: {
@@ -708,46 +784,6 @@ Old backups are also pruned automatically (10 most recent per workflow, plus an 
         },
     },
     {
-        name: 'n8n_generate_workflow',
-        description: 'Generate an n8n workflow from a natural language description using AI. ' +
-            'Call with just a description to get workflow proposals. ' +
-            'Then call again with deploy_id to deploy a chosen proposal, ' +
-            'or set skip_cache=true to generate a fresh workflow. ' +
-            'Use confirm_deploy=true to deploy a previously generated workflow.',
-        inputSchema: {
-            type: 'object',
-            properties: {
-                description: {
-                    type: 'string',
-                    description: 'Clear description of what the workflow should do. Include: trigger type ' +
-                        '(webhook, schedule, manual), services to integrate (Slack, Gmail, etc.), and the logic/flow.'
-                },
-                skip_cache: {
-                    type: 'boolean',
-                    description: 'Set to true to skip proposals and generate a fresh workflow from scratch. ' +
-                        'Returns a preview — call again with confirm_deploy=true to deploy it.'
-                },
-                deploy_id: {
-                    type: 'string',
-                    description: 'ID of a proposal to deploy. Get proposal IDs from a previous call ' +
-                        'that returned status "proposals".'
-                },
-                confirm_deploy: {
-                    type: 'boolean',
-                    description: 'Set to true to deploy the workflow from the last generation preview.'
-                }
-            },
-            required: ['description'],
-        },
-        annotations: {
-            title: 'Generate Workflow',
-            readOnlyHint: false,
-            destructiveHint: false,
-            idempotentHint: false,
-            openWorldHint: true,
-        },
-    },
-    {
         name: 'n8n_audit_instance',
         description: `Security audit of n8n instance. Combines n8n's built-in audit API (credentials, database, nodes, instance, filesystem risks) with deep workflow scanning (hardcoded secrets via 50+ regex patterns, unauthenticated webhooks, error handling gaps, data retention risks). Returns actionable markdown report with remediation steps using n8n_manage_credentials and n8n_update_partial_workflow.`,
         inputSchema: {
@@ -788,4 +824,14 @@ Old backups are also pruned automatically (10 most recent per workflow, plus an 
         },
     },
 ];
+exports.TOOL_OPERATION_PARAM = {
+    'n8n_executions': 'action',
+    'n8n_evaluations': 'action',
+    'n8n_workflow_versions': 'mode',
+};
+exports.DESTRUCTIVE_TOOL_OPERATIONS = {
+    'n8n_executions': new Set(['delete']),
+    'n8n_evaluations': new Set(['run', 'cancel']),
+    'n8n_workflow_versions': new Set(['delete', 'rollback', 'prune']),
+};
 //# sourceMappingURL=tools-n8n-manager.js.map

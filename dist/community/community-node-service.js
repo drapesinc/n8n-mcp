@@ -4,6 +4,20 @@ exports.CommunityNodeService = void 0;
 const logger_1 = require("../utils/logger");
 const typeversion_1 = require("../utils/typeversion");
 const community_node_fetcher_1 = require("./community-node-fetcher");
+const NPM_MANIFEST_FETCH = { maxRetries: 1, timeout: 5000 };
+const MAX_NODES_PER_PACKAGE = 100;
+function extractNodeNameFromEntryPath(entryPath) {
+    const match = /([^\\/]+)\.node\.(?:js|ts)$/.exec(entryPath);
+    if (!match) {
+        return undefined;
+    }
+    const className = match[1];
+    const acronym = /^[A-Z]+(?=[A-Z][a-z])/.exec(className);
+    if (acronym) {
+        return acronym[0].toLowerCase() + className.slice(acronym[0].length);
+    }
+    return className.charAt(0).toLowerCase() + className.slice(1);
+}
 class CommunityNodeService {
     constructor(repository, environment = 'production') {
         this.repository = repository;
@@ -13,7 +27,7 @@ class CommunityNodeService {
         const startTime = Date.now();
         const result = {
             verified: { fetched: 0, saved: 0, skipped: 0, errors: [] },
-            npm: { fetched: 0, saved: 0, skipped: 0, errors: [] },
+            npm: { fetched: 0, saved: 0, skipped: 0, nodesSaved: 0, nodesRemoved: 0, errors: [] },
             duration: 0,
         };
         logger_1.logger.info('Syncing verified community nodes from Strapi API...');
@@ -37,7 +51,8 @@ class CommunityNodeService {
         }
         result.duration = Date.now() - startTime;
         logger_1.logger.info(`Community node sync complete in ${(result.duration / 1000).toFixed(1)}s: ` +
-            `${result.verified.saved} verified, ${result.npm.saved} npm`);
+            `${result.verified.saved} verified, ` +
+            `${result.npm.nodesSaved} npm node(s) from ${result.npm.saved} package(s)`);
         return result;
     }
     async syncVerifiedNodes(progressCallback, skipExisting) {
@@ -75,7 +90,14 @@ class CommunityNodeService {
         return result;
     }
     async syncNpmNodes(limit = 100, progressCallback, skipExisting) {
-        const result = { fetched: 0, saved: 0, skipped: 0, errors: [] };
+        const result = {
+            fetched: 0,
+            saved: 0,
+            skipped: 0,
+            nodesSaved: 0,
+            nodesRemoved: 0,
+            errors: [],
+        };
         const npmPackages = await this.fetcher.fetchNpmPackages(limit, progressCallback);
         result.fetched = npmPackages.length;
         if (npmPackages.length === 0) {
@@ -94,13 +116,32 @@ class CommunityNodeService {
                     result.skipped++;
                     continue;
                 }
-                if (skipExisting && this.repository.hasNodeByNpmPackage(packageName)) {
+                const existingRows = this.repository.getNodesByNpmPackage(packageName);
+                const resolved = await this.resolveNpmNodeNames(packageName, pkg.package.version);
+                if (resolved.source === 'unavailable' && existingRows.length > 0) {
+                    logger_1.logger.warn(`Skipping ${packageName}: package.json unavailable, keeping ${existingRows.length} stored row(s)`);
                     result.skipped++;
                     continue;
                 }
-                const parsedNode = this.npmPackageToParsedNode(pkg);
-                this.repository.saveNode(parsedNode);
+                const parsedNodes = this.npmPackageToParsedNodes(pkg, resolved);
+                const nodeTypes = parsedNodes.map((node) => node.nodeType);
+                const staleRows = this.staleCommunityRows(existingRows, nodeTypes);
+                const upToDate = existingRows.length > 0 && !this.rowsOutOfSync(existingRows, nodeTypes, staleRows);
+                if (skipExisting && upToDate) {
+                    result.skipped++;
+                    continue;
+                }
+                const removed = this.repository.transaction(() => {
+                    for (const parsedNode of parsedNodes) {
+                        this.repository.saveNode(parsedNode);
+                    }
+                    const pruned = this.pruneStaleCommunityRows(packageName, staleRows, nodeTypes);
+                    this.carryOverPackageDocs(existingRows, nodeTypes);
+                    return pruned;
+                });
                 result.saved++;
+                result.nodesSaved += parsedNodes.length;
+                result.nodesRemoved += removed;
                 if (progressCallback) {
                     progressCallback(`Saving npm packages`, result.saved + result.skipped, npmPackages.length);
                 }
@@ -109,7 +150,8 @@ class CommunityNodeService {
                 result.errors.push(`Error saving ${pkg.package.name}: ${error.message}`);
             }
         }
-        logger_1.logger.info(`npm packages: ${result.saved} saved, ${result.skipped} skipped`);
+        logger_1.logger.info(`npm packages: ${result.saved} saved (${result.nodesSaved} node row(s), ` +
+            `${result.nodesRemoved} removed), ${result.skipped} skipped`);
         return result;
     }
     strapiNodeToParsedNode(strapiNode) {
@@ -123,9 +165,10 @@ class CommunityNodeService {
         if (nodeType.includes('n8n-nodes-preview-')) {
             nodeType = nodeType.replace('n8n-nodes-preview-', 'n8n-nodes-');
         }
-        const isAITool = nodeDesc.usableAsTool === true ||
-            nodeDesc.codex?.categories?.includes('AI') ||
-            attributes.name?.toLowerCase().includes('ai');
+        const usableAsTool = nodeDesc.usableAsTool;
+        const declaresToolUse = usableAsTool !== undefined && usableAsTool !== null && usableAsTool !== false;
+        const hasAICategory = nodeDesc.codex?.categories?.includes('AI') ?? false;
+        const isAITool = declaresToolUse || hasAICategory;
         return {
             nodeType,
             packageName: attributes.packageName,
@@ -155,12 +198,11 @@ class CommunityNodeService {
             communityFetchedAt: new Date().toISOString(),
         };
     }
-    npmPackageToParsedNode(pkg) {
+    npmPackageToParsedNodes(pkg, resolved) {
         const { package: pkgInfo, score } = pkg;
-        const nodeName = this.extractNodeNameFromPackage(pkgInfo.name);
-        const nodeType = `${pkgInfo.name}.${nodeName}`;
-        return {
-            nodeType,
+        const perNodeSignal = resolved.names.length > 1;
+        return resolved.names.map((nodeName) => ({
+            nodeType: `${pkgInfo.name}.${nodeName}`,
             packageName: pkgInfo.name,
             displayName: nodeName,
             description: pkgInfo.description || `Community node from ${pkgInfo.name}`,
@@ -170,8 +212,8 @@ class CommunityNodeService {
             credentials: [],
             operations: [],
             isAITool: false,
-            isTrigger: pkgInfo.name.includes('trigger'),
-            isWebhook: pkgInfo.name.includes('webhook'),
+            isTrigger: this.matchesRole(pkgInfo.name, nodeName, 'trigger', perNodeSignal),
+            isWebhook: this.matchesRole(pkgInfo.name, nodeName, 'webhook', perNodeSignal),
             isVersioned: false,
             version: '1',
             isCommunity: true,
@@ -182,7 +224,13 @@ class CommunityNodeService {
             npmVersion: pkgInfo.version,
             npmDownloads: Math.round(score.detail.popularity * 10000),
             communityFetchedAt: new Date().toISOString(),
-        };
+        }));
+    }
+    matchesRole(packageName, nodeName, role, perNodeSignal) {
+        if (nodeName.toLowerCase().includes(role)) {
+            return true;
+        }
+        return perNodeSignal ? false : packageName.includes(role);
     }
     extractOperations(nodeDesc) {
         const operations = [];
@@ -200,6 +248,72 @@ class CommunityNodeService {
             }
         }
         return operations;
+    }
+    rowsOutOfSync(existingRows, nodeTypes, staleRows) {
+        const storedTypes = new Set(existingRows.map((row) => row.nodeType));
+        return nodeTypes.some((nodeType) => !storedTypes.has(nodeType)) || staleRows.length > 0;
+    }
+    staleCommunityRows(existingRows, nodeTypes) {
+        const keep = new Set(nodeTypes);
+        return existingRows.filter((row) => row.isCommunity && !row.isVerified && row.nodeType && !keep.has(row.nodeType));
+    }
+    pruneStaleCommunityRows(packageName, staleRows, nodeTypes) {
+        if (staleRows.length === 0) {
+            return 0;
+        }
+        const removed = this.repository.deleteStaleCommunityNodes(packageName, nodeTypes);
+        logger_1.logger.info(`${packageName}: removed ${removed} row(s) the package no longer declares ` +
+            `(${staleRows.map((row) => row.nodeType).join(', ')})`);
+        return removed;
+    }
+    carryOverPackageDocs(existingRows, nodeTypes) {
+        const readme = existingRows.find((row) => row.npmReadme)?.npmReadme;
+        const summary = existingRows.find((row) => row.aiDocumentationSummary)?.aiDocumentationSummary;
+        if (!readme && !summary) {
+            return;
+        }
+        const storedByType = new Map(existingRows.map((row) => [row.nodeType, row]));
+        for (const nodeType of nodeTypes) {
+            const stored = storedByType.get(nodeType);
+            if (readme && !stored?.npmReadme) {
+                this.repository.updateNodeReadme(nodeType, readme);
+            }
+            if (summary && !stored?.aiDocumentationSummary) {
+                this.repository.updateNodeAISummary(nodeType, summary);
+            }
+        }
+    }
+    async resolveNpmNodeNames(packageName, version) {
+        let packageJson = null;
+        try {
+            packageJson = await this.fetcher.fetchPackageJson(packageName, version, NPM_MANIFEST_FETCH);
+        }
+        catch (error) {
+            logger_1.logger.warn(`Could not fetch package.json for ${packageName}: ${error.message}`);
+        }
+        const fallback = this.extractNodeNameFromPackage(packageName);
+        if (!packageJson) {
+            logger_1.logger.warn(`Could not read package.json for ${packageName}, falling back to the package-name heuristic: "${fallback}"`);
+            return { names: [fallback], source: 'unavailable' };
+        }
+        const entries = Array.isArray(packageJson?.n8n?.nodes) ? packageJson.n8n.nodes : [];
+        const nodeNames = new Set();
+        for (const entry of entries) {
+            const nodeName = typeof entry === 'string' ? extractNodeNameFromEntryPath(entry) : undefined;
+            if (nodeName) {
+                nodeNames.add(nodeName);
+            }
+        }
+        if (nodeNames.size > 0) {
+            const names = [...nodeNames];
+            if (names.length > MAX_NODES_PER_PACKAGE) {
+                logger_1.logger.warn(`${packageName} declares ${names.length} nodes, storing the first ${MAX_NODES_PER_PACKAGE}`);
+                names.length = MAX_NODES_PER_PACKAGE;
+            }
+            return { names, source: 'manifest' };
+        }
+        logger_1.logger.warn(`No usable n8n.nodes entry for ${packageName}, falling back to the package-name heuristic: "${fallback}"`);
+        return { names: [fallback], source: 'fallback' };
     }
     extractNodeNameFromPackage(packageName) {
         let name = packageName.replace(/^@[^/]+\//, '');

@@ -1,0 +1,1 @@
+{"version":3,"file":"stdin-teardown.js","sourceRoot":"","sources":["../../src/utils/stdin-teardown.ts"],"names":[],"mappings":";;AAgBA,sCAaC;AAbD,SAAgB,aAAa,CAC3B,QAA2B,OAAO,CAAC,KAAK,EACxC,WAA4B,OAAO,CAAC,QAAQ;IAG5C,IAAI,CAAC,KAAK,IAAI,KAAK,CAAC,SAAS;QAAE,OAAO;IAGtC,KAAK,CAAC,KAAK,EAAE,CAAC;IAEd,IAAI,QAAQ,KAAK,OAAO,EAAE,CAAC;QACzB,KAAK,CAAC,OAAO,EAAE,CAAC;IAClB,CAAC;AACH,CAAC"}

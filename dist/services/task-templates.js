@@ -425,22 +425,24 @@ try {
     'ai_agent_workflow': {
         task: 'ai_agent_workflow',
         description: 'Create an AI agent that can use tools',
-        nodeType: 'nodes-langchain.agent',
+        nodeType: '@n8n/n8n-nodes-langchain.agent',
         configuration: {
-            text: '',
-            outputType: 'output',
-            systemMessage: 'You are a helpful assistant.'
+            promptType: 'define',
+            text: '={{ $json.query }}',
+            options: {
+                systemMessage: 'You are a helpful assistant.'
+            }
         },
         userMustProvide: [
             {
                 property: 'text',
                 description: 'The input prompt for the agent',
-                example: '{{ $json.query }}'
+                example: '={{ $json.query }}'
             }
         ],
         optionalEnhancements: [
             {
-                property: 'systemMessage',
+                property: 'options.systemMessage',
                 description: 'Customize the agent\'s behavior'
             }
         ],
@@ -483,8 +485,16 @@ return results;`
         nodeType: 'nodes-base.if',
         configuration: {
             conditions: {
+                options: {
+                    version: 2,
+                    leftValue: '',
+                    caseSensitive: true,
+                    typeValidation: 'strict'
+                },
+                combinator: 'and',
                 conditions: [
                     {
+                        id: '1',
                         leftValue: '',
                         rightValue: '',
                         operator: {
@@ -657,11 +667,13 @@ return results;`
     'multi_tool_ai_agent': {
         task: 'multi_tool_ai_agent',
         description: 'AI agent with multiple tools for complex automation',
-        nodeType: 'nodes-langchain.agent',
+        nodeType: '@n8n/n8n-nodes-langchain.agent',
         configuration: {
+            promptType: 'define',
             text: '={{ $json.query }}',
-            outputType: 'output',
-            systemMessage: 'You are an intelligent assistant with access to multiple tools. Use them wisely to complete tasks.'
+            options: {
+                systemMessage: 'You are an intelligent assistant with access to multiple tools. Use them wisely to complete tasks.'
+            }
         },
         userMustProvide: [
             {

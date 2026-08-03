@@ -114,6 +114,8 @@ function cleanWorkflowForUpdate(workflow) {
         cleanedWorkflow.nodes = source.nodes;
     if (source.connections !== undefined)
         cleanedWorkflow.connections = source.connections;
+    if (Array.isArray(source.nodeGroups))
+        cleanedWorkflow.nodeGroups = source.nodeGroups;
     if (source.settings !== undefined)
         cleanedWorkflow.settings = source.settings;
     const ALL_KNOWN_SETTINGS_PROPERTIES = new Set([
@@ -347,11 +349,7 @@ function validateConditionNodeStructure(node) {
     const errors = [];
     const typeVersion = node.typeVersion || 1;
     if (node.type === 'n8n-nodes-base.if') {
-        if (typeVersion >= 2.2) {
-            errors.push(...validateFilterOptionsRequired(node.parameters?.conditions, 'conditions'));
-            errors.push(...validateFilterConditionOperators(node.parameters?.conditions, 'conditions'));
-        }
-        else if (typeVersion >= 2) {
+        if (typeVersion >= 2) {
             errors.push(...validateFilterConditionOperators(node.parameters?.conditions, 'conditions'));
         }
     }
@@ -360,32 +358,8 @@ function validateConditionNodeStructure(node) {
             const rules = node.parameters?.rules;
             if (rules?.rules && Array.isArray(rules.rules)) {
                 rules.rules.forEach((rule, i) => {
-                    errors.push(...validateFilterOptionsRequired(rule.conditions, `rules.rules[${i}].conditions`));
                     errors.push(...validateFilterConditionOperators(rule.conditions, `rules.rules[${i}].conditions`));
                 });
-            }
-        }
-    }
-    return errors;
-}
-function validateFilterOptionsRequired(conditions, path) {
-    const errors = [];
-    if (!conditions || typeof conditions !== 'object')
-        return errors;
-    if (!conditions.options) {
-        errors.push(`Missing required "${path}.options". ` +
-            'Filter-based nodes require: {version: 2, leftValue: "", caseSensitive: true, typeValidation: "strict"}');
-    }
-    else {
-        const requiredFields = [
-            ['version', '2'],
-            ['leftValue', '""'],
-            ['caseSensitive', 'true'],
-            ['typeValidation', '"strict"'],
-        ];
-        for (const [field, display] of requiredFields) {
-            if (!(field in conditions.options)) {
-                errors.push(`Missing required field "${path}.options.${field}". Expected value: ${display}`);
             }
         }
     }
@@ -424,22 +398,6 @@ function validateOperatorStructure(operator, path) {
     if (!operator.operation) {
         errors.push(`${path}: missing required field "operation". ` +
             'Operation specifies the comparison type (e.g., "equals", "contains", "notEmpty")');
-    }
-    if (operator.operation) {
-        const unaryOperators = ['empty', 'notEmpty', 'true', 'false', 'isNumeric', 'exists', 'notExists'];
-        const isUnary = unaryOperators.includes(operator.operation);
-        if (isUnary) {
-            if (operator.singleValue !== true) {
-                errors.push(`${path}: unary operator "${operator.operation}" requires "singleValue: true". ` +
-                    'Unary operators do not use rightValue.');
-            }
-        }
-        else {
-            if (operator.singleValue === true) {
-                errors.push(`${path}: binary operator "${operator.operation}" should not have "singleValue: true". ` +
-                    'Only unary operators (empty, notEmpty, true, false, isNumeric, exists, notExists) need this property.');
-            }
-        }
     }
     return errors;
 }

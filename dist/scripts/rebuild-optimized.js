@@ -39,6 +39,7 @@ const node_loader_1 = require("../loaders/node-loader");
 const node_parser_1 = require("../parsers/node-parser");
 const docs_mapper_1 = require("../mappers/docs-mapper");
 const node_repository_1 = require("../database/node-repository");
+const core_node_check_1 = require("./core-node-check");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 async function extractNodeSource(NodeClass, packageName, nodeName) {
@@ -176,6 +177,18 @@ async function rebuildOptimized() {
     }
     console.log('\n🔍 Building full-text search index...');
     db.exec('INSERT INTO nodes_fts(nodes_fts) VALUES("rebuild")');
+    console.log('\n🧩 Checking core node completeness...');
+    try {
+        (0, core_node_check_1.assertCoreNodesPresent)({
+            getNode: (nodeType) => db.prepare('SELECT node_type FROM nodes WHERE node_type = ?').get(nodeType)
+        });
+        console.log('✅ All canonical core nodes present');
+    }
+    catch (error) {
+        console.error(`❌ ${error.message}`);
+        db.close();
+        process.exit(1);
+    }
     console.log('\n📊 Summary:');
     console.log(`   Total nodes: ${nodes.length}`);
     console.log(`   Successful: ${stats.successful}`);
@@ -193,6 +206,9 @@ async function rebuildOptimized() {
     db.close();
 }
 if (require.main === module) {
-    rebuildOptimized().catch(console.error);
+    rebuildOptimized().catch(error => {
+        console.error(error);
+        process.exit(1);
+    });
 }
 //# sourceMappingURL=rebuild-optimized.js.map

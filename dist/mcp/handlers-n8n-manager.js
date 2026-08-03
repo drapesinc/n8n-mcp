@@ -43,6 +43,7 @@ exports.handleGetWorkflow = handleGetWorkflow;
 exports.handleGetWorkflowDetails = handleGetWorkflowDetails;
 exports.handleGetWorkflowStructure = handleGetWorkflowStructure;
 exports.handleGetWorkflowMinimal = handleGetWorkflowMinimal;
+exports.handleGetWorkflowFiltered = handleGetWorkflowFiltered;
 exports.handleGetWorkflowActive = handleGetWorkflowActive;
 exports.handleUpdateWorkflow = handleUpdateWorkflow;
 exports.handleDeleteWorkflow = handleDeleteWorkflow;
@@ -54,6 +55,11 @@ exports.handleTestWorkflow = handleTestWorkflow;
 exports.handleGetExecution = handleGetExecution;
 exports.handleListExecutions = handleListExecutions;
 exports.handleDeleteExecution = handleDeleteExecution;
+exports.handleListTestRuns = handleListTestRuns;
+exports.handleGetTestRun = handleGetTestRun;
+exports.handleListTestCases = handleListTestCases;
+exports.handleTriggerTestRun = handleTriggerTestRun;
+exports.handleCancelTestRun = handleCancelTestRun;
 exports.handleHealthCheck = handleHealthCheck;
 exports.handleDiagnostic = handleDiagnostic;
 exports.handleWorkflowVersions = handleWorkflowVersions;
@@ -83,6 +89,8 @@ const audit_report_builder_1 = require("../services/audit-report-builder");
 const n8n_api_1 = require("../config/n8n-api");
 const n8n_api_2 = require("../types/n8n-api");
 const n8n_validation_1 = require("../services/n8n-validation");
+const node_groups_1 = require("../services/node-groups");
+const n8n_version_1 = require("../services/n8n-version");
 const n8n_errors_1 = require("../utils/n8n-errors");
 const logger_1 = require("../utils/logger");
 const zod_1 = require("zod");
@@ -230,6 +238,7 @@ const createWorkflowSchema = zod_1.z.object({
         executionTimeout: zod_1.z.number().optional(),
         errorWorkflow: zod_1.z.string().optional(),
     })).optional(),
+    nodeGroups: zod_1.z.any().optional(),
     projectId: zod_1.z.string().optional(),
 });
 const updateWorkflowSchema = zod_1.z.object({
@@ -238,6 +247,7 @@ const updateWorkflowSchema = zod_1.z.object({
     nodes: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowNodes, zod_1.z.array(zod_1.z.any())).optional(),
     connections: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowConnections, zod_1.z.record(zod_1.z.string(), zod_1.z.any())).optional(),
     settings: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
+    nodeGroups: zod_1.z.any().optional(),
     createBackup: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
@@ -299,6 +309,30 @@ const listExecutionsSchema = zod_1.z.object({
     status: optionalEmptyAware(zod_1.z.enum(['success', 'error', 'waiting'])),
     includeData: zod_1.z.boolean().optional(),
 });
+const testRunPathId = zod_1.z.string().trim().min(1);
+const listTestRunsSchema = zod_1.z.object({
+    workflowId: testRunPathId,
+    status: optionalEmptyAware(zod_1.z.enum(['new', 'running', 'completed', 'error', 'cancelled'])),
+    limit: zod_1.z.number().min(1).max(250).optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
+});
+const getTestRunSchema = zod_1.z.object({
+    workflowId: testRunPathId,
+    runId: testRunPathId,
+});
+const listTestCasesSchema = zod_1.z.object({
+    workflowId: testRunPathId,
+    runId: testRunPathId,
+    limit: zod_1.z.number().min(1).max(250).optional(),
+    cursor: optionalEmptyAware(zod_1.z.string()),
+});
+const triggerTestRunSchema = zod_1.z.object({
+    workflowId: testRunPathId,
+});
+const cancelTestRunSchema = zod_1.z.object({
+    workflowId: testRunPathId,
+    runId: testRunPathId,
+});
 const workflowVersionsSchema = zod_1.z.object({
     mode: zod_1.z.enum(['list', 'get', 'rollback', 'delete', 'prune']),
     workflowId: zod_1.z.string().optional(),
@@ -342,7 +376,13 @@ async function handleCreateWorkflow(args, context) {
                 details: { errors }
             };
         }
-        const workflow = await client.createWorkflow(input);
+        const { nodeGroups: rawNodeGroups, ...createPayload } = input;
+        const nodeGroups = (0, node_groups_1.parseNodeGroupsInput)(rawNodeGroups);
+        const groupWarnings = [];
+        const workflow = await client.createWorkflow(nodeGroups !== undefined ? { ...createPayload, nodeGroups } : createPayload, {
+            authoredGroups: new Set((nodeGroups ?? []).map(group => group.name)),
+            onWarning: message => groupWarnings.push(message),
+        });
         if (!workflow || !workflow.id) {
             return {
                 success: false,
@@ -361,7 +401,8 @@ async function handleCreateWorkflow(args, context) {
                 active: workflow.active,
                 nodeCount: workflow.nodes?.length || 0
             },
-            message: `Workflow "${workflow.name}" created successfully with ID: ${workflow.id}. Use n8n_get_workflow with mode 'structure' to verify current state.`
+            message: `Workflow "${workflow.name}" created successfully with ID: ${workflow.id}. Use n8n_get_workflow with mode 'structure' to verify current state.`,
+            ...(groupWarnings.length > 0 ? { details: { warnings: groupWarnings } } : {})
         };
     }
     catch (error) {
@@ -484,6 +525,7 @@ async function handleGetWorkflowStructure(args, context) {
                 isArchived: workflow.isArchived,
                 nodes: simplifiedNodes,
                 connections: workflow.connections,
+                ...(0, node_groups_1.nodeGroupsField)(workflow.nodeGroups),
                 nodeCount: workflow.nodes.length,
                 connectionCount: Object.keys(workflow.connections).length
             }
@@ -549,6 +591,56 @@ async function handleGetWorkflowMinimal(args, context) {
         };
     }
 }
+async function handleGetWorkflowFiltered(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const { id, nodeNames } = zod_1.z.object({
+            id: zod_1.z.string(),
+            nodeNames: zod_1.z.array(zod_1.z.string()).min(1)
+        }).parse(args);
+        const workflow = await client.getWorkflow(id);
+        const requested = new Set(nodeNames);
+        const matchedNodes = workflow.nodes.filter(node => requested.has(node.name) || requested.has(node.id));
+        const matchedKeys = new Set(matchedNodes.flatMap(node => [node.name, node.id]));
+        const notFound = nodeNames.filter(key => !matchedKeys.has(key));
+        const matchedIds = new Set(matchedNodes.map(node => node.id));
+        const touchedGroups = (workflow.nodeGroups ?? []).filter(group => Array.isArray(group?.nodeIds) && group.nodeIds.some(nodeId => matchedIds.has(nodeId)));
+        return {
+            success: true,
+            data: {
+                id: workflow.id,
+                name: workflow.name,
+                active: workflow.active,
+                isArchived: workflow.isArchived,
+                nodes: matchedNodes,
+                ...(0, node_groups_1.nodeGroupsField)(touchedGroups),
+                nodeCount: workflow.nodes.length,
+                returnedCount: matchedNodes.length,
+                ...(notFound.length > 0 ? { notFound } : {})
+            }
+        };
+    }
+    catch (error) {
+        if (error instanceof zod_1.z.ZodError) {
+            return {
+                success: false,
+                error: 'Invalid input',
+                details: { errors: error.errors }
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError) {
+            return {
+                success: false,
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+                code: error.code
+            };
+        }
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error occurred'
+        };
+    }
+}
 async function handleGetWorkflowActive(args, context) {
     try {
         const client = ensureApiConfigured(context);
@@ -575,6 +667,7 @@ async function handleGetWorkflowActive(args, context) {
                     versionName: activeVersion.name ?? null,
                     nodes: activeVersion.nodes,
                     connections: activeVersion.connections,
+                    ...(0, node_groups_1.nodeGroupsField)(activeVersion.nodeGroups),
                 }
             };
         }
@@ -588,6 +681,7 @@ async function handleGetWorkflowActive(args, context) {
                     versionName: null,
                     nodes: workflow.nodes,
                     connections: workflow.connections,
+                    ...(0, node_groups_1.nodeGroupsField)(workflow.nodeGroups),
                 }
             };
         }
@@ -648,7 +742,8 @@ async function handleUpdateWorkflow(args, repository, context) {
                 }
             }
         }
-        const { settings: settingsUpdate, ...nonSettingsUpdate } = updateData;
+        const { settings: settingsUpdate, nodeGroups: rawNodeGroups, ...nonSettingsUpdate } = updateData;
+        const nodeGroupsUpdate = (0, node_groups_1.parseNodeGroupsInput)(rawNodeGroups);
         const fullWorkflow = {
             ...current,
             ...nonSettingsUpdate
@@ -659,7 +754,10 @@ async function handleUpdateWorkflow(args, repository, context) {
                 ...settingsUpdate,
             };
         }
-        if (updateData.nodes || updateData.connections) {
+        if (nodeGroupsUpdate !== undefined) {
+            fullWorkflow.nodeGroups = nodeGroupsUpdate;
+        }
+        if (updateData.nodes || updateData.connections || nodeGroupsUpdate !== undefined) {
             if (createBackup !== false) {
                 try {
                     const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client, (0, instance_context_1.getInstanceScopeId)(context));
@@ -689,9 +787,13 @@ async function handleUpdateWorkflow(args, repository, context) {
                 };
             }
         }
-        const workflow = await client.updateWorkflow(id, fullWorkflow);
+        const groupWarnings = [];
+        const workflow = await client.updateWorkflow(id, fullWorkflow, {
+            authoredGroups: new Set((nodeGroupsUpdate ?? []).map(group => group.name)),
+            onWarning: message => groupWarnings.push(message),
+        });
         if (workflowBefore) {
-            trackWorkflowMutationForFullUpdate({
+            void trackWorkflowMutationForFullUpdate({
                 sessionId,
                 toolName: 'n8n_update_full_workflow',
                 userIntent,
@@ -712,12 +814,13 @@ async function handleUpdateWorkflow(args, repository, context) {
                 active: workflow.active,
                 nodeCount: workflow.nodes?.length || 0
             },
-            message: `Workflow "${workflow.name}" updated successfully. Use n8n_get_workflow with mode 'structure' to verify current state.`
+            message: `Workflow "${workflow.name}" updated successfully. Use n8n_get_workflow with mode 'structure' to verify current state.`,
+            ...(groupWarnings.length > 0 ? { details: { warnings: groupWarnings } } : {})
         };
     }
     catch (error) {
         if (workflowBefore) {
-            trackWorkflowMutationForFullUpdate({
+            void trackWorkflowMutationForFullUpdate({
                 sessionId,
                 toolName: 'n8n_update_full_workflow',
                 userIntent,
@@ -1375,6 +1478,185 @@ async function handleDeleteExecution(args, context) {
         };
     }
 }
+const TEST_RUN_QUOTA_HINT = 'n8n rejected the request (402): the plan\'s evaluation quota is used up. It caps how many workflows may have test runs, and this workflow does not hold one of the slots. Re-run a workflow that already has runs, or raise the limit on your n8n plan.';
+function testRunWriteScopeHint(scope) {
+    return `n8n rejected the request (403). The API key lacks the ${scope} scope - that scope only exists on keys created on n8n 2.32+, so re-create the key there. Other causes: evaluations not licensed on this plan, or the key's owner lacks workflow:execute on this workflow.`;
+}
+const TEST_RUN_IDS_HINT = 'Workflow or test run not found. A runId must belong to the given workflowId; check both ids.';
+const TEST_RUN_WORKFLOW_HINT = "Workflow not found. Check the workflowId, and that the API key's owner has access to that workflow.";
+const READ_TEST_RUN_BASE = {
+    minMinor: 30,
+    capability: 'read test runs',
+    scopeHint: 'n8n rejected the request (403). The API key lacks testRun scopes - keys created before n8n 2.30 do not have them; re-create the API key on n8n 2.30+. Other causes: evaluations not licensed on this plan, or the key\'s owner lacks access to this workflow.',
+};
+const LIST_TEST_RUNS_ERRORS = {
+    ...READ_TEST_RUN_BASE,
+    notFoundHint: TEST_RUN_WORKFLOW_HINT,
+};
+const READ_TEST_RUN_ERRORS = {
+    ...READ_TEST_RUN_BASE,
+    notFoundHint: TEST_RUN_IDS_HINT,
+};
+const TRIGGER_TEST_RUN_ERRORS = {
+    minMinor: 32,
+    capability: 'trigger runs from the API',
+    scopeHint: testRunWriteScopeHint('testRun:create'),
+    notFoundHint: TEST_RUN_WORKFLOW_HINT,
+    conflictHint: 'The workflow has no evaluation trigger node. Add an evaluation trigger (n8n-nodes-base.evaluationTrigger) pointing at a dataset, save the workflow, then trigger the run.',
+    postRoute: true,
+};
+const CANCEL_TEST_RUN_ERRORS = {
+    minMinor: 32,
+    capability: 'cancel runs from the API',
+    scopeHint: testRunWriteScopeHint('testRun:cancel'),
+    notFoundHint: TEST_RUN_IDS_HINT,
+    conflictHint: "The test run already finished (status completed, error, or cancelled), so there is nothing to cancel. Use action='get_run' to see its final state.",
+    postRoute: true,
+};
+async function testRunRouteGate(statusCode, context, options) {
+    const client = getN8nApiClient(context);
+    const version = client ? await client.refreshVersion().catch(() => null) : null;
+    if (version) {
+        return (0, n8n_version_1.versionAtLeast)(version, 2, options.minMinor)
+            ? null
+            : `The evaluation API requires n8n 2.${options.minMinor}.0 or later; this instance runs ${version.version}. Upgrade the instance to ${options.capability}.`;
+    }
+    const requirement = `This endpoint requires n8n 2.${options.minMinor}.0 or later, and this instance's n8n version could not be read.`;
+    return statusCode === 405 && options.postRoute
+        ? `${requirement} It rejected POST on the route, which is what an instance predating 2.${options.minMinor}.0 does. Upgrade the instance to ${options.capability}.`
+        : `${requirement} Either the instance predates it, or the request simply did not match. ${options.notFoundHint}`;
+}
+async function handleTestRunError(error, context, options) {
+    if (error instanceof zod_1.z.ZodError) {
+        return { success: false, error: 'Invalid input', details: { errors: error.errors } };
+    }
+    if (error instanceof n8n_errors_1.N8nApiError) {
+        if (error.statusCode === 402) {
+            return { success: false, error: TEST_RUN_QUOTA_HINT, code: error.code };
+        }
+        if (error.statusCode === 403) {
+            return { success: false, error: options.scopeHint, code: error.code };
+        }
+        if (error.statusCode === 409 && options.conflictHint) {
+            return { success: false, error: options.conflictHint, code: error.code };
+        }
+        if (error.statusCode === 404 || error.statusCode === 405) {
+            const gate = await testRunRouteGate(error.statusCode, context, options);
+            if (gate) {
+                return { success: false, error: gate, code: error.code };
+            }
+        }
+        if (error.statusCode === 404) {
+            return { success: false, error: options.notFoundHint, code: error.code };
+        }
+        return { success: false, error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error), code: error.code };
+    }
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' };
+}
+async function handleListTestRuns(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = listTestRunsSchema.parse(args || {});
+        const response = await client.listTestRuns(input.workflowId, {
+            status: input.status,
+            limit: input.limit,
+            cursor: input.cursor,
+        });
+        const note = response.data.length === 0
+            ? (input.status
+                ? `No test runs with status '${input.status}' for this workflow.`
+                : 'No test runs. Runs exist only for workflows with an evaluation trigger that have been executed at least once.')
+            : response.nextCursor
+                ? 'More test runs available. Use cursor to get next page.'
+                : undefined;
+        return {
+            success: true,
+            data: {
+                testRuns: response.data,
+                returned: response.data.length,
+                nextCursor: response.nextCursor,
+                hasMore: !!response.nextCursor,
+                ...(note ? { _note: note } : {})
+            }
+        };
+    }
+    catch (error) {
+        return handleTestRunError(error, context, LIST_TEST_RUNS_ERRORS);
+    }
+}
+async function handleGetTestRun(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = getTestRunSchema.parse(args || {});
+        const response = await client.getTestRun(input.workflowId, input.runId);
+        return {
+            success: true,
+            data: response
+        };
+    }
+    catch (error) {
+        return handleTestRunError(error, context, READ_TEST_RUN_ERRORS);
+    }
+}
+async function handleListTestCases(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = listTestCasesSchema.parse(args || {});
+        const response = await client.listTestCases(input.workflowId, input.runId, {
+            limit: input.limit || 20,
+            cursor: input.cursor,
+        });
+        return {
+            success: true,
+            data: {
+                testCases: response.data,
+                returned: response.data.length,
+                nextCursor: response.nextCursor,
+                hasMore: !!response.nextCursor,
+                ...(response.nextCursor ? {
+                    _note: 'More test cases available. Paginate rather than raising limit - per-case inputs/outputs can be large.'
+                } : {})
+            }
+        };
+    }
+    catch (error) {
+        return handleTestRunError(error, context, READ_TEST_RUN_ERRORS);
+    }
+}
+async function handleTriggerTestRun(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = triggerTestRunSchema.parse(args || {});
+        const response = await client.triggerTestRun(input.workflowId);
+        return {
+            success: true,
+            data: {
+                ...response,
+                _note: `Run started. Cases execute asynchronously - poll with action='get_run', runId='${response.id}' until status is completed, error, or cancelled.`
+            }
+        };
+    }
+    catch (error) {
+        return handleTestRunError(error, context, TRIGGER_TEST_RUN_ERRORS);
+    }
+}
+async function handleCancelTestRun(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = cancelTestRunSchema.parse(args || {});
+        const response = await client.cancelTestRun(input.workflowId, input.runId);
+        return {
+            success: true,
+            data: {
+                ...response,
+                _note: "Cancellation accepted. In-flight cases stop asynchronously - use action='get_run' to confirm the run reached status 'cancelled'."
+            }
+        };
+    }
+    catch (error) {
+        return handleTestRunError(error, context, CANCEL_TEST_RUN_ERRORS);
+    }
+}
 async function handleHealthCheck(context) {
     const startTime = Date.now();
     try {
@@ -1876,7 +2158,7 @@ async function handleWorkflowVersions(args, repository, context) {
                 error: 'Workflow version storage is not available for this tenant context'
             };
         }
-        const client = context ? getN8nApiClient(context) : null;
+        const client = getN8nApiClient(context);
         const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, (0, instance_context_1.getInstanceScopeId)(context));
         switch (input.mode) {
             case 'list': {
@@ -2089,11 +2371,15 @@ async function handleDeployTemplate(args, templateService, repository, context) 
             n.type?.includes('webhook') ||
             n.type === 'n8n-nodes-base.webhook');
         const triggerType = triggerNode?.type?.split('.').pop() || 'manual';
+        const templateGroupWarnings = [];
         const createdWorkflow = await client.createWorkflow({
             name: workflowName,
             nodes: workflow.nodes,
             connections: workflow.connections,
+            ...(0, node_groups_1.nodeGroupsField)(workflow.nodeGroups),
             settings: workflow.settings || { executionOrder: 'v1' }
+        }, {
+            onWarning: message => templateGroupWarnings.push(message)
         });
         const apiConfig = resolveN8nApiConfigForResponse(context);
         const baseUrl = apiConfig?.baseUrl?.replace('/api/v1', '') || '';
@@ -2139,7 +2425,8 @@ async function handleDeployTemplate(args, templateService, repository, context) 
                 templateId: input.templateId,
                 templateUrl: template.url || `https://n8n.io/workflows/${input.templateId}`,
                 autoFixStatus,
-                fixesApplied: fixesApplied.length > 0 ? fixesApplied : undefined
+                fixesApplied: fixesApplied.length > 0 ? fixesApplied : undefined,
+                warnings: templateGroupWarnings.length > 0 ? templateGroupWarnings : undefined
             },
             message: `Workflow "${createdWorkflow.name}" deployed successfully from template ${input.templateId}.${fixSummary} ${requiredCredentials.length > 0
                 ? `Configure ${requiredCredentials.length} credential(s) in n8n to activate.`

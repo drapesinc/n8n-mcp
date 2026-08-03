@@ -98,6 +98,9 @@ const workflowDiffSchema = z.object({
     settings: z.preprocess(normalizeMcpJsonValue, z.any()).optional(),
     name: z.string().optional(),
     tag: z.string().optional(),
+    // Canvas groups (setNodeGroups). Must be declared here: unknown keys are stripped, and a
+    // setNodeGroups op arriving without its payload would otherwise look like "ungroup everything".
+    nodeGroups: z.preprocess(normalizeMcpJsonValue, z.any()).optional(),
     // Transfer operation
     destinationProjectId: z.string().min(1).optional(),
     // Aliases: LLMs often use "id" instead of "nodeId" — accept both
@@ -409,9 +412,19 @@ export async function handleUpdatePartialWorkflow(
       // versionCounter / updatedAt — whichever the running n8n exposes). If
       // unchanged, the body never persisted and rolling back would be both
       // a wasted PUT and a misleading "(restored to prior state)" message.
+
+      // Canvas-group adjustments made while saving (a pruned member, a group n8n rejected).
+      // Groups this diff authored are passed through so n8n's rejection of one surfaces as an
+      // error instead of being quietly ungrouped.
+      const groupWarnings: string[] = [];
+      const groupWriteOptions = {
+        authoredGroups: new Set(diffResult.authoredGroupNames ?? []),
+        onWarning: (message: string) => groupWarnings.push(message),
+      };
+
       let updatedWorkflow;
       try {
-        updatedWorkflow = await client.updateWorkflow(input.id, diffResult.workflow!);
+        updatedWorkflow = await client.updateWorkflow(input.id, diffResult.workflow!, groupWriteOptions);
       } catch (updateError) {
         if (workflowBefore && !input.validateOnly) {
           let serverState: any = null;
@@ -452,7 +465,11 @@ export async function handleUpdatePartialWorkflow(
           let rollbackPerformed = false;
           let rollbackErrorMessage: string | undefined;
           try {
-            await client.updateWorkflow(input.id, workflowBefore);
+            // No authoredGroups here: restoring the graph matters, frames do not. If the snapshot's
+            // groups no longer fit the server state, they are dropped rather than failing the rollback.
+            await client.updateWorkflow(input.id, workflowBefore, {
+              onWarning: (message: string) => groupWarnings.push(message),
+            });
             rollbackPerformed = true;
             logger.warn('updateWorkflow failed; rolled back to prior state', {
               workflowId: input.id,
@@ -475,6 +492,13 @@ export async function handleUpdatePartialWorkflow(
               rollbackPerformed,
               ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
               ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),
+              // A rollback can have to drop a canvas group the server no longer accepts. That is a
+              // real change to the restored workflow, so it must not be lost just because this path
+              // ends in an error rather than the success response. Same shape as the success path's
+              // warnings, so a client can read details.warnings without branching on the outcome.
+              ...(groupWarnings.length > 0
+                ? { warnings: groupWarnings.map(message => ({ operation: -1, message })) }
+                : {}),
             };
             const suffix = rollbackPerformed
               ? ' (workflow restored to prior state)'
@@ -627,7 +651,7 @@ export async function handleUpdatePartialWorkflow(
 
       // Track successful mutation
       if (workflowBefore && !input.validateOnly) {
-        trackWorkflowMutation({
+        void trackWorkflowMutation({
           sessionId,
           toolName: 'n8n_update_partial_workflow',
           userIntent: input.intent || 'Partial workflow update',
@@ -658,13 +682,13 @@ export async function handleUpdatePartialWorkflow(
           applied: diffResult.applied,
           failed: diffResult.failed,
           errors: diffResult.errors,
-          warnings: mergeWarnings(diffResult.warnings, tagWarnings)
+          warnings: mergeWarnings(diffResult.warnings, [...tagWarnings, ...groupWarnings])
         }
       };
     } catch (error) {
       // Track failed mutation
       if (workflowBefore && !input.validateOnly) {
-        trackWorkflowMutation({
+        void trackWorkflowMutation({
           sessionId,
           toolName: 'n8n_update_partial_workflow',
           userIntent: input.intent || 'Partial workflow update',
@@ -756,6 +780,10 @@ function inferIntentFromOperations(operations: any[]): string {
         return `Rewire ${op.source || 'node'} from ${op.from || ''} to ${op.to || ''}`.trim();
       case 'updateName':
         return `Rename workflow to "${op.name || ''}"`;
+      case 'setNodeGroups':
+        return Array.isArray(op.nodeGroups) && op.nodeGroups.length === 0
+          ? 'Remove all canvas groups'
+          : `Set canvas groups (${Array.isArray(op.nodeGroups) ? op.nodeGroups.length : 0})`;
       case 'activateWorkflow':
         return 'Activate workflow';
       case 'deactivateWorkflow':
@@ -819,4 +847,3 @@ async function trackWorkflowMutation(data: any): Promise<void> {
     logger.debug('Telemetry tracking failed:', error);
   }
 }
-

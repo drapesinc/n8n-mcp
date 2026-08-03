@@ -31,9 +31,7 @@ class ExpressionValidator {
     }
     static checkSyntaxErrors(expression) {
         const errors = [];
-        const openBrackets = (expression.match(/\{\{/g) || []).length;
-        const closeBrackets = (expression.match(/\}\}/g) || []).length;
-        if (openBrackets !== closeBrackets) {
+        if (expression.startsWith('=') && (0, expression_utils_1.hasDanglingOpenBracket)(expression)) {
             errors.push('Unmatched expression brackets {{ }}');
         }
         const nestedPattern = /\{\{[^}]*\{\{/;
@@ -56,11 +54,6 @@ class ExpressionValidator {
             result.usedVariables.add('$json');
             if (!context.hasInputData && !context.isInLoop) {
                 result.warnings.push('Using $json but node might not have input data');
-            }
-            const fullMatch = match[0];
-            if (fullMatch.includes('.invalid') || fullMatch.includes('.undefined') ||
-                fullMatch.includes('.null') || fullMatch.includes('.test')) {
-                result.warnings.push(`Property access '${fullMatch}' looks suspicious - verify this property exists in your data`);
             }
         }
         const nodePattern = new RegExp(this.VARIABLE_PATTERNS.node.source, this.VARIABLE_PATTERNS.node.flags);
@@ -96,18 +89,6 @@ class ExpressionValidator {
         const missingPrefixPattern = /(?<![.$\w['])\b(json|node|input|items|workflow|execution)\b(?!\s*[:''])/;
         if (expr.match(missingPrefixPattern)) {
             result.warnings.push('Possible missing $ prefix for variable (e.g., use $json instead of json)');
-        }
-        if (expr.includes('$json[') && !expr.match(/\$json\[\d+\]/)) {
-            result.warnings.push('Array access should use numeric index: $json[0] or property access: $json.property');
-        }
-        if (expr.match(/\$json\['[^']+'\]/)) {
-            result.warnings.push("Consider using dot notation: $json.property instead of $json['property']");
-        }
-        if (expr.match(/\?\./)) {
-            result.warnings.push('Optional chaining (?.) is not supported in n8n expressions');
-        }
-        if (expr.includes('${')) {
-            result.errors.push('Template literals ${} are not supported. Use string concatenation instead');
         }
     }
     static checkNodeReferences(result, context) {

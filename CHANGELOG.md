@@ -7,6 +7,267 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.67.2] - 2026-07-29
+
+### Fixed
+
+- **The community npm sync stores every node a package ships (#967).** The sync stored exactly one row per npm package — the first parseable `n8n.nodes` manifest entry — so multi-node packages lost the rest: `@custom-js/n8n-nodes-pdf-toolkit` declares 18 nodes and the database held one. The sync now stores one row per manifest entry, sharing the package's README and AI summary across siblings, with trigger/webhook detection reading each node's own name instead of the package name (the package's trigger node was previously invisible, and a `*-trigger` package name used to mark every sibling a trigger). The v2.66.3 stale-row self-heal becomes a set-diff that still touches only unverified community rows, the save-prune-seed sequence runs in one transaction, and a package whose package.json cannot be fetched is skipped untouched instead of collapsing to a single heuristic row — a transient registry failure previously became data loss. Shared AI summaries are prompted with the package's node list rather than one sibling's identity, fetch statistics report packages and node rows separately, and the bundled database is refreshed with the recovered sibling nodes.
+
+## [2.67.1] - 2026-07-29
+
+### Changed
+
+- **Bundled skills pack synced to n8n-skills v1.27.3.** The pack still described `n8n_evaluations` as read-only and gated on n8n 2.30 only. The router one-liner, the tools-expert API list, and the WORKFLOW_GUIDE section now document the `run` and `cancel` actions that shipped in n8n-mcp 2.67.0: per-action version gating (reads on 2.30+, run/cancel on 2.32+), the `testRun` scope and `workflow:execute` requirements, the 402/403/405/409 error semantics, and a warning to confirm with the user before starting a run, since a run executes the workflow against its whole dataset with real side effects.
+
+## [2.67.0] - 2026-07-29
+
+### Added
+
+- **`n8n_evaluations` can now trigger and cancel evaluation test runs (#936).** n8n 2.32.0 added the Public API endpoints (`POST /workflows/{id}/test-runs` and `POST /workflows/{id}/test-runs/{runId}/cancel`, behind the new `testRun:create`/`testRun:cancel` API-key scopes), so the tool gains `run` and `cancel` actions beside the three reads. Failures map to guidance for the causes n8n actually distinguishes: 402 is the plan's evaluation quota running out; 403 covers both a key missing the scope and an unlicensed instance; 409 on `run` means the workflow has no evaluation trigger node, on `cancel` that the run already finished. An instance older than 2.32.0 answers `run` with 405 — the route exists with GET only — and the error path re-reads the instance version instead of trusting the client's cached reading, so a connection that outlives an n8n upgrade cannot misreport a genuine not-found as a version problem, nor the reverse. The tool is no longer read-only: its annotations change accordingly, `run` and `cancel` are registered as destructive operations for `DISABLED_TOOL_OPERATIONS`, and the read-only deployment recipe in the README, the HTTP deployment guide, and `.env.example` now blocks them explicitly.
+## [2.66.3] - 2026-07-28
+
+### Fixed
+
+- **`updateNode` bracket-index paths update the array element instead of writing a junk key (#950).** Property paths split only on dots, so an update keyed `parameters.assignments.assignments[0].value` wrote a literal `"assignments[0]"` property onto the array, reported success, and left the real element untouched. A shared tokenizer now resolves bracket segments as array indices (digits only) for both `updateNode` and `patchNodeField`, and rejects the forms that used to corrupt silently: malformed or out-of-range brackets, empty segments (`a..b`), and non-index segments on arrays for writes — `parameters.arr.length: 0` previously truncated the array. An `updates` object applies to a draft that is swapped in only on success, so a failing key no longer leaves a half-updated node behind under `continueOnError`; removal by index splices instead of leaving a JSON `null` hole; and batched removals on the same array apply highest index first, so removing `[0]` and `[1]` from `[A,B,C]` removes A and B rather than A and C.
+- **`search_nodes` no longer fabricates node types for npm-sourced community nodes (#949).** The npm fallback derived the type suffix from the package name — `n8n-nodes-globals` became `n8n-nodes-globals.globals`, but the package's only node is `globalConstants` — so a workflow built from the search result failed to import. The suffix now comes from the package's own `n8n.nodes` manifest entry (first parseable file, a leading acronym lowercased as a unit, the old heuristic kept as a logged fallback), and the sync self-heals: a package whose stored type no longer matches is re-keyed in place, dropping the stale row and carrying its README and AI summary over — including under `--update`, which previously skipped such packages outright. The bundled database is repaired in this release: 45 fabricated types re-keyed (`…globals` → `…globalConstants`, `…deepseekchatmodel` → `…lmChatDeepSeek`, `…telegramgrampro` → `…telegramMtproto`), 1,460 community nodes total. The filename-derived name remains a heuristic — ground truth is the node's `description.name`, which only tarball parsing could read — so isolated mismatches stay possible for unverified packages.
+
+## [2.66.2] - 2026-07-27
+
+### Fixed
+
+- **Vector stores in `retrieve-as-tool` mode validate as AI tools (#953).** n8n's vector-store nodes expose an `ai_tool` output only when `mode` is `retrieve-as-tool`, but `validate_workflow` resolved ai_tool sources against a fixed node list and rejected the connection with `INVALID_AI_TOOL_SOURCE`. The database stores each node's raw outputs expression, so the validator now recognises an output that exists only for particular parameter values by scanning that expression — covering every vector store in 2.31.3 without maintaining a list. When the node's `mode` is a different literal (or unset, so the default `retrieve` applies), a new `AI_TOOL_MODE_MISMATCH` warning names the parameter to change instead of a false error.
+- **Community AI-tool detection no longer infers capability from the node name (#954).** Any package whose name contained the letters "ai" — `n8n-nodes-raia`, `@firefliesai/n8n-nodes-fireflies` — was flagged `is_ai_tool`, 901 of 1,455 community rows in total. Detection now requires a declared `usableAsTool` (any non-`false` value, matching the core parser's handling of the object form) or the package's codex AI category, which stays as a labelled inference because community metadata often omits `usableAsTool`. `get_node` reports the provenance in a new `aiToolFlagSource` field, and the community data was refreshed: 853 of 1,457 rows remain flagged, all from declared or codex signals.
+- **The "Community node used as an AI tool" warning now describes a community node (#955).** It defined community as `package !== 'n8n-nodes-base'` — sweeping in first-party `@n8n/n8n-nodes-langchain` — and it inspected the target of the `ai_tool` connection, which is always the AI Agent, so essentially every agent workflow warned that "Community node \"AI Agent\"" needed `N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true`. The check now tests the database's community flag on the connection's source — the tool node — and `get_node`'s `requiresEnvironmentVariable` follows the same flag instead of the AI-tool flag and a package-name test. A community tool the bundled database does not know (a user-installed package) keeps the notice, recognised by its package-qualified type.
+- **The AI Agent `systemMessage` advisory reads the parameter where n8n stores it (#956).** The check read `parameters.systemMessage`, but the node keeps it under `options`, so "has no systemMessage" fired on every agent regardless of configuration — and an agent following the advice by setting the top-level field saw the message persist. The too-short check, previously unreachable, now runs as intended. The top-level read is kept as a fallback.
+- Removed `getNodeAsToolInfo` and `getAIToolExamples` from the MCP server: dead code with no dispatch path, carrying the same package-name assumption as #955.
+
+## [2.66.1] - 2026-07-26
+
+### Changed
+
+- **Updated n8n to 2.31.x.** Bumped `n8n-nodes-base` 2.30.3 → 2.31.3, `n8n-core` 2.30.2 → 2.31.3, `n8n-workflow` 2.30.1 → 2.31.3, and `@n8n/n8n-nodes-langchain` 2.30.3 → 2.31.3. Rebuilt the node database (828 core nodes: 699 from `n8n-nodes-base` + 129 from `@n8n/n8n-nodes-langchain`).
+- **Refreshed community nodes.** Registry sync added 107 community nodes (1,348 → 1,455 total; 1,295 verified + 160 unverified). README metadata and AI summaries now cover 1,444/1,455 community nodes; the remaining 11 packages have no retrievable npm README to summarize.
+- Updated README n8n version badge and node counts (2,283 total nodes: 828 core + 1,455 community).
+- **The Docker builder no longer installs a stale dependency set.** Its builder stage installs a hand-maintained list rather than the repo's own dependencies, and four of those pins had drifted from `package.json`. Two mattered: `n8n-workflow@^2.4.2` resolved through the package's `latest` dist-tag — which lags the release n8n ships (2.16.1 against the 2.31.3 in `package.json`) — so the image compiled `src/` against older type definitions and failed on `agentSelector`; and `zod@3.24.1` broke `npm install` outright, because `n8n-workflow@2.31.3` declares an exact `zod: 3.25.67` peer dependency. All four are realigned (`zod`, `@modelcontextprotocol/sdk`, `axios`, `uuid`), and `scripts/update-n8n-deps.js` now re-syncs every pin naming a direct dependency instead of leaving the list to drift until a build breaks.
+
+### Added
+
+- **`agentSelector` property type.** n8n 2.31 introduced it for the Message an n8n Agent node (typeVersion 2), where it replaces the resource locator that picks the target agent. n8n validates it through the same path as `resourceLocator`, so it is wired into the same three places: `ConfigValidator`, the structure check in `EnhancedConfigValidator`, and the `expectedFormat` hint `get_node` returns. Its declared shape is `mode` plus `value` — the `__rl: true` marker n8n's editor writes is not required, matching n8n's own `isINodeParameterResourceLocator` guard.
+
+### Fixed
+
+- **HTTP Request was not recognised as an AI tool, so `httpRequestTool` was missing entirely.** n8n's flag is typed `usableAsTool?: true | UsableAsToolDescription`, and HTTP Request uses the object form on every version from 3 onwards to carry its codex replacements. Detection compared against `true` by identity and therefore rejected it. `nodes-base.httpRequestTool` is the most used tool node in the template corpus — 139 of 2,352 templates, against 6 for `slackTool` — and it was absent from the database, so `search_nodes` and `get_node` could not find it and `get_node` reported `hasUsableAsToolProperty: false` for HTTP Request. Worse, because HTTP Request was not marked as having a tool variant, wiring the plain `nodes-base.httpRequest` node into an `ai_tool` connection produced a bare `INVALID_AI_TOOL_SOURCE` with no suggested fix, while every correctly detected node returned a `WRONG_NODE_TYPE_FOR_AI_TOOL` error carrying a `tool-variant-correction` autofix. Any value other than `false`/absent now counts, matching n8n.
+- **Tool capability is read from the node's current version, as n8n reads it.** Detection accepted the flag from any entry in `nodeVersions`, but n8n resolves `nodeVersions[currentVersion]` before consulting `usableAsTool`. No node in 2.31.3 diverges, so the database is unchanged by this, but the looser rule would have invented a tool variant for any node that dropped tool support while keeping an older version — the same class of defect as the name-based guess removed below.
+- **AI tool detection missed versioned nodes, so 26 tool variants were absent from the database.** `usableAsTool` is read from a node's description, but `VersionedNodeType` assigns its version map in the constructor — reading `nodeVersions` off the class finds nothing, and a node that declares `usableAsTool` per version rather than on its base description was therefore never recognised. Commonly used tool variants — `slackTool`, `postgresTool`, `googleSheetsTool`, `googleDriveTool`, `notionTool`, `microsoftTeamsTool`, `mySqlTool`, `awsS3Tool` and 18 more — could not be found via `search_nodes`/`get_node`, and `validate_workflow` rejected workflows that used them as unknown node types. Detection now instantiates the node to read its versions. The same gap would have dropped `messageAnAgentTool` and `microsoftSharePointTool` in this release, as both became versioned nodes in n8n 2.31.
+- **Node types that n8n does not have are no longer invented.** Tool-variant generation fell back to a name check — a node whose name contained `ai`, `openai`, `anthropic`, `cohere` or `huggingface` was treated as tool-capable regardless of `usableAsTool`. That produced 26 node types n8n rejects, including `nodes-base.waitTool` (from "w-ai-t"), `nodes-base.openAiTool`, `nodes-langchain.lmChatAnthropicTool` and `nodes-langchain.embeddingsOpenAiTool`. An agent could wire one into a workflow, have it validate cleanly, and only find out at deploy time. `usableAsTool` is now the sole signal, matching n8n's own `node-helpers`.
+
+## [2.66.0] - 2026-07-25
+
+### Fixed
+
+- **Canvas groups no longer break workflow updates (n8n 2.28+).** n8n stores canvas groups on the workflow as `nodeGroups`, and validates them on every write — including writes that have nothing to do with grouping. Because the update payload dropped the field, n8n backfilled the stored groups and validated them against the submitted graph, so `n8n_update_partial_workflow`, `n8n_update_full_workflow`, autofix, rollback and version restore all failed with HTTP 400 on any grouped workflow as soon as a diff removed a grouped node or changed a group's connectivity (`Group "X" references node ID "..." that does not exist in the workflow.`). Groups are now carried through writes and reconciled with the finished graph: members a diff deleted are pruned, a group left empty is removed, and a group n8n refuses is ungrouped so the edit still lands. Nodes and connections are never altered to save a frame, and every adjustment is reported as a warning.
+- **Node IDs are now immutable in `updateNode`.** An `updates: { id: ... }` payload silently orphaned canvas-group membership and pinned data. It is rejected with a message pointing at remove-and-re-add.
+- **Version comparison notices grouping changes.** `compareVersions` ignored `nodeGroups`, so a group-only version looked identical to its predecessor.
+- **`n8n_workflow_versions` rollback works without an instance context.** The handler resolved its API client only when an `InstanceContext` was supplied, skipping the environment-variable fallback every other tool uses. On a plain `N8N_API_URL` setup — the common single-instance case — `rollback` therefore always answered "n8n API not configured. Cannot perform rollback without API access.", on any workflow, while `list` and `get` worked because they read the local version store instead. Found while testing canvas groups; unrelated to them.
+
+### Added
+
+- **`setNodeGroups` diff operation** for `n8n_update_partial_workflow`: replaces the workflow's canvas groups, addressing members by name or by ID (`[]` ungroups everything). Whether a grouping is valid stays n8n's decision — its rejection is returned verbatim rather than second-guessed, and a group the caller just authored is never silently discarded.
+- **`nodeGroups` on `n8n_create_workflow` and `n8n_update_full_workflow`.** Omitting the field on an update keeps the stored groups; passing `[]` ungroups everything.
+- **Canvas groups in reads and validation.** `n8n_get_workflow` reports `nodeGroups` in `structure`, `filtered` (groups touching the requested nodes) and `active` (the published version's own groups, not the draft's); `n8n_deploy_template` forwards groups a template carries; `validate_workflow` warns about dangling members, empty groups, a node in two groups, and a trigger inside a group — always as warnings, never blocking a workflow.
+- **Graceful degradation for older n8n.** Group support is discovered from the write itself rather than a version probe. n8n reports an unknown property as `request/body must NOT have additional properties` — without naming it — so the field is not blamed on the strength of that message: the workflow is sent again without `nodeGroups`, and only if that succeeds is the instance recorded as predating the field (n8n 2.28). A retry that fails too means something else in the body was wrong, and n8n's own error is returned unchanged. Group descriptions (n8n 2.32) are identifiable, because a rejection inside a group carries its path, and are stripped with a warning. Each limit is remembered per instance and warned about on every affected write.
+
+## [2.65.2] - 2026-07-23
+
+### Fixed
+
+- **Telemetry can no longer stall workflow mutation requests (#944).** Supabase telemetry requests now have a hard two-second deadline that aborts the underlying fetch, and best-effort delivery makes only one attempt so a failed request cannot leave retry work behind. Partial and full workflow-update handlers detach mutation telemetry explicitly, while a global flush queue serializes events, workflows, and mutations without silently dropping concurrent batches.
+
+## [2.65.1] - 2026-07-16
+
+### Fixed
+
+- **Evaluation Trigger restored to the node database (#937).** `nodes-base.evaluationTrigger` was silently dropped during every database rebuild: the loader's node-name regex did not match n8n's enterprise `.node.ee.js` file suffix, and the export-resolution fallback picked the module's first export — for EvaluationTrigger a numeric constant, not the node class — so parsing failed and the node never reached the database. Agents could not discover the node via `search_nodes`/`get_node`, and `validate_workflow` falsely rejected valid evaluation workflows with "Unknown node type: n8n-nodes-base.evaluationTrigger". The regex now accepts the `.ee` segment, the fallback only ever resolves function-typed exports, and both `nodes-base.evaluation` and `nodes-base.evaluationTrigger` joined the canonical core-node completeness gate so a future silent drop fails the rebuild loudly. Rebuilt database: 827 core nodes (677 from `n8n-nodes-base` + 150 from `@n8n/n8n-nodes-langchain`).
+
+## [2.65.0] - 2026-07-15
+
+### Added
+
+- **`n8n_evaluations` tool — read evaluation test runs.** n8n 2.30 shipped Public API read endpoints for evaluation test runs (n8n-io/n8n#33455); the new consolidated tool exposes them: `action='list_runs'` (paginated, status filter), `action='get_run'` (aggregated metrics and final result), and `action='list_cases'` (per-case inputs/outputs/metrics, default limit 20 — paginate, cases can be large). Requires n8n ≥ 2.30 **and an API key created on 2.30+**: older keys silently lack the `testRun` scopes and get a 403 — the tool's error messages spell this out, and a 404 on a pre-2.30 instance is disambiguated from a wrong workflow/run id via the cached instance version. Read-only; triggering or cancelling runs via API is not yet supported by n8n (upstream n8n-io/n8n#33979 is merged but unreleased) and will be added as new actions when it ships.
+
+## [2.64.1] - 2026-07-14
+
+### Changed
+
+- **Updated n8n to 2.30.x.** Bumped `n8n-nodes-base` 2.29.7 → 2.30.3, `n8n-core` 2.29.7 → 2.30.2, `n8n-workflow` 2.29.3 → 2.30.1, and `@n8n/n8n-nodes-langchain` 2.29.7 → 2.30.3. Rebuilt the node database (826 core nodes: 676 from `n8n-nodes-base` + 150 from `@n8n/n8n-nodes-langchain`).
+- **Refreshed community nodes.** Registry sync added 24 community nodes (1,324 → 1,348 total; 1,195 verified + 153 unverified). README metadata and AI summaries now cover 1,337/1,348 community nodes; the remaining 11 packages have no retrievable npm README to summarize.
+- Updated README n8n version badge and node counts (2,174 total nodes: 826 core + 1,348 community).
+
+## [2.64.0] - 2026-07-09
+
+### Added
+
+- **Cloudflare Access (Zero Trust) authentication.** When `N8N_CF_CLIENT_ID` / `N8N_CF_CLIENT_SECRET` are set, n8n-MCP sends `CF-Access-Client-Id` / `CF-Access-Client-Secret` service-token headers on n8n API requests, the version/health probes, and webhook executions, so it can reach n8n instances that sit behind a Cloudflare Access edge. Configured via environment variables. The service token is confined to the `N8N_API_URL` origin — webhook calls to a different host (e.g. a split `WEBHOOK_URL` origin) do not receive it, to avoid leaking the token; a debug log records when it is withheld. The SSRF-hardened version probe (pinned transport agents, `maxRedirects: 0`) is preserved. Original implementation by @diemol55 (#718), rebased and extended in #919.
+
+## [2.63.2] - 2026-07-08
+
+### Changed
+
+- **Updated n8n to 2.29.x.** Bumped `n8n-nodes-base` 2.28.4 -> 2.29.7, `n8n-core` 2.28.5 -> 2.29.7, `n8n-workflow` 2.28.4 -> 2.29.3, and `@n8n/n8n-nodes-langchain` 2.28.6 -> 2.29.7. Rebuilt the node database (826 core nodes: 676 from `n8n-nodes-base` + 150 from `@n8n/n8n-nodes-langchain`).
+- **Refreshed community nodes.** Registry sync added 19 community nodes (1,305 -> 1,324 total; 1,177 verified + 147 unverified). README metadata now covers 1,313/1,324 community nodes; AI summaries cover 1,295/1,324 (the remaining 29 include 19 newly added nodes pending summary generation and 10 with no npm README to summarize).
+- Updated README n8n version badge and node counts (2,150 total nodes: 826 core + 1,324 community).
+
+## [2.63.1] - 2026-07-06
+
+### Changed
+
+- **Updated n8n to 2.28.x.** Bumped `n8n-nodes-base` 2.27.4 → 2.28.4, `n8n-core` 2.27.3 → 2.28.5, `n8n-workflow` 2.27.2 → 2.28.4, and `@n8n/n8n-nodes-langchain` 2.27.4 → 2.28.6. Rebuilt the node database (826 core nodes: 676 from `n8n-nodes-base` + 150 from `@n8n/n8n-nodes-langchain`).
+- **Refreshed community nodes.** Registry sync added 58 newly-published community nodes (1,247 → 1,305 total; 1,161 verified + 144 unverified). READMEs fetched and AI documentation summaries generated for the new nodes — 1,295/1,305 community nodes now carry an AI summary (the remaining 10 have no npm README to summarize).
+- Updated README n8n version badge and node counts (2,131 total nodes: 826 core + 1,305 community).
+
+## [2.63.0] - 2026-07-03
+
+### Fixed
+
+A systematic false-positive audit of the validators — every rule inventoried (439 emission points), all 1,116 recent published n8n.io templates validated under all four profiles, every major finding class investigated and adversarially verified with live n8n repros — found that 78% of published templates were declared invalid, with the dominant error classes being 90–100% false positives. This release fixes every verified false-positive class. On the template corpus, falsely-invalid workflows drop from 77% to 39% under the `runtime` profile (the remainder dominated by genuinely unconfigured skeleton templates), errors drop 39%, and warnings drop 91%.
+
+- **Wrong-resource default injection no longer fabricates "Invalid value for 'operation'" errors.** `applyNodeDefaults` applied the first same-named property default it found, ignoring `displayOptions` — so multi-resource nodes (Gmail, Telegram, Slack, Google Drive, Discord, Notion, calendar/drive Tool variants, community nodes) with an omitted `operation` got a different resource's default injected, which then failed the enum check. Defaults are now applied visibility-aware with a fixpoint pass so `resource` resolves before `operation` regardless of schema order. This was the single largest false-error class in the corpus (~4,000 false errors across 583 workflows, 97% FP rate). The enum check also now skips expression values (`=...`), empty option lists, and dynamically-loaded (`loadOptionsMethod`) properties, and accepts the legacy Code-node `language: 'python'` value that n8n still executes.
+- **Error-handling style is no longer enforced as hard errors.** The `responseNode mode requires onError` error rejected the standard documented Webhook → Respond to Webhook pattern (n8n auto-returns a 500 if a node fails before the Respond node); it is removed. The `onError: 'continueErrorOutput' but no error output connections` error is now a warning explaining the real consequence (failed items are silently dropped). Both previously flipped `valid:false` on workflows that run correctly in production.
+- **Error-output detection is node-type aware.** The check that warns about wired error outputs missing `onError` treated any connection on `main[1]` as an error output, flagging every IF (false branch), Switch (case 1), and Split In Batches (loop output) with both branches wired. A shared `getMainOutputCount()` helper now computes the node's natural output count, so the error output is only looked for at the correct index (e.g. `main[2]` for IF).
+- **Template literals inside expressions are no longer errors** (#338, properly this time). Two independent emitters raised hard errors claiming `${}` template literals are "not supported" — n8n's expression engine fully supports backtick template literals inside `{{ }}`. Both checks are deleted, and the unit test that asserted the false behavior now asserts the opposite.
+- **Stale expression "common mistakes" warnings removed.** Optional chaining (`?.`) is supported by n8n; string-keyed bracket access (`$json['some-prop']`) is valid (and dot notation is impossible for dashed keys); fields legitimately named `test`/`invalid`/`undefined`/`null` are not "suspicious". All four stale rules are deleted; the missing-`=`-prefix warning is kept.
+- **IF/Switch/Filter structure validation is version-aware.** IF v1 nodes with the native legacy `conditions.{string|number|boolean}` shape were validated against the v2.2 filter schema and told they "must have a combinator/conditions field" (~91% FP). Legacy shapes are now recognized; `combinator` is optional (n8n defaults it); `conditions.options` sub-fields (`version`, `caseSensitive`, `typeValidation`) are optional-with-defaults; and unary/binary operators are no longer required to carry or omit `singleValue` (n8n derives unary-ness from the operator name). Kept as errors: a v1-shaped conditions object on a v2 node (silent vacuous-true), a filter object with no conditions at all, and legacy v1 operator names inside v2 structures.
+- **Merge input-index bounds respect n8n's lenient runtime.** A Merge node with more wired inputs than `numberInputs` only hard-errors when `numberInputs` is explicitly configured; when it is absent (default 2) the validator now warns that extra inputs are ignored — matching what n8n actually does (accepts and runs the workflow).
+- **Cycle detection recognizes runtime-controlled loops.** Exit detection now considers any node on the cycle with multiple wired main outputs, an error output, or a multi-output description (including langchain routers like Text Classifier) as a potential exit, evaluates the whole cycle rather than the first DFS path, and reports as a warning instead of an error — every flagged "infinite loop" in the corpus executed to completion.
+- **Expression bracket-balance checks are string-aware and expression-gated.** Unmatched `{{`/`}}` counting previously ran over whole literal strings (JSON bodies, Graph API syntax) and flagged fields that render fine; it now only applies to actual expression values and ignores braces inside string literals.
+- **Path collisions from malformed bracket-index keys no longer produce phantom "missing = prefix" errors.** Junk sibling keys like `"assignments[5]"` (artifacts of botched partial updates that n8n stores but ignores) were traversed and their path collided with the real array element, making the error point at a healthy field. Such keys are now skipped, with the real-element behavior regression-tested both ways.
+- **Code-node scanner false positives fixed.** `return {object}` in `runOnceForAllItems` mode is valid (n8n auto-wraps it); the tokenizer now tracks template-literal interpolation so nested `${...}` no longer desyncs the scanner and blanks real returns; `{{ }}` inside string literals is valid JS and no longer an error; the invalid-`$` heuristic runs on a string/comment/regex-stripped view so regex anchors (`/x$/`) stop matching; `this.helpers.` is no longer confused with a bare `helpers.`; Python code is read from `pythonCode` for both `python` and `pythonNative` language values; and the fs/eval/SQL pattern checks use word- and statement-boundary matching so identifiers like `item.json.path`, `regex.exec(...)`, `dropdown`, `updated_at`, or `truncated_at` no longer trigger filesystem/security/SQL findings (real `DROP`/`DELETE`/`UPDATE`/`TRUNCATE` statements and bare/global `eval`/`exec` still do; expression-valued queries downgrade to warnings since the final SQL is runtime-resolved).
+- **Google Sheets `read` no longer demands a `range`** — v4 reads the sheet chosen via the resource locator; `range` is an optional advanced field.
+- **Set-node `jsonOutput` and MongoDB query JSON checks skip expression values** (`=...` / `{{ }}` interpolation) that resolve to valid JSON at runtime.
+- **AI/langchain validators check the parameters the nodes actually have.** MCP Client Tool endpoints are validated via `sseEndpoint`/`endpointUrl` keyed on `serverTransport` (the previously-checked `serverUrl` parameter does not exist), and its `toolDescription` requirement is dropped (descriptions come from the MCP server). SerpApi, Wikipedia, and SearXNG tools have built-in descriptions and are exempted like Calculator. AI Agent Tool's `toolDescription` has an n8n default and is now a suggestion. Workflow/HTTP/Vector Store tool missing descriptions are warnings (n8n runs them). `hasOutputParser: true` without a connected parser is a warning (n8n proceeds with plain-string output). Basic LLM Chain accepts two language models when `needsFallback` is enabled, warns on two without it, and errors only above two.
+- **AI sub-nodes are no longer "not reachable from any trigger node".** The reachability traversal now follows `ai_*` connections in reverse (they are stored sub-node → parent), so models, memory, tools, and output parsers attached to a reachable agent count as reachable. This warning fired on 648 of 1,116 corpus workflows — 58% of all AI templates.
+- **`extractFromFile` is back in the node database** — the shipped `nodes.db` was missing this core node, so every workflow using it got a hard "Unknown node type" error (69 corpus workflows). The rebuild now also fails loudly if any canonical core node is missing (`src/scripts/core-node-check.ts`, wired into both rebuild scripts and `validate.ts`), node modules that fail to load no longer silently vanish from the database (missing optional peer dependencies are stubbed for bare specifiers only), and unknown/over-max `typeVersion` findings on community packages are warnings (database snapshot staleness) while core packages keep hard errors.
+- **Node-type similarity suggestions are no longer nonsense.** The suggester divided a capped edit-distance sentinel by name length (producing bogus high similarity for unrelated short names) and matched categories on 2-character substrings — it could confidently suggest renaming a valid langchain embeddings node to an unrelated community node. Capped distances now mean zero similarity and category matching requires whole-token matches.
+- **Duplicate node ID detection ignores missing IDs** — nodes with absent/empty `id` fields no longer collide with each other; only genuinely identical non-empty IDs are flagged.
+- **The workflow-level "add error handling" suggestion machinery works again** — it previously checked a connection key (`connections[...].error`) that n8n never writes, so it fired on every workflow regardless of wired error outputs; and the recovery guidance text referenced retired tool names (now `validate_node` with `mode: 'minimal'` and `get_node`).
+- **Docker: database initialization at custom/empty `NODE_DB_PATH` locations actually works now.** The entrypoint ran `rebuild.js` inside the runtime container, which cannot succeed there (the slim image ships no n8n packages) — the failure was silent until this release's fail-loud rebuild change exposed it. The image now ships a pristine database seed at `/app/.db-seed/nodes.db` (outside `/app/data`, which volume mounts mask) and the entrypoint seeds new database paths by copying it; when the target volume is unwritable the entrypoint warns and continues instead of killing the container, matching the long-standing runtime contract.
+
+### Changed
+
+- **Validation profiles now behave as documented.** Two gating defects made `minimal`/`runtime`/`ai-friendly`/`strict` nearly indistinguishable: node-level best-practice warnings were appended after the profile filter ran, and most workflow-level advisories were emitted unconditionally. Best-practice/advisory findings (per-node-type "without error handling" warnings, webhook response advice, outdated-`typeVersion` notices, long-chain and no-input-reference hints, resource-locator `cachedResultName` advice) are now gated to `ai-friendly`/`strict`; security and deprecation warnings survive every profile. On the template corpus, `runtime` now emits 2.9k warnings vs 13.5k under `strict` — previously 32.5k vs 37.1k.
+- **Advisory severities recalibrated:** "Outdated typeVersion" is a suggestion (97.6% of corpus workflows ran an older-but-supported version — that is normal, supported n8n behavior); duplicated AI-agent advisories ("has no tools connected" fired twice from two rules, community-tool env notice fired as both warning and suggestion) are emitted once; `retryOnFail` without `maxTries` (n8n's default of 3 applies) is no longer warned about; the dynamic AI-Tool-variant notice and the `continueOnFail`+`retryOnFail` combination note are informational; "Property won't be used" (strict-only) skips empty/default-valued leftovers and names properties by display name.
+
+### Added
+
+- Regression test suites pinning both directions of every fix: the false positive stays fixed AND the neighboring true positive still fires (`config-validator-fp-audit`, `workflow-validator-fp-audit`, `n8n-validation-filter-rules`, `node-loader-optional-deps`, `core-node-check` among others — ~150 new tests).
+
+## [2.62.0] - 2026-07-02
+
+### Removed
+
+- **Retired the `n8n_generate_workflow` tool.** The tool and its supporting plumbing have been removed: the tool definition, the server-side handler dispatch, the `generateWorkflowHandler` option on `N8NDocumentationMCPServer`, `SingleSessionHTTPServer`, and `N8NMCPEngine`, and the `GenerateWorkflow*` type exports (`GenerateWorkflowArgs`, `GenerateWorkflowResult`, `GenerateWorkflowProposal`, `GenerateWorkflowHandler`, `GenerateWorkflowHelpers`) from the library API. On self-hosted deployments the tool only ever returned a pointer to the hosted service; AI-assisted workflow generation is better served today by the standard build loop (`search_templates` / `n8n_deploy_template` for templates, `n8n_create_workflow` + `n8n_validate_workflow` + `n8n_autofix_workflow` for custom builds). Library consumers that passed `generateWorkflowHandler` must remove that option when upgrading.
+
+## [2.61.0] - 2026-06-26
+
+### Changed
+
+- **Updated n8n to 2.27.4.** Bumped the bundled n8n dependencies — `n8n-nodes-base` 2.26.2 → 2.27.4, `n8n-core` 2.26.2 → 2.27.3, `n8n-workflow` 2.26.2 → 2.27.2, and `@n8n/n8n-nodes-langchain` 2.26.2 → 2.27.4 — and rebuilt `data/nodes.db` (community nodes preserved). The node catalog now covers **2,063 nodes** (816 core + 1,247 community, 1,113 verified). Community nodes were refreshed (1,120 verified + 61 npm) and documentation regenerated incrementally: READMEs at 1,239/1,247 and AI summaries at 1,239/1,247.
+
+### Fixed
+
+- **Community-docs generator now works with OpenAI-compatible cloud LLMs.** The summary generator unconditionally sent the vLLM-only `chat_template_kwargs: { enable_thinking: false }` body field, which OpenAI and Azure OpenAI reject with HTTP 400 (`Unknown parameter`). The field is now gated to local/vLLM servers, Azure (`*.openai.azure.com`) hosts are correctly classified as cloud, and `max_completion_tokens` (already in use) keeps the generator compatible with reasoning models. This makes `generate:docs:summary-only` usable against cloud endpoints.
+
+## [2.60.0] - 2026-06-24
+
+### Added
+
+- **Per-operation tool filtering via `DISABLED_TOOL_OPERATIONS`** (#714). A finer-grained companion to `DISABLED_TOOLS`: instead of removing an entire tool, operators can now disable individual operations within a tool — for example `DISABLED_TOOL_OPERATIONS=n8n_executions:delete` keeps `n8n_executions` available for read/list while blocking deletes — making it practical to stand up read-only or least-privilege deployments. Operation names are normalised to lowercase at parse time and at both enforcement points (the request guard and the executor's defense-in-depth check), so a client sending `action:"DELETE"` cannot slip past a lowercase rule. When every operation of a tool is disabled, the server warns the operator to use `DISABLED_TOOLS` instead, and the tool's destructive-operation annotations are recomputed so the advertised hints stay accurate. Thanks to @mahmoudnaif for the feature (#719).
+
+### Fixed
+
+- **Diff engine now removes a property when a patch sets it to `undefined`** (#292). `setNestedProperty` in `WorkflowDiffEngine` only treated `null` as a deletion marker, but `workflow-auto-fixer.ts` already removes properties with `{onError: undefined}` (carrying a literal `// This will remove the property` comment). The engine was assigning `undefined` to the key rather than deleting it, so `hasOwnProperty(key)` stayed true and the "removed" property still reached n8n. `undefined` is now honored as a removal marker alongside `null`. Thanks to @justadityaraj (Aditya Raj Singh) for the fix (#794).
+- **Version-summary cache TTL was 1000× too long** (#804). The node version-summary cache passed its TTL to `SimpleCache.set(key, data, ttlSeconds)` in milliseconds (`86400000`), but the API treats the third argument as seconds and multiplies by 1000 internally — so the entry was scheduled to live ~1,000 days instead of the intended 24 hours, and stale version summaries would never expire within a normal process lifetime. The TTL is now passed in seconds (`86400`). Thanks to @linda-ai-bot for the fix.
+- **Google Sheets `update` validator accepts the `columns` resourceMapper** (#730). `validateGoogleSheetsUpdate` raised false-positive `missing_required` errors (for both `range` and `values`) on valid Google Sheets v4+ configurations that map data with the `columns` resourceMapper (`mappingMode: "defineBelow"` / `"autoMapInputData"`) instead of the legacy `range` + `values` fields; `update` now treats a real `columns` mapping as satisfying both requirements. The `append` validator already accepted `columns` and was only tightened so an empty `columns: {}` no longer passes, and `read` is unchanged — it has no `columns` parameter and still requires `range`. Thanks to @infobewaize for the fix.
+- **Code node return validator is no longer fooled by helper functions** (#795). The earlier helper-function fix suppressed the "Code node must return data" check whenever *any* helper function was present, so a snippet whose only primitive `return` lived inside a nested helper — with no real top-level return — could slip through. The scanner now strips nested function/method bodies before looking for a top-level return, so primitive returns inside helpers, methods, generators, regex literals, comments, strings, and `for await` blocks are no longer mistaken for the node's actual return value; the backward function-head scan is also bounded to avoid quadratic blow-up on large source. Thanks to @AjTheSpidey (Aadi Jai Gupta) for the fix.
+
+### Changed
+
+- **Hardened the Dependabot configuration** (#874). The n8n packages (`n8n`, `n8n-core`, `n8n-workflow`, `n8n-nodes-base`, `@n8n/*`) are now excluded from Dependabot, because they are updated via `npm run update:n8n` — which also rebuilds `data/nodes.db` while preserving community nodes — so a plain Dependabot bump would ship a stale node catalog. A dedicated `/ui-apps` npm entry was added (it has its own lockfile and is not a root workspace, so Dependabot could not otherwise see it), and `rebase-strategy: auto` was set across all ecosystems.
+- **Bumped dev/build and CI tooling.** `ui-apps` build tooling — `vite` 6 → 8, `typescript` 5 → 6, `@vitejs/plugin-react` 4 → 6 (#876, #877, #878) — and the GitHub Actions used by CI: `docker/login-action` 3 → 4, `actions/upload-artifact` 4 → 7, `actions/download-artifact` 4 → 8, `actions/checkout` 4 → 7, `actions/setup-node` 4 → 6 (#869–#873). The `ui-apps` toolchain is dev-only: it produces the static single-file HTML bundles in `ui-apps/dist/**` at build time and none of it ships in the published runtime. The combined `ui-apps` upgrade was verified end-to-end (clean install, all five UI apps build); Vite 8 requires Node `^20.19 || >=22.12`, which the release build (Node 20.x) satisfies.
+
+### Documentation
+
+- **Documented npm cache contention for multi-client `npx` setups** (#866). Added guidance to `docs/SELF_HOSTING.md` for running several `npx n8n-mcp` clients on one machine: give each client a unique `npm_config_cache` to avoid concurrent-extraction races, and keep `DISABLE_CONSOLE_OUTPUT` set for stdio clients.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.59.4] - 2026-06-23
+
+### Fixed
+
+- **Server no longer crashes on startup with `ERR_REQUIRE_ESM`** (#864). v2.59.1's `uuid` 10 → 14 bump (#850) moved the dependency to an ESM-only build (`"type": "module"`, no `require` export condition), but the shipped artifact is compiled to CommonJS and calls `require('uuid')`. On the supported minimum Node (`>=18`) — and any Node 20.x before 20.19 or 22.x before 22.12, including the reporter's 22.11 — Node's CommonJS loader throws `ERR_REQUIRE_ESM` at module load, before any config is read, so every MCP client (Claude Code, Cursor, etc.) just saw `MCP error -32000: Connection closed`. It slipped through release verification because `tsc` only type-checks, the Vitest suite runs under an ESM transform pipeline, and CI/Docker/local dev all ran Node ≥ 20.19/22.12 where `require()` of an ESM module is silently tolerated. `uuid` is now pinned to `^11.1.1`, which ships a CommonJS build (a `node.require` export condition) and still clears the original advisory (GHSA-w5hq-g745-h8pq / CVE-2026-41907 does not affect v11), so the security fix from #850 is preserved with no source changes — `v4`/`v5` named exports are API-identical across v10/v11/v14. Reported by @anpe-efficy (André Pereira).
+- **Added a CommonJS runtime smoke test** (`npm run test:cjs-runtime` and a dedicated `cjs-runtime` CI job) that loads the compiled `dist/` under the strictest CommonJS loader the running Node supports. On Node ≥ 20.19/22.12 it forces `require()`-of-ESM off via `--no-experimental-require-module` so the mismatch can't be masked; on older Node (down to the `>=18` floor) that strict behavior is already the default and the flag — which doesn't exist there — is omitted. Either way a CJS/ESM mismatch in any shipped dependency fails CI regardless of the runner's Node version, closing the gap that let #864 reach three releases.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.59.3] - 2026-06-21
+
+### Fixed
+
+- **IF node and AI Agent example/template configs now validate against n8n** (#374). The static example and task-template generators emitted configs that n8n rejects. IF (`nodes-base.if`) examples were missing the `conditions.options` block (`version`/`leftValue`/`caseSensitive`/`typeValidation`), the filter `combinator`, and per-condition `id`s — so the generated node rendered empty and failed the validators. The AI Agent task templates used `nodes-langchain.agent` (missing the `@n8n/` package prefix) with a flat `text`/`outputType`/`systemMessage` shape instead of the current `promptType` + `options.systemMessage` structure. Both are corrected to the shapes the bundled node schema actually expects, and a regression test now runs the generated configs through `EnhancedConfigValidator` (the validator users hit) so the shapes cannot silently drift again. Reported by @FelipeLuz01.
+- **Windows: the MCP server no longer crashes on graceful shutdown** (#383, #385). Calling `process.stdin.destroy()` during shutdown triggered a fatal libuv assertion (`!(handle->flags & UV_HANDLE_CLOSING)`, `src/win/async.c:76`) on Windows, crashing the server on exit/disconnect — including via the published `npx n8n-mcp` stdio bin, which the earlier proposed fix missed. stdin teardown is now platform-aware (always `pause()`, only `destroy()` off `win32`) via a shared `tearDownStdin()` helper applied to both stdio entrypoints, with an explicit `win32` exit path so shutdown can't hang. Reported by @libragik.
+
+### Security
+
+- **Session restore now requires a complete tenant context in multi-tenant mode** (#844). Defense-in-depth follow-up to GHSA-2cf7-hpwf-47h9. `restoreSessionState()` validated a restored `InstanceContext` only via `validateInstanceContext`, which checks each field only when it is present, so a persisted context carrying just one of `n8nApiUrl`/`n8nApiKey` could be restored as a partial tenant identity — an asymmetry with the export side, which already refuses to persist a partial context. A presence guard mirroring the export-side check now rejects partial contexts on restore and emits a `session_restore_failed` security event; sessions with no context at all (single-tenant/stdio) are unaffected.
+
+### Documentation
+
+- **Railway deployment guide gains an upfront `AUTH_TOKEN` callout** (#152). Added a "Before You Deploy" section near the top of `docs/RAILWAY_DEPLOYMENT.md` covering both deploy paths — the one-click template (which pre-sets a placeholder `AUTH_TOKEN` you must replace) and a self-hosted repo/Dockerfile deploy (where Railway does not auto-create the variable, so the server won't start until you add it). Reported by @gthay.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.59.2] - 2026-06-19
+
+### Added
+
+- **`MULTI_TENANT_ALLOW_CONCURRENT_SESSIONS` env flag** (multi-tenant `instance` strategy). By default the instance strategy assumes one MCP session per instance and, on every `initialize`, eagerly evicts all other live sessions for that same instance (`reason: instance_reconnect`). When several MCP clients target the same instance concurrently — e.g. an automation agent, an IDE, and a web client all authenticated as one tenant — each client's `initialize` destroys the others' active sessions, so their next tool call fast-fails with `-32000 "Session not found or expired"` and the client reports a dropped connection. Set `MULTI_TENANT_ALLOW_CONCURRENT_SESSIONS=true` to skip the eager eviction and let concurrent same-instance sessions coexist; sessions are then reclaimed only by their natural lifecycle (transport close, the `SESSION_TIMEOUT_MINUTES` idle sweep, and the `N8N_MCP_MAX_SESSIONS` cap). Default `false` preserves the previous one-session-per-instance behavior. Hosted multi-client deployments should enable it.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.59.1] - 2026-06-19
+
+### Security
+
+- **Bumped `uuid` 10 → 14** (`package.json` + `package.runtime.json`). This is the only Dependabot advisory that actually reaches the published runtime artifact: a clean-room `npm install --production` from `package.runtime.json` (the manifest shipped to npm and installed in the Docker runtime stage) flagged exactly one vulnerable package — `uuid@10.0.0` (GHSA-w5hq-g745-h8pq / CVE-2026-41907, missing buffer bounds check in v3/v5/v6 when a caller-supplied output buffer is passed). The fix lands in a major release, so the `^10` pin could not auto-resolve. The server's own usage is unaffected (`v4` random IDs, and one `v5` call that passes no buffer), but the direct dependency is bumped so no vulnerable `uuid` reaches the shipped artifact. The `v4`/`v5` named exports are unchanged and verified under the CommonJS build. Note: the dev/build `package-lock.json` still contains older `uuid` copies (8.x/9.x/10.x) nested under the n8n packages (`@n8n/n8n-nodes-langchain`'s `@langchain/*`, plus snowflake-sdk, tedious, typeorm, etc.); these are build-time-only transitives that are absent from `package.runtime.json` and never installed at runtime, so they are intentionally not force-overridden (doing so would push those packages across multiple `uuid` breaking majors and risk the `npm run rebuild` build for code that does not ship). The GitHub `uuid` alert may therefore stay open until the n8n packages bump their own `uuid` upstream, which clears on the regular n8n update.
+- **Bumped dev/CI test tooling out of the vulnerable ranges**: `vitest` and `@vitest/*` 3.2.4 → 3.2.6 (clears the `vitest` advisory CVE-2026-47429, which only triggers via `vitest --ui` bound to a non-localhost interface — CI runs headless `vitest run`), which also refreshes the transitive `vite` to 7.3.5. These are dev-only dependencies and are never installed in the published package or the Docker runtime image.
+- **Bumped `ui-apps` build tooling**: `vite` ^6.0.0 → ^6.4.3, refreshing the transitive build chain to patched versions (`rollup` 4.62.0, `postcss` 8.5.15, `@babel/core` 7.29.7, `picomatch` 2.3.2/4.0.4). `ui-apps` produces static single-file HTML bundles at build time; none of this tooling ships in `ui-apps/dist/**`.
+
+The remaining open Dependabot advisories are not addressed here because they do not reach a shipped artifact: the bulk are transitive dependencies of the n8n packages (`n8n-core`, `n8n-nodes-base`, `n8n-workflow`, `@n8n/n8n-nodes-langchain`), which are build-time-only (used to generate `data/nodes.db`) and are absent from `package.runtime.json` — they clear on the regular n8n dependency updates. One low-severity `esbuild` advisory (Windows dev-server arbitrary file read, GHSA-g7r4-m6w7-qqqr) remains pinned by `vite`'s `^0.27.0` range and is unreachable in this project (esbuild is an internal Vite/Vitest transform, not an exposed dev server; CI is Linux).
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.59.0] - 2026-06-18
+
+### Added
+
+- **`n8n_get_workflow` gains `mode="filtered"`** for reading a single node (or a handful of nodes) without pulling the whole workflow. On large workflows with long Code-node source, `mode="full"`/`mode="active"` can return a payload big enough to be truncated client-side, leaving `jsCode`/`pythonCode` unreadable. The new mode takes a `nodeNames` array (matched against node names *or* node IDs) and returns only those nodes with their full config, plus light metadata (`nodeCount`, `returnedCount`, and a `notFound` list for any keys that matched nothing). Recommended flow: `mode="structure"` to discover node names, then `mode="filtered"` to pull the specific heavy node. Requested by @MiRaIOMeZaSu (#101).
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
+## [2.58.0] - 2026-06-17
+
+### Changed
+
+- **Updated n8n to 2.26.5.** Bumped the four n8n packages this server loads at build time: `n8n-nodes-base` 2.23.0 → 2.26.2, `n8n-core` 2.23.1 → 2.26.2, `n8n-workflow` 2.23.0 → 2.26.2, and `@n8n/n8n-nodes-langchain` 2.23.0 → 2.26.2. The node database was rebuilt from the upgraded packages (816 core nodes, 1,137 AI-capable tool variants, 611 versioned nodes, 271 triggers) and the existing community-node corpus (1,029 nodes) was preserved with its READMEs and AI summaries intact. README badge and node-count copy updated to 1,845 total (816 core + 1,029 community).
+
+### Fixed
+
+- **`npm run update:n8n` no longer aborts at its validation step.** The post-rebuild validation invoked a `test-nodes` npm script pointing at `dist/scripts/test-nodes.js`, a file removed long ago, so every run ended with `Cannot find module .../test-nodes.js` and `❌ Update failed at validation step` even though the dependency bump and database rebuild had completed. The redundant `test-nodes` step (critical-node checks are already covered by `npm run validate`) and its dangling npm script have been removed.
+- **Published runtime manifest aligned with the build.** `package.runtime.json` (the manifest published to npm) pinned `@modelcontextprotocol/sdk` to `1.20.1` while the code is built and tested against `1.28.0`, and declared `node >=16.0.0` despite depending on `express@^5` (which requires Node ≥18). Both are now corrected (SDK `1.28.0`, engine `>=18.0.0`) so runtime-only installs match the tested build.
+
+Conceived by Romuald Członkowski - https://www.aiadvisors.pl/en
+
 ## [2.57.4] - 2026-06-13
 
 ### Security

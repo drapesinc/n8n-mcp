@@ -46,9 +46,16 @@ export interface WorkflowSettings {
 export interface ActiveWorkflowVersion {
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
+    nodeGroups?: WorkflowNodeGroup[];
     name?: string | null;
     createdAt?: string;
     [key: string]: unknown;
+}
+export interface WorkflowNodeGroup {
+    id: string;
+    name: string;
+    nodeIds: string[];
+    description?: string;
 }
 export interface Workflow {
     id?: string;
@@ -56,6 +63,7 @@ export interface Workflow {
     description?: string;
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
+    nodeGroups?: WorkflowNodeGroup[];
     active?: boolean;
     isArchived?: boolean;
     settings?: WorkflowSettings;
@@ -134,6 +142,7 @@ export interface WorkflowExport {
     updatedAt: string;
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
+    nodeGroups?: WorkflowNodeGroup[];
     settings?: WorkflowSettings;
     staticData?: Record<string, unknown>;
     tags?: string[];
@@ -146,6 +155,7 @@ export interface WorkflowImport {
     name: string;
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
+    nodeGroups?: WorkflowNodeGroup[];
     settings?: WorkflowSettings;
     staticData?: Record<string, unknown>;
     tags?: string[];
@@ -239,6 +249,60 @@ export interface ExecutionListParams {
 }
 export interface ExecutionListResponse {
     data: Execution[];
+    nextCursor?: string | null;
+}
+export type TestRunStatus = 'new' | 'running' | 'completed' | 'error' | 'cancelled';
+export type TestRunFinalResult = 'success' | 'error' | 'warning';
+export type TestCaseExecutionStatus = 'new' | 'running' | 'evaluation_running' | 'success' | 'error' | 'warning' | 'cancelled';
+export interface TestRunSummary {
+    id: string;
+    status: TestRunStatus;
+    runAt: string | null;
+    completedAt: string | null;
+    metrics: Record<string, number | boolean> | null;
+    errorCode: string | null;
+    errorDetails: Record<string, unknown> | null;
+    finalResult: TestRunFinalResult | null;
+    testCaseCount: number;
+    createdAt: string;
+    updatedAt: string;
+}
+export interface TestCaseExecution {
+    id: string;
+    status: TestCaseExecutionStatus;
+    runAt: string | null;
+    completedAt: string | null;
+    metrics: Record<string, number | boolean> | null;
+    errorCode: string | null;
+    errorDetails: Record<string, unknown> | null;
+    inputs: Record<string, unknown> | null;
+    outputs: Record<string, unknown> | null;
+    executionId: string | null;
+}
+export interface TestRunTriggerResult {
+    id: string;
+    status: TestRunStatus;
+    createdAt: string;
+}
+export interface TestRunCancelResult {
+    id: string;
+    status: 'cancelled';
+}
+export interface TestRunListParams {
+    status?: TestRunStatus;
+    limit?: number;
+    cursor?: string;
+}
+export interface TestCaseListParams {
+    limit?: number;
+    cursor?: string;
+}
+export interface TestRunListResponse {
+    data: TestRunSummary[];
+    nextCursor?: string | null;
+}
+export interface TestCaseListResponse {
+    data: TestCaseExecution[];
     nextCursor?: string | null;
 }
 export interface CredentialListParams {

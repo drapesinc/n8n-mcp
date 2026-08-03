@@ -62,9 +62,8 @@ export declare const TELEMETRY_CONFIG: {
     readonly BATCH_FLUSH_INTERVAL: 5000;
     readonly EVENT_QUEUE_THRESHOLD: 10;
     readonly WORKFLOW_QUEUE_THRESHOLD: 5;
-    readonly MAX_RETRIES: 3;
-    readonly RETRY_DELAY: 1000;
     readonly OPERATION_TIMEOUT: 5000;
+    readonly FETCH_TIMEOUT_MS: 2000;
     readonly RATE_LIMIT_WINDOW: 60000;
     readonly RATE_LIMIT_MAX_EVENTS: 100;
     readonly MAX_QUEUE_SIZE: 1000;

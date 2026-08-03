@@ -15,6 +15,8 @@ export interface SyncResult {
         fetched: number;
         saved: number;
         skipped: number;
+        nodesSaved: number;
+        nodesRemoved: number;
         errors: string[];
     };
     duration: number;
@@ -33,8 +35,14 @@ export declare class CommunityNodeService {
     syncVerifiedNodes(progressCallback?: (message: string, current: number, total: number) => void, skipExisting?: boolean): Promise<SyncResult['verified']>;
     syncNpmNodes(limit?: number, progressCallback?: (message: string, current: number, total: number) => void, skipExisting?: boolean): Promise<SyncResult['npm']>;
     private strapiNodeToParsedNode;
-    private npmPackageToParsedNode;
+    private npmPackageToParsedNodes;
+    private matchesRole;
     private extractOperations;
+    private rowsOutOfSync;
+    private staleCommunityRows;
+    private pruneStaleCommunityRows;
+    private carryOverPackageDocs;
+    private resolveNpmNodeNames;
     private extractNodeNameFromPackage;
     getCommunityStats(): CommunityStats;
     deleteCommunityNodes(): number;

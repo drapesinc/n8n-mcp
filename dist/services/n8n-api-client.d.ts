@@ -1,9 +1,15 @@
-import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, SourceControlStatus, SourceControlPullResult, SourceControlPushResult, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams } from '../types/n8n-api';
+import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, TestRunSummary, TestRunListParams, TestCaseListParams, TestRunListResponse, TestCaseListResponse, TestRunTriggerResult, TestRunCancelResult, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, SourceControlStatus, SourceControlPullResult, SourceControlPushResult, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams } from '../types/n8n-api';
 export interface N8nApiClientConfig {
     baseUrl: string;
     apiKey: string;
     timeout?: number;
     maxRetries?: number;
+    cfClientId?: string;
+    cfClientSecret?: string;
+}
+export interface WorkflowWriteOptions {
+    authoredGroups?: Set<string>;
+    onWarning?: (message: string) => void;
 }
 export declare class N8nApiClient {
     private client;
@@ -12,15 +18,26 @@ export declare class N8nApiClient {
     private versionInfo;
     private versionPromise;
     private pinnedAgentsPromise;
+    private cfClientId?;
+    private cfClientSecret?;
+    private groupSupport;
     constructor(config: N8nApiClientConfig);
     private getPinnedAgents;
     getVersion(): Promise<N8nVersionInfo | null>;
+    private cfAccessHeaders;
+    private cfAccessHeadersOrUndefined;
+    private isSameOrigin;
     private fetchVersionOnce;
     getCachedVersionInfo(): N8nVersionInfo | null;
+    refreshVersion(): Promise<N8nVersionInfo | null>;
     healthCheck(): Promise<HealthCheckResponse>;
-    createWorkflow(workflow: Partial<Workflow>): Promise<Workflow>;
+    private sendWorkflowWrite;
+    private degradeGroupsAfterRejection;
+    private putOrPatchWorkflow;
+    private repairGroupsForWrite;
+    createWorkflow(workflow: Partial<Workflow>, options?: WorkflowWriteOptions): Promise<Workflow>;
     getWorkflow(id: string): Promise<Workflow>;
-    updateWorkflow(id: string, workflow: Partial<Workflow>): Promise<Workflow>;
+    updateWorkflow(id: string, workflow: Partial<Workflow>, options?: WorkflowWriteOptions): Promise<Workflow>;
     deleteWorkflow(id: string): Promise<Workflow>;
     transferWorkflow(id: string, destinationProjectId: string): Promise<void>;
     activateWorkflow(id: string): Promise<Workflow>;
@@ -34,6 +51,11 @@ export declare class N8nApiClient {
     getExecution(id: string, includeData?: boolean): Promise<Execution>;
     listExecutions(params?: ExecutionListParams): Promise<ExecutionListResponse>;
     deleteExecution(id: string): Promise<void>;
+    listTestRuns(workflowId: string, params?: TestRunListParams): Promise<TestRunListResponse>;
+    getTestRun(workflowId: string, runId: string): Promise<TestRunSummary>;
+    listTestCases(workflowId: string, runId: string, params?: TestCaseListParams): Promise<TestCaseListResponse>;
+    triggerTestRun(workflowId: string): Promise<TestRunTriggerResult>;
+    cancelTestRun(workflowId: string, runId: string): Promise<TestRunCancelResult>;
     triggerWebhook(request: WebhookRequest): Promise<any>;
     listCredentials(params?: CredentialListParams): Promise<CredentialListResponse>;
     listAllCredentials(): Promise<Credential[]>;

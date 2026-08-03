@@ -97,7 +97,7 @@ class PropertyFilter {
                 };
             });
         }
-        if (prop.type === 'resourceLocator') {
+        if (prop.type === 'resourceLocator' || prop.type === 'agentSelector') {
             const modes = prop.modes?.map((m) => m.name || m) || ['list', 'id'];
             const defaultValue = prop.default?.value || 'your-resource-id';
             simplified.expectedFormat = {

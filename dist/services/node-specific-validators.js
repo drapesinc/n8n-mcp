@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeSpecificValidators = void 0;
 const MAX_CODE_LENGTH = 200000;
 const MAX_SHORT_INPUT_LENGTH = 2000;
+const MAX_PARAM_SCAN = 2000;
+const JS_PRIMITIVE_RETURN_RE = /return\s+(?:(?:true|false|null|undefined)\b|\d+|['"`])/m;
 class NodeSpecificValidators {
     static validateSlack(context) {
         const { config, errors, warnings, suggestions, autofix } = context;
@@ -214,9 +216,12 @@ class NodeSpecificValidators {
         errors.length = 0;
         errors.push(...filteredErrors);
     }
+    static hasColumnsMapping(config) {
+        return !!(config.columns && (config.columns.mappingMode || config.columns.value));
+    }
     static validateGoogleSheetsAppend(context) {
         const { config, errors, warnings, autofix } = context;
-        if (!config.range && !config.columns) {
+        if (!config.range && !this.hasColumnsMapping(config)) {
             errors.push({
                 type: 'missing_required',
                 property: 'range',
@@ -235,35 +240,28 @@ class NodeSpecificValidators {
         }
     }
     static validateGoogleSheetsRead(context) {
-        const { config, errors, suggestions } = context;
-        if (!config.range) {
-            errors.push({
-                type: 'missing_required',
-                property: 'range',
-                message: 'Range is required for read operation',
-                fix: 'Specify range like "Sheet1!A:B" or "Sheet1!A1:B10"'
-            });
-        }
+        const { config, suggestions } = context;
         if (!config.options?.dataStructure) {
             suggestions.push('Consider setting options.dataStructure to "object" for easier data manipulation');
         }
     }
     static validateGoogleSheetsUpdate(context) {
         const { config, errors } = context;
-        if (!config.range) {
+        const hasColumnsMapping = this.hasColumnsMapping(config);
+        if (!config.range && !hasColumnsMapping) {
             errors.push({
                 type: 'missing_required',
                 property: 'range',
-                message: 'Range is required for update operation',
-                fix: 'Specify the exact range to update like "Sheet1!A1:B10"'
+                message: 'Range or columns mapping is required for update operation',
+                fix: 'Specify range like "Sheet1!A1:B10" OR use columns with mappingMode (e.g. defineBelow)'
             });
         }
-        if (!config.values && !config.rawData) {
+        if (!config.values && !config.rawData && !hasColumnsMapping) {
             errors.push({
                 type: 'missing_required',
                 property: 'values',
-                message: 'Values are required for update operation',
-                fix: 'Provide the data to write to the spreadsheet'
+                message: 'Values or columns mapping is required for update operation',
+                fix: 'Provide data via values/rawData OR use columns.value with defineBelow mapping'
             });
         }
     }
@@ -403,7 +401,8 @@ class NodeSpecificValidators {
         }
         switch (operation) {
             case 'find':
-                if (config.query) {
+                if (config.query && typeof config.query === 'string'
+                    && !config.query.trim().startsWith('=') && !config.query.includes('{{')) {
                     try {
                         JSON.parse(config.query);
                     }
@@ -750,9 +749,13 @@ class NodeSpecificValidators {
     static validateSQLQuery(context, dbType = 'generic') {
         const { config, errors, warnings, suggestions } = context;
         const query = config.query || config.deleteQuery || config.updateQuery || '';
-        if (!query)
+        if (!query || typeof query !== 'string')
             return;
         const lowerQuery = query.toLowerCase();
+        const isExpression = query.trim().startsWith('=') || query.includes('{{');
+        const statementText = lowerQuery.replace(/^\s*=/, '');
+        const startsStatement = (keyword) => new RegExp(`(^|;)\\s*${keyword}\\b`).test(statementText);
+        const hasWhere = /\bwhere\b/.test(statementText);
         if (query.includes('${') || query.includes('{{')) {
             warnings.push({
                 type: 'security',
@@ -761,35 +764,55 @@ class NodeSpecificValidators {
             });
             suggestions.push('Example: Use "SELECT * FROM users WHERE id = $1" with queryParams: [userId]');
         }
-        if (lowerQuery.includes('delete') && !lowerQuery.includes('where')) {
-            errors.push({
-                type: 'invalid_value',
-                property: 'query',
-                message: 'DELETE query without WHERE clause will delete all records',
-                fix: 'Add a WHERE clause to specify which records to delete'
-            });
+        if (startsStatement('delete') && !hasWhere) {
+            if (isExpression) {
+                warnings.push({
+                    type: 'security',
+                    property: 'query',
+                    message: 'DELETE query without WHERE clause will delete all records',
+                    suggestion: 'The query contains an expression resolved at runtime - make sure the final SQL includes a WHERE clause'
+                });
+            }
+            else {
+                errors.push({
+                    type: 'invalid_value',
+                    property: 'query',
+                    message: 'DELETE query without WHERE clause will delete all records',
+                    fix: 'Add a WHERE clause to specify which records to delete'
+                });
+            }
         }
-        if (lowerQuery.includes('update') && !lowerQuery.includes('where')) {
+        if (startsStatement('update') && !hasWhere) {
             warnings.push({
                 type: 'security',
                 message: 'UPDATE query without WHERE clause will update all records',
                 suggestion: 'Add a WHERE clause to specify which records to update'
             });
         }
-        if (lowerQuery.includes('truncate')) {
+        if (startsStatement('truncate')) {
             warnings.push({
                 type: 'security',
                 message: 'TRUNCATE will remove all data from the table',
                 suggestion: 'Consider using DELETE with WHERE clause if you need to keep some data'
             });
         }
-        if (lowerQuery.includes('drop')) {
-            errors.push({
-                type: 'invalid_value',
-                property: 'query',
-                message: 'DROP operations are extremely dangerous and will permanently delete database objects',
-                fix: 'Use this only if you really intend to delete tables/databases permanently'
-            });
+        if (startsStatement('drop')) {
+            if (isExpression) {
+                warnings.push({
+                    type: 'security',
+                    property: 'query',
+                    message: 'DROP operations are extremely dangerous and will permanently delete database objects',
+                    suggestion: 'The query contains an expression resolved at runtime - make sure this DROP is intentional'
+                });
+            }
+            else {
+                errors.push({
+                    type: 'invalid_value',
+                    property: 'query',
+                    message: 'DROP operations are extremely dangerous and will permanently delete database objects',
+                    fix: 'Use this only if you really intend to delete tables/databases permanently'
+                });
+            }
         }
         if (lowerQuery.includes('select *')) {
             suggestions.push('Consider selecting specific columns instead of * for better performance');
@@ -927,7 +950,8 @@ class NodeSpecificValidators {
     }
     static validateCode(context) {
         const { config, errors, warnings, suggestions, autofix } = context;
-        const language = config.language || 'javaScript';
+        const rawLanguage = config.language || 'javaScript';
+        const language = rawLanguage === 'pythonNative' ? 'python' : rawLanguage;
         const codeField = language === 'python' ? 'pythonCode' : 'jsCode';
         const code = config[codeField] || '';
         if (!code || code.trim() === '') {
@@ -1051,7 +1075,10 @@ class NodeSpecificValidators {
         });
     }
     static validateReturnStatement(code, language, errors, warnings, suggestions, mode = 'runOnceForAllItems') {
-        const hasReturn = /return\s+/.test(code);
+        const returnScanCode = (language === 'javaScript' && code.length <= MAX_CODE_LENGTH)
+            ? this.stripNestedJavaScriptFunctionBodies(code)
+            : code;
+        const hasReturn = /return\s+/.test(returnScanCode);
         if (!hasReturn) {
             errors.push({
                 type: 'missing_required',
@@ -1065,17 +1092,7 @@ class NodeSpecificValidators {
         }
         if (language === 'javaScript') {
             const isRunOncePerItem = mode === 'runOnceForEachItem';
-            if (!isRunOncePerItem && /return\s+{(?!.*\[).*}\s*;?$/s.test(code) && !code.includes('json:')) {
-                errors.push({
-                    type: 'invalid_value',
-                    property: 'jsCode',
-                    message: 'Return value must be an array of objects',
-                    fix: 'Wrap in array: return [{json: yourObject}]'
-                });
-            }
-            const hasHelperFunctions = code.length <= MAX_CODE_LENGTH
-                && /(?:function\s+\w+\s*\(|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|\w+\s*=>))/.test(code);
-            if (!isRunOncePerItem && !hasHelperFunctions && /return\s+(true|false|null|undefined|\d+|['"`])/m.test(code)) {
+            if (!isRunOncePerItem && this.hasTopLevelPrimitiveReturn(code)) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'jsCode',
@@ -1116,21 +1133,274 @@ class NodeSpecificValidators {
             }
         }
     }
+    static hasTopLevelPrimitiveReturn(code) {
+        if (code.length > MAX_CODE_LENGTH) {
+            return JS_PRIMITIVE_RETURN_RE.test(code);
+        }
+        const topLevelCode = this.stripNestedJavaScriptFunctionBodies(code);
+        return JS_PRIMITIVE_RETURN_RE.test(topLevelCode);
+    }
+    static stripStringsCommentsRegex(code) {
+        return this.stripNestedJavaScriptFunctionBodies(code, false);
+    }
+    static stripNestedJavaScriptFunctionBodies(code, blankFunctionBodies = true) {
+        let result = '';
+        let braceDepth = 0;
+        const functionBodyDepths = [];
+        const templateInterpolationDepths = [];
+        let state = 'code';
+        let inRegexClass = false;
+        for (let i = 0; i < code.length; i++) {
+            const char = code[i];
+            const next = code[i + 1];
+            const inFunctionBody = functionBodyDepths.length > 0;
+            if (state === 'lineComment') {
+                result += char === '\n' ? '\n' : ' ';
+                if (char === '\n')
+                    state = 'code';
+                continue;
+            }
+            if (state === 'blockComment') {
+                result += char === '\n' ? '\n' : ' ';
+                if (char === '*' && next === '/') {
+                    result += ' ';
+                    i++;
+                    state = 'code';
+                }
+                continue;
+            }
+            if (state === 'single' || state === 'double' || state === 'template') {
+                if (state === 'template' && char === '$' && next === '{') {
+                    result += '  ';
+                    i++;
+                    braceDepth++;
+                    templateInterpolationDepths.push(braceDepth);
+                    state = 'code';
+                    continue;
+                }
+                result += char === '\n' ? '\n' : ' ';
+                if (char === '\\') {
+                    if (next) {
+                        result += next === '\n' ? '\n' : ' ';
+                        i++;
+                    }
+                    continue;
+                }
+                if ((state === 'single' && char === "'") ||
+                    (state === 'double' && char === '"') ||
+                    (state === 'template' && char === '`')) {
+                    state = 'code';
+                }
+                continue;
+            }
+            if (state === 'regex') {
+                if (char === '\n') {
+                    state = 'code';
+                    result += '\n';
+                    continue;
+                }
+                result += ' ';
+                if (char === '\\') {
+                    if (next !== undefined) {
+                        result += ' ';
+                        i++;
+                    }
+                    continue;
+                }
+                if (char === '[')
+                    inRegexClass = true;
+                else if (char === ']')
+                    inRegexClass = false;
+                else if (char === '/' && !inRegexClass)
+                    state = 'code';
+                continue;
+            }
+            if (char === '/' && next === '/') {
+                result += '  ';
+                i++;
+                state = 'lineComment';
+                continue;
+            }
+            if (char === '/' && next === '*') {
+                result += '  ';
+                i++;
+                state = 'blockComment';
+                continue;
+            }
+            if (char === '/' && this.regexLiteralStartsHere(code, i)) {
+                result += ' ';
+                inRegexClass = false;
+                state = 'regex';
+                continue;
+            }
+            if (char === "'") {
+                result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+                state = 'single';
+                continue;
+            }
+            if (char === '"') {
+                result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+                state = 'double';
+                continue;
+            }
+            if (char === '`') {
+                result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+                state = 'template';
+                continue;
+            }
+            if (char === '{') {
+                if (this.startsJavaScriptFunctionBody(code, i)) {
+                    functionBodyDepths.push(braceDepth + 1);
+                }
+                braceDepth++;
+                result += (blankFunctionBodies && functionBodyDepths.length > 0) ? ' ' : char;
+                continue;
+            }
+            if (char === '}') {
+                if (templateInterpolationDepths[templateInterpolationDepths.length - 1] === braceDepth) {
+                    templateInterpolationDepths.pop();
+                    braceDepth = Math.max(0, braceDepth - 1);
+                    result += ' ';
+                    state = 'template';
+                    continue;
+                }
+                result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+                if (functionBodyDepths[functionBodyDepths.length - 1] === braceDepth) {
+                    functionBodyDepths.pop();
+                }
+                braceDepth = Math.max(0, braceDepth - 1);
+                continue;
+            }
+            result += (blankFunctionBodies && inFunctionBody) ? (char === '\n' ? '\n' : ' ') : char;
+        }
+        return result;
+    }
+    static stripPythonStringsAndComments(code) {
+        let result = '';
+        let i = 0;
+        while (i < code.length) {
+            const char = code[i];
+            if (char === '#') {
+                while (i < code.length && code[i] !== '\n') {
+                    result += ' ';
+                    i++;
+                }
+                continue;
+            }
+            if (char === "'" || char === '"') {
+                const triple = code.slice(i, i + 3) === char.repeat(3);
+                const delim = triple ? char.repeat(3) : char;
+                result += ' '.repeat(delim.length);
+                i += delim.length;
+                while (i < code.length) {
+                    if (code[i] === '\\') {
+                        result += code[i + 1] === '\n' ? ' \n' : '  ';
+                        i += 2;
+                        continue;
+                    }
+                    if (code.slice(i, i + delim.length) === delim) {
+                        result += ' '.repeat(delim.length);
+                        i += delim.length;
+                        break;
+                    }
+                    if (code[i] === '\n' && !triple) {
+                        result += '\n';
+                        i++;
+                        break;
+                    }
+                    result += code[i] === '\n' ? '\n' : ' ';
+                    i++;
+                }
+                continue;
+            }
+            result += char;
+            i++;
+        }
+        return result;
+    }
+    static startsJavaScriptFunctionBody(code, openBraceIndex) {
+        const prefix = code.slice(Math.max(0, openBraceIndex - 500), openBraceIndex);
+        if (/=>\s*$/.test(prefix))
+            return true;
+        let i = openBraceIndex - 1;
+        while (i >= 0) {
+            if (/\s/.test(code[i])) {
+                i--;
+                continue;
+            }
+            if (code[i] === '/' && i > 0 && code[i - 1] === '*') {
+                i -= 2;
+                while (i >= 1 && !(code[i - 1] === '/' && code[i] === '*'))
+                    i--;
+                i -= 2;
+                continue;
+            }
+            break;
+        }
+        if (i < 0 || code[i] !== ')')
+            return false;
+        const scanFloor = Math.max(0, i - MAX_PARAM_SCAN);
+        let depth = 0;
+        let j = i;
+        for (; j >= scanFloor; j--) {
+            const c = code[j];
+            if (c === ')')
+                depth++;
+            else if (c === '(') {
+                depth--;
+                if (depth === 0)
+                    break;
+            }
+        }
+        if (depth !== 0)
+            return false;
+        const head = code.slice(Math.max(0, j - 60), j);
+        if (/(?:^|[^\w$])(?:async\s+)?function\s*\*?(?:\s+[\w$]+)?\s*$/.test(head))
+            return true;
+        const methodHead = /(?:^|[^\w$.])(?:(?:async|get|set)\s+)?\*?\s*([\w$]+)\s*$/.exec(head);
+        if (methodHead && !this.NON_FUNCTION_HEADS.has(methodHead[1]))
+            return true;
+        return false;
+    }
+    static regexLiteralStartsHere(code, slashIndex) {
+        let j = slashIndex - 1;
+        while (j >= 0 && /\s/.test(code[j]))
+            j--;
+        if (j < 0)
+            return true;
+        const c = code[j];
+        if (/[\w$)\].'"`]/.test(c)) {
+            if (/[\w$]/.test(c)) {
+                let k = j;
+                while (k >= 0 && /[\w$]/.test(code[k]))
+                    k--;
+                const word = code.slice(k + 1, j + 1);
+                return this.REGEX_PRECEDING_KEYWORDS.has(word);
+            }
+            return false;
+        }
+        return true;
+    }
     static validateN8nVariables(code, language, warnings, suggestions, errors) {
+        const scanView = code.length <= MAX_CODE_LENGTH
+            ? (language === 'javaScript'
+                ? this.stripStringsCommentsRegex(code)
+                : this.stripPythonStringsAndComments(code))
+            : code;
         const inputPatterns = language === 'javaScript'
-            ? ['items', '$input', '$json', '$node', '$prevNode']
+            ? ['items', '$input', '$json', '$node', '$prevNode', '$(', '$getWorkflowStaticData', '$workflow', '$execution', '$vars']
             : ['items', '_input'];
-        const usesInput = inputPatterns.some(pattern => code.includes(pattern));
+        const usesInput = inputPatterns.some(pattern => scanView.includes(pattern));
         if (!usesInput && code.length > 50) {
             warnings.push({
-                type: 'missing_common',
+                type: 'best_practice',
                 message: 'Code doesn\'t reference input data',
                 suggestion: language === 'javaScript'
                     ? 'Access input with: items, $input.all(), or $json (single-item mode)'
                     : 'Access input with: items variable'
             });
         }
-        if (code.includes('{{') && code.includes('}}')) {
+        if (scanView.includes('{{') && scanView.includes('}}')) {
             errors.push({
                 type: 'invalid_value',
                 property: language === 'python' ? 'pythonCode' : 'jsCode',
@@ -1158,14 +1428,14 @@ class NodeSpecificValidators {
             }
         });
         if (language === 'javaScript') {
-            if (/\$(?![a-zA-Z_(])/.test(code) && !code.includes('${')) {
+            if (/\$(?![a-zA-Z_(])/.test(scanView) && !scanView.includes('${')) {
                 warnings.push({
                     type: 'best_practice',
                     message: 'Invalid $ usage detected',
                     suggestion: 'n8n variables start with $: $json, $input, $node, $workflow, $execution'
                 });
             }
-            if (code.includes('helpers.') && !code.includes('$helpers')) {
+            if (/(?<![.\w$])helpers\s*\./.test(scanView)) {
                 warnings.push({
                     type: 'invalid_value',
                     property: 'jsCode',
@@ -1239,15 +1509,20 @@ class NodeSpecificValidators {
         }
     }
     static validateCodeSecurity(code, language, warnings) {
+        const securityView = language === 'javaScript'
+            ? this.stripStringsCommentsRegex(code)
+            : this.stripPythonStringsAndComments(code);
         const dangerousPatterns = [
-            { pattern: /eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
-            { pattern: /Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
-            { pattern: language === 'python' ? /exec\s*\(/ : /exec\s*\(/, message: 'Avoid exec() - it\'s a security risk' },
+            { pattern: /(?<![.\w$])eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
+            { pattern: /(?<![.\w$])Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
+            { pattern: /(?:window|globalThis)\s*\.\s*eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
+            { pattern: /(?:window|globalThis)\s*\.\s*Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
+            { pattern: /(?<![.\w$])exec\s*\(/, message: 'Avoid exec() - it\'s a security risk' },
             { pattern: /process\.env/, message: 'Limited environment access in Code nodes' },
             { pattern: /import\s+\*/, message: 'Avoid import * - be specific about imports' }
         ];
         dangerousPatterns.forEach(({ pattern, message }) => {
-            if (pattern.test(code)) {
+            if (pattern.test(securityView)) {
                 warnings.push({
                     type: 'security',
                     message,
@@ -1285,7 +1560,13 @@ class NodeSpecificValidators {
                 suggestion: 'Add: const crypto = require("crypto"); at the beginning (ignore editor warnings)'
             });
         }
-        if (/\b(fs|path|child_process)\b/.test(code)) {
+        const fsModuleUsagePatterns = [
+            /require\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
+            /\bimport\b[^;\n]*\bfrom\s*['"](?:node:)?(?:fs|path|child_process)['"]/,
+            /\bimport\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
+            /(?<![.\w$])(?:fs|child_process)\s*\.\s*\w/
+        ];
+        if (fsModuleUsagePatterns.some(pattern => pattern.test(code))) {
             warnings.push({
                 type: 'security',
                 message: 'File system and process access not available in Code nodes',
@@ -1295,7 +1576,10 @@ class NodeSpecificValidators {
     }
     static validateSet(context) {
         const { config, errors, warnings } = context;
-        if (config.jsonOutput !== undefined && config.jsonOutput !== null && config.jsonOutput !== '') {
+        const jsonOutputIsExpression = typeof config.jsonOutput === 'string'
+            && (config.jsonOutput.trim().startsWith('=') || config.jsonOutput.includes('{{'));
+        if (config.jsonOutput !== undefined && config.jsonOutput !== null && config.jsonOutput !== ''
+            && !jsonOutputIsExpression) {
             try {
                 const parsed = JSON.parse(config.jsonOutput);
                 if (Array.isArray(parsed)) {
@@ -1341,4 +1625,11 @@ class NodeSpecificValidators {
     }
 }
 exports.NodeSpecificValidators = NodeSpecificValidators;
+NodeSpecificValidators.NON_FUNCTION_HEADS = new Set([
+    'if', 'for', 'while', 'switch', 'catch', 'with', 'await',
+]);
+NodeSpecificValidators.REGEX_PRECEDING_KEYWORDS = new Set([
+    'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
+    'do', 'else', 'yield', 'await', 'case', 'throw',
+]);
 //# sourceMappingURL=node-specific-validators.js.map

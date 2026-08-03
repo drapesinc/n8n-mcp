@@ -1,9 +1,7 @@
 import { InstanceContext } from '../types/instance-context';
-import { GenerateWorkflowHandler } from '../types/generate-workflow';
 import type { AdditionalTool } from '../types/additional-tools';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 interface MCPServerOptions {
-    generateWorkflowHandler?: GenerateWorkflowHandler;
     additionalTools?: AdditionalTool[];
 }
 export declare class N8NDocumentationMCPServer {
@@ -19,10 +17,11 @@ export declare class N8NDocumentationMCPServer {
     private previousToolTimestamp;
     private earlyLogger;
     private disabledToolsCache;
+    private disabledToolOperationsCache;
+    private filteredToolDefinitionsCache;
     private useSharedDatabase;
     private sharedDbState;
     private isShutdown;
-    private generateWorkflowHandler?;
     private additionalToolsByName;
     constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions);
     private registerAdditionalTools;
@@ -36,6 +35,8 @@ export declare class N8NDocumentationMCPServer {
     private dbHealthChecked;
     private validateDatabaseHealth;
     private getDisabledTools;
+    private getDisabledToolOperations;
+    private buildFilteredToolDefinitions;
     private setupHandlers;
     private sanitizeValidationResult;
     private validateToolParams;
@@ -76,11 +77,9 @@ export declare class N8NDocumentationMCPServer {
     private listTasks;
     private validateNodeConfig;
     private getPropertyDependencies;
-    private getNodeAsToolInfo;
     private getOutputDescriptions;
     private getCommonAIToolUseCases;
     private buildToolVariantGuidance;
-    private getAIToolExamples;
     private validateNodeMinimal;
     private getToolsDocumentation;
     connect(transport: any): Promise<void>;

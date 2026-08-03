@@ -4,6 +4,7 @@ exports.WorkflowDiffEngine = void 0;
 const uuid_1 = require("uuid");
 const workflow_diff_1 = require("../types/workflow-diff");
 const logger_1 = require("../utils/logger");
+const node_groups_1 = require("./node-groups");
 const node_sanitizer_1 = require("./node-sanitizer");
 const node_type_utils_1 = require("../utils/node-type-utils");
 const logger = new logger_1.Logger({ prefix: '[WorkflowDiffEngine]' });
@@ -30,6 +31,50 @@ function isUnsafeRegex(pattern) {
         }
     }
     return false;
+}
+function parsePropertyPath(path) {
+    const segments = [];
+    for (const part of path.split('.')) {
+        if (!part.includes('[') && !part.includes(']')) {
+            if (part === '') {
+                throw new Error(`Invalid property path "${path}": empty path segment. ` +
+                    `Write "parameters.url" without leading, trailing or repeated dots.`);
+            }
+            segments.push({ key: part, bracket: false });
+            continue;
+        }
+        const match = /^([^[\]]*)((?:\[\d+\])+)$/.exec(part);
+        if (!match) {
+            throw new Error(`Invalid property path "${path}": malformed bracket index in "${part}". ` +
+                `Use "items[0].name" with a non-negative integer, or the equivalent "items.0.name".`);
+        }
+        const [, base, indices] = match;
+        if (base)
+            segments.push({ key: base, bracket: false });
+        for (const [, index] of indices.matchAll(/\[(\d+)\]/g)) {
+            segments.push({ key: index, bracket: true });
+        }
+    }
+    return segments;
+}
+function resolveSegment(container, segment, path, forWrite) {
+    if (Array.isArray(container)) {
+        if (/^\d+$/.test(segment.key)) {
+            const index = Number(segment.key);
+            if (index >= container.length) {
+                throw new Error(`Invalid property path "${path}": index ${index} is out of range for an array of ${container.length} item(s).`);
+            }
+            return index;
+        }
+        if (forWrite) {
+            throw new Error(`Invalid property path "${path}": "${segment.key}" is not an array index. ` +
+                `Address array elements by position, e.g. "items[0].name".`);
+        }
+    }
+    if (segment.bracket) {
+        throw new Error(`Invalid property path "${path}": "[${segment.key}]" expects an array but found ${container === null ? 'null' : typeof container}.`);
+    }
+    return segment.key;
 }
 function countOccurrences(str, search) {
     let count = 0;
@@ -82,6 +127,7 @@ class WorkflowDiffEngine {
         this.removedNodeNames = new Set();
         this.tagsToAdd = [];
         this.tagsToRemove = [];
+        this.authoredGroupNames = new Set();
     }
     async applyDiff(workflow, request) {
         try {
@@ -92,6 +138,7 @@ class WorkflowDiffEngine {
             this.tagsToAdd = [];
             this.tagsToRemove = [];
             this.transferToProjectId = undefined;
+            this.authoredGroupNames.clear();
             const workflowCopy = JSON.parse(JSON.stringify(workflow));
             const operationEntries = buildExecutionEntries(request.operations);
             const nodeOperationCount = request.operations.filter(workflow_diff_1.isNodeOperation).length;
@@ -126,6 +173,7 @@ class WorkflowDiffEngine {
                         failedIndices.push(index);
                     }
                 }
+                this.finalizeNodeGroups(workflowCopy);
                 if (request.validateOnly) {
                     return {
                         success: errors.length === 0,
@@ -136,7 +184,8 @@ class WorkflowDiffEngine {
                         errors: errors.length > 0 ? errors : undefined,
                         warnings: this.warnings.length > 0 ? this.warnings : undefined,
                         applied: appliedIndices,
-                        failed: failedIndices
+                        failed: failedIndices,
+                        authoredGroupNames: this.authoredGroupNamesOrUndefined()
                     };
                 }
                 const shouldActivate = workflowCopy._shouldActivate === true;
@@ -157,7 +206,8 @@ class WorkflowDiffEngine {
                     shouldDeactivate: shouldDeactivate || undefined,
                     tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
                     tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
-                    transferToProjectId: this.transferToProjectId || undefined
+                    transferToProjectId: this.transferToProjectId || undefined,
+                    authoredGroupNames: this.authoredGroupNamesOrUndefined()
                 };
             }
             else {
@@ -197,11 +247,14 @@ class WorkflowDiffEngine {
                     });
                     logger.debug(`Sanitized ${this.modifiedNodeIds.size} modified nodes`);
                 }
+                this.finalizeNodeGroups(workflowCopy);
                 if (request.validateOnly) {
                     return {
                         success: true,
                         workflow: workflowCopy,
-                        message: 'Validation successful. Operations are valid but not applied.'
+                        message: 'Validation successful. Operations are valid but not applied.',
+                        warnings: this.warnings.length > 0 ? this.warnings : undefined,
+                        authoredGroupNames: this.authoredGroupNamesOrUndefined()
                     };
                 }
                 const operationsApplied = request.operations.length;
@@ -219,7 +272,8 @@ class WorkflowDiffEngine {
                     shouldDeactivate: shouldDeactivate || undefined,
                     tagsToAdd: this.tagsToAdd.length > 0 ? this.tagsToAdd : undefined,
                     tagsToRemove: this.tagsToRemove.length > 0 ? this.tagsToRemove : undefined,
-                    transferToProjectId: this.transferToProjectId || undefined
+                    transferToProjectId: this.transferToProjectId || undefined,
+                    authoredGroupNames: this.authoredGroupNamesOrUndefined()
                 };
             }
         }
@@ -260,6 +314,8 @@ class WorkflowDiffEngine {
             case 'addTag':
             case 'removeTag':
                 return null;
+            case 'setNodeGroups':
+                return this.validateSetNodeGroups(workflow, operation);
             case 'transferWorkflow':
                 return this.validateTransferWorkflow(workflow, operation);
             case 'activateWorkflow':
@@ -311,6 +367,9 @@ class WorkflowDiffEngine {
                 break;
             case 'updateName':
                 this.applyUpdateName(workflow, operation);
+                break;
+            case 'setNodeGroups':
+                this.applySetNodeGroups(workflow, operation);
                 break;
             case 'addTag':
                 this.applyAddTag(workflow, operation);
@@ -375,6 +434,9 @@ class WorkflowDiffEngine {
         if (!node) {
             return this.formatNodeNotFoundError(workflow, operation.nodeId || operation.nodeName || '', 'updateNode');
         }
+        if ('id' in operation.updates && operation.updates.id !== node.id) {
+            return `Cannot change the id of node "${node.name}": node IDs are immutable because canvas groups and pinned data reference them. Remove and re-add the node instead.`;
+        }
         if (operation.updates.name && operation.updates.name !== node.name) {
             const normalizedNewName = this.normalizeNodeName(operation.updates.name);
             const normalizedCurrentName = this.normalizeNodeName(node.name);
@@ -386,6 +448,12 @@ class WorkflowDiffEngine {
             }
         }
         for (const [path, value] of Object.entries(operation.updates)) {
+            try {
+                parsePropertyPath(path);
+            }
+            catch (error) {
+                return error instanceof Error ? error.message : `Invalid property path "${path}"`;
+            }
             if (value !== null && typeof value === 'object' && !Array.isArray(value)
                 && '__patch_find_replace' in value) {
                 const patches = value.__patch_find_replace;
@@ -416,9 +484,21 @@ class WorkflowDiffEngine {
         if (!operation.fieldPath || typeof operation.fieldPath !== 'string') {
             return `patchNodeField requires a "fieldPath" string (e.g., "parameters.jsCode")`;
         }
-        const pathSegments = operation.fieldPath.split('.');
-        if (pathSegments.some(k => DANGEROUS_PATH_KEYS.has(k))) {
+        let pathSegments;
+        try {
+            pathSegments = parsePropertyPath(operation.fieldPath);
+        }
+        catch (error) {
+            const reason = error instanceof Error
+                ? error.message
+                : `invalid fieldPath "${operation.fieldPath}"`;
+            return `patchNodeField: ${reason}`;
+        }
+        if (pathSegments.some(s => DANGEROUS_PATH_KEYS.has(s.key))) {
             return `patchNodeField: fieldPath "${operation.fieldPath}" contains a forbidden key (__proto__, constructor, or prototype)`;
+        }
+        if (pathSegments[0].key === 'id') {
+            return `Cannot patch the id of a node: node IDs are immutable because canvas groups and pinned data reference them. Remove and re-add the node instead.`;
         }
         if (!Array.isArray(operation.patches) || operation.patches.length === 0) {
             return `patchNodeField requires a non-empty "patches" array of {find, replace} objects`;
@@ -664,11 +744,12 @@ class WorkflowDiffEngine {
         const pendingRename = operation.updates.name && operation.updates.name !== node.name
             ? { oldName: node.name, newName: operation.updates.name }
             : undefined;
-        Object.entries(operation.updates).forEach(([path, value]) => {
+        const draft = JSON.parse(JSON.stringify(node));
+        this.orderUpdateEntries(operation.updates).forEach(([path, value]) => {
             if (value !== null && typeof value === 'object' && !Array.isArray(value)
                 && '__patch_find_replace' in value) {
                 const patches = value.__patch_find_replace;
-                let current = this.getNestedProperty(node, path);
+                let current = this.getNestedProperty(draft, path);
                 for (const patch of patches) {
                     if (!current.includes(patch.find)) {
                         this.warnings.push({
@@ -679,18 +760,49 @@ class WorkflowDiffEngine {
                     }
                     current = current.replace(patch.find, patch.replace);
                 }
-                this.setNestedProperty(node, path, current);
+                this.setNestedProperty(draft, path, current);
             }
             else {
-                this.setNestedProperty(node, path, value);
+                this.setNestedProperty(draft, path, value);
             }
         });
-        const sanitized = (0, node_sanitizer_1.sanitizeNode)(node);
+        const sanitized = (0, node_sanitizer_1.sanitizeNode)(draft);
+        for (const key of Object.keys(node)) {
+            if (!Object.prototype.hasOwnProperty.call(sanitized, key)) {
+                delete node[key];
+            }
+        }
         Object.assign(node, sanitized);
         if (pendingRename && node.name === pendingRename.newName) {
             this.renameMap.set(pendingRename.oldName, pendingRename.newName);
             logger.debug(`Tracking rename: "${pendingRename.oldName}" → "${pendingRename.newName}"`);
         }
+    }
+    orderUpdateEntries(updates) {
+        const entries = Object.entries(updates);
+        const removalsByParent = new Map();
+        entries.forEach(([path, value], position) => {
+            if (value !== null && value !== undefined)
+                return;
+            const segments = parsePropertyPath(path);
+            const lastSegment = segments[segments.length - 1];
+            if (!/^\d+$/.test(lastSegment.key))
+                return;
+            const parent = segments.slice(0, -1).map(s => s.key).join('.');
+            const removals = removalsByParent.get(parent) ?? [];
+            removals.push({ position, index: Number(lastSegment.key) });
+            removalsByParent.set(parent, removals);
+        });
+        const ordered = [...entries];
+        for (const removals of removalsByParent.values()) {
+            if (removals.length < 2)
+                continue;
+            const descending = [...removals].sort((a, b) => b.index - a.index);
+            removals.forEach(({ position }, i) => {
+                ordered[position] = entries[descending[i].position];
+            });
+        }
+        return ordered;
     }
     applyPatchNodeField(workflow, operation) {
         const node = this.findNode(workflow, operation.nodeId, operation.nodeName);
@@ -904,6 +1016,113 @@ class WorkflowDiffEngine {
     applyUpdateName(workflow, operation) {
         workflow.name = operation.name;
     }
+    validateSetNodeGroups(workflow, operation) {
+        const groups = operation.nodeGroups;
+        if (!Array.isArray(groups)) {
+            return `setNodeGroups requires a "nodeGroups" array. Pass every group you want to keep, or [] to ungroup everything. Example: {type: "setNodeGroups", nodeGroups: [{name: "Enrich lead", nodeNames: ["Fetch company", "Score lead"]}]}`;
+        }
+        const seenNames = new Set();
+        const claimedNodes = new Map();
+        for (const group of groups) {
+            if (!group || typeof group !== 'object') {
+                return `setNodeGroups: every entry must be an object like {name: "Enrich lead", nodeNames: ["Fetch company", "Score lead"]}`;
+            }
+            const name = typeof group.name === 'string' ? group.name.trim() : '';
+            if (!name) {
+                return `setNodeGroups: every group needs a non-empty "name"`;
+            }
+            if (seenNames.has(name)) {
+                return `setNodeGroups: duplicate group name "${name}". n8n requires group names to be unique.`;
+            }
+            seenNames.add(name);
+            if (group.id !== undefined && (typeof group.id !== 'string' || !group.id.trim())) {
+                return `setNodeGroups: group "${name}" has a non-string "id". Omit it to have one generated.`;
+            }
+            if (group.description !== undefined) {
+                if (typeof group.description !== 'string') {
+                    return `setNodeGroups: group "${name}" has a non-string "description"`;
+                }
+                if (group.description.trim().length > node_groups_1.GROUP_DESCRIPTION_MAX_LENGTH) {
+                    return `setNodeGroups: group "${name}" has a description of ${group.description.trim().length} characters; n8n allows at most ${node_groups_1.GROUP_DESCRIPTION_MAX_LENGTH}.`;
+                }
+            }
+            const hasNames = Array.isArray(group.nodeNames) && group.nodeNames.length > 0;
+            const hasIds = Array.isArray(group.nodeIds) && group.nodeIds.length > 0;
+            if (hasNames === hasIds) {
+                return hasNames
+                    ? `setNodeGroups: group "${name}" sets both "nodeNames" and "nodeIds" — use one or the other`
+                    : `setNodeGroups: group "${name}" needs members in "nodeNames" (or "nodeIds")`;
+            }
+            const members = hasIds ? group.nodeIds : group.nodeNames;
+            const badIndex = members.findIndex(member => typeof member !== 'string' || !member.trim());
+            if (badIndex !== -1) {
+                return `setNodeGroups: group "${name}" has a member that is not a node ${hasIds ? 'ID' : 'name'} (${JSON.stringify(members[badIndex])})`;
+            }
+            const resolvedMembers = this.resolveGroupMembers(workflow, group);
+            if (typeof resolvedMembers === 'string')
+                return resolvedMembers;
+            for (const node of resolvedMembers) {
+                const owner = claimedNodes.get(node.id);
+                if (owner && owner !== name) {
+                    return `setNodeGroups: node "${node.name}" is in both "${owner}" and "${name}" — a node can only belong to one group`;
+                }
+                claimedNodes.set(node.id, name);
+            }
+        }
+        return null;
+    }
+    resolveGroupMembers(workflow, group) {
+        const label = group.name?.trim() || group.id || 'unnamed group';
+        const resolved = [];
+        if (Array.isArray(group.nodeIds) && group.nodeIds.length > 0) {
+            for (const nodeId of group.nodeIds) {
+                const node = workflow.nodes.find(n => n.id === nodeId);
+                if (!node) {
+                    return `setNodeGroups: group "${label}" references node ID "${nodeId}", which is not in the workflow. ${this.formatNodeNotFoundError(workflow, nodeId, 'setNodeGroups')}`;
+                }
+                resolved.push(node);
+            }
+            return resolved;
+        }
+        for (const nodeName of group.nodeNames ?? []) {
+            const normalized = this.normalizeNodeName(nodeName);
+            const node = workflow.nodes.find(n => this.normalizeNodeName(n.name) === normalized);
+            if (!node) {
+                return `setNodeGroups: group "${label}" references node "${nodeName}", which is not in the workflow. ${this.formatNodeNotFoundError(workflow, nodeName, 'setNodeGroups')}`;
+            }
+            resolved.push(node);
+        }
+        return resolved;
+    }
+    applySetNodeGroups(workflow, operation) {
+        const groups = [];
+        for (const group of operation.nodeGroups) {
+            const members = this.resolveGroupMembers(workflow, group);
+            if (typeof members === 'string')
+                throw new Error(members);
+            const resolved = (0, node_groups_1.toWorkflowNodeGroup)({
+                id: group.id,
+                name: group.name,
+                nodeIds: [...new Set(members.map(node => node.id))],
+                description: group.description
+            });
+            groups.push(resolved);
+            this.authoredGroupNames.add(resolved.name);
+        }
+        workflow.nodeGroups = groups;
+    }
+    authoredGroupNamesOrUndefined() {
+        return this.authoredGroupNames.size > 0 ? [...this.authoredGroupNames] : undefined;
+    }
+    finalizeNodeGroups(workflow) {
+        if (!Array.isArray(workflow.nodeGroups) || workflow.nodeGroups.length === 0)
+            return;
+        const { nodeGroups, issues } = (0, node_groups_1.repairNodeGroups)(workflow);
+        workflow.nodeGroups = nodeGroups;
+        for (const issue of issues) {
+            this.warnings.push({ operation: -1, message: issue.message });
+        }
+    }
     applyAddTag(workflow, operation) {
         const removeIdx = this.tagsToRemove.indexOf(operation.tag);
         if (removeIdx !== -1) {
@@ -1108,43 +1327,53 @@ class WorkflowDiffEngine {
         return `Node not found for ${operationType}: "${nodeIdentifier}". Available nodes: ${availableNodes}. Tip: Use node ID for names with special characters (apostrophes, quotes).`;
     }
     getNestedProperty(obj, path) {
-        const keys = path.split('.');
         let current = obj;
-        for (const key of keys) {
-            if (DANGEROUS_PATH_KEYS.has(key))
-                return undefined;
-            if (current == null || typeof current !== 'object')
-                return undefined;
-            current = current[key];
+        try {
+            for (const segment of parsePropertyPath(path)) {
+                if (DANGEROUS_PATH_KEYS.has(segment.key))
+                    return undefined;
+                if (current == null || typeof current !== 'object')
+                    return undefined;
+                const key = resolveSegment(current, segment, path, false);
+                current = current[key];
+            }
+        }
+        catch {
+            return undefined;
         }
         return current;
     }
     setNestedProperty(obj, path, value) {
-        const keys = path.split('.');
+        const segments = parsePropertyPath(path);
         let current = obj;
-        if (keys.some(k => DANGEROUS_PATH_KEYS.has(k))) {
+        if (segments.some(s => DANGEROUS_PATH_KEYS.has(s.key))) {
             throw new Error(`Invalid property path: "${path}" contains a forbidden key`);
         }
-        for (let i = 0; i < keys.length - 1; i++) {
-            const key = keys[i];
-            if (DANGEROUS_PATH_KEYS.has(key)) {
+        for (let i = 0; i < segments.length - 1; i++) {
+            const key = resolveSegment(current, segments[i], path, true);
+            if (typeof key === 'string' && DANGEROUS_PATH_KEYS.has(key)) {
                 throw new Error(`Invalid property path: "${path}" contains a forbidden key`);
             }
             if (!Object.prototype.hasOwnProperty.call(current, key)
                 || typeof current[key] !== 'object'
                 || current[key] === null) {
-                if (value === null)
+                if (value === null || value === undefined)
                     return;
                 current[key] = {};
             }
             current = current[key];
         }
-        const finalKey = keys[keys.length - 1];
-        if (DANGEROUS_PATH_KEYS.has(finalKey)) {
+        const finalKey = resolveSegment(current, segments[segments.length - 1], path, true);
+        if (typeof finalKey === 'string' && DANGEROUS_PATH_KEYS.has(finalKey)) {
             throw new Error(`Invalid property path: "${path}" contains a forbidden key`);
         }
-        if (value === null) {
-            delete current[finalKey];
+        if (value === null || value === undefined) {
+            if (typeof finalKey === 'number') {
+                current.splice(finalKey, 1);
+            }
+            else {
+                delete current[finalKey];
+            }
         }
         else {
             current[finalKey] = value;

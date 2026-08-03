@@ -10,6 +10,6 @@ function isConnectionOperation(op) {
     return ['addConnection', 'removeConnection', 'rewireConnection', 'cleanStaleConnections', 'replaceConnections'].includes(op.type);
 }
 function isMetadataOperation(op) {
-    return ['updateSettings', 'updateName', 'addTag', 'removeTag'].includes(op.type);
+    return ['updateSettings', 'updateName', 'setNodeGroups', 'addTag', 'removeTag'].includes(op.type);
 }
 //# sourceMappingURL=workflow-diff.js.map

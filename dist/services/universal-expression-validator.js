@@ -83,16 +83,14 @@ class UniversalExpressionValidator {
                 explanation: 'No expression to validate'
             };
         }
-        const openCount = (value.match(/\{\{/g) || []).length;
-        const closeCount = (value.match(/\}\}/g) || []).length;
-        if (openCount !== closeCount) {
+        if (value.startsWith(this.EXPRESSION_PREFIX) && (0, expression_utils_1.hasDanglingOpenBracket)(value)) {
             return {
                 isValid: false,
                 hasExpression: true,
                 needsPrefix: false,
                 isMixedContent: false,
                 confidence: 1.0,
-                explanation: `Unmatched expression brackets: ${openCount} opening, ${closeCount} closing`
+                explanation: "Unmatched expression brackets: found '{{' without a closing '}}'"
             };
         }
         const expressions = (0, expression_utils_1.extractBracketExpressions)(value);
@@ -133,9 +131,6 @@ class UniversalExpressionValidator {
         const warnings = [];
         for (const expr of expressions) {
             const content = expr.slice(2, -2).trim();
-            if (content.includes('${') && content.includes('}')) {
-                warnings.push(`Template literal syntax \${} found - use n8n syntax instead: ${expr}`);
-            }
             if (content.startsWith('=')) {
                 warnings.push(`Double prefix detected in expression: ${expr}`);
             }

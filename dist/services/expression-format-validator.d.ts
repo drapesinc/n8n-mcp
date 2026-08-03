@@ -1,3 +1,4 @@
+import type { ValidationProfile } from './enhanced-config-validator';
 export interface ExpressionFormatIssue {
     fieldPath: string;
     currentValue: any;
@@ -29,7 +30,7 @@ export declare class ExpressionFormatValidator {
     private static readonly MODES_USING_CACHED_NAME;
     private static checkCachedResultName;
     static validateAndFix(value: any, fieldPath: string, context: ValidationContext): ExpressionFormatIssue | null;
-    static validateNodeParameters(parameters: any, context: ValidationContext): ExpressionFormatIssue[];
+    static validateNodeParameters(parameters: any, context: ValidationContext, profile?: ValidationProfile): ExpressionFormatIssue[];
     private static validateRecursive;
     static formatErrorMessage(issue: ExpressionFormatIssue, context: ValidationContext): string;
 }

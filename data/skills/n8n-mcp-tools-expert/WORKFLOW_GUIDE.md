@@ -83,7 +83,7 @@ n8n_create_workflow({
 
 **Common pattern**: 56s average between edits (iterative building!)
 
-### 19 Operation Types
+### 20 Operation Types
 
 **Node Operations** (7 types):
 1. `addNode` - Add new node
@@ -101,18 +101,19 @@ n8n_create_workflow({
 11. `cleanStaleConnections` - Auto-remove broken connections
 12. `replaceConnections` - Replace entire connections object
 
-**Metadata Operations** (4 types):
+**Metadata Operations** (5 types):
 13. `updateSettings` - Workflow settings
 14. `updateName` - Rename workflow
-15. `addTag` - Add tag
-16. `removeTag` - Remove tag
+15. `setNodeGroups` - Replace the canvas groups (n8n 2.28+; see below)
+16. `addTag` - Add tag
+17. `removeTag` - Remove tag
 
 **Activation Operations** (2 types):
-17. `activateWorkflow` - Activate workflow for automatic execution
-18. `deactivateWorkflow` - Deactivate workflow
+18. `activateWorkflow` - Activate workflow for automatic execution
+19. `deactivateWorkflow` - Deactivate workflow
 
 **Project Management Operations** (1 type):
-19. `transferWorkflow` - Transfer workflow to a different project (enterprise/cloud)
+20. `transferWorkflow` - Transfer workflow to a different project (enterprise/cloud)
 
 ### Intent Parameter (IMPORTANT!)
 
@@ -362,6 +363,84 @@ n8n_update_partial_workflow({
 })
 ```
 
+### Canvas Groups (n8n 2.28+)
+
+A canvas group is a named frame drawn around a connected run of non-trigger nodes. Purely
+presentational — it changes nothing about execution — but **n8n validates groups on every write,
+including writes that have nothing to do with grouping.** That is the part worth understanding,
+because it used to make unrelated edits fail.
+
+**You do not have to manage groups to edit a grouped workflow.** n8n-mcp reconciles them with the
+graph you produce, once, at the end of a diff:
+
+- A grouped node you remove is pruned from its group; the group survives on its remaining members.
+- A group left with no members is dropped.
+- A group n8n refuses (its members are no longer a single connected run) is ungrouped so your edit
+  still lands. **Nodes and connections are never altered to save a group.**
+
+Every adjustment comes back in `details.warnings`. Read them — they are the only signal that a
+user's grouping changed as a side effect of your edit.
+
+**Authoring groups** with `setNodeGroups`. It replaces the whole list, like `replaceConnections`:
+
+```javascript
+n8n_update_partial_workflow({
+  id: "workflow-id",
+  intent: "Group the enrichment steps",
+  operations: [{
+    type: "setNodeGroups",
+    nodeGroups: [
+      { name: "Enrich lead", nodeNames: ["Fetch company", "Score lead"] },
+      { name: "Notify", nodeIds: ["a1b2c3d4"] }          // ids work too
+    ]
+  }]
+})
+```
+
+- Pass **every group you want to keep** — anything you omit is gone.
+- `nodeGroups: []` ungroups everything.
+- Give each group `nodeNames` **or** `nodeIds`, not both populated. The group `id` is generated
+  unless you supply one.
+- `description` is optional, max 155 characters, and only exists on n8n 2.32+. On older instances
+  it is dropped with a warning rather than failing the write.
+
+**Creating a workflow with groups.** `n8n_create_workflow` and `n8n_update_full_workflow` take the
+same field, in n8n's own shape — members are node **IDs**, because you are sending those nodes in
+the same payload:
+
+```javascript
+n8n_create_workflow({
+  name: "Lead pipeline",
+  nodes: [...],
+  connections: {...},
+  nodeGroups: [{ name: "Enrich lead", nodeIds: ["fetch-company", "score-lead"] }]
+})
+```
+
+On a full update the field follows the same rule as `settings`: **omit it to keep the stored groups**,
+pass `[]` to ungroup everything. An id that is not in `nodes[]` is an error, not something to repair
+quietly — you supplied both halves, so a mismatch is a bug in the request.
+
+**What n8n will reject.** Members must form a single connected run with one way in and one way out,
+and a trigger can never be inside a group. n8n decides this, not n8n-mcp — so its message is
+returned to you verbatim. A group *you* asked for in this request is never silently discarded: if
+n8n refuses it you get an error, not a quiet success.
+
+```
+Node group "Enrich lead" (…) must form a single connected subgraph with a single entry and exit.
+Node group "Enrich lead" (…) cannot contain trigger nodes: Manual Trigger.
+```
+
+When that happens, fix the selection — usually by including the node that sits between two members,
+or excluding the trigger — rather than retrying the same shape.
+
+**Older instances.** Canvas groups do not exist before n8n 2.28. Authoring them there saves the
+workflow without groups and warns; it does not fail.
+
+**Reading groups.** `n8n_get_workflow` returns `nodeGroups` in `full`, `details` and `structure`
+modes when the workflow has any. `mode: "active"` returns the *published* version's groups, which
+can differ from the draft's.
+
 ### Cleanup & Recovery
 
 **cleanStaleConnections** - Remove broken connections:
@@ -432,112 +511,6 @@ const result = n8n_deploy_template({
 // - id: "new-workflow-id"
 // - requiredCredentials: ["slack"]
 // - fixesApplied: ["typeVersion upgraded", "expression format fixed"]
-```
-
----
-
-## n8n_generate_workflow (NATURAL LANGUAGE → WORKFLOW)
-
-**Speed**: Proposals ~2s, fresh generation 5–15s, deploy ~3s
-
-**Use when**: User describes the workflow in plain English and wants the system to draft (and optionally deploy) it.
-
-> ⚠️ **Hosted-only feature.** On self-hosted instances the tool returns `{hosted_only: true}` with a redirect message rather than a workflow. For self-hosted, use `n8n_deploy_template` (templates) or `n8n_create_workflow` (manual).
-
-### How It Works
-
-It's a **multi-step flow with a review checkpoint** — proposals/preview are returned first, deployment requires a second call. This avoids deploying low-quality drafts.
-
-### Path A: Proposals → Deploy (default, recommended)
-
-```javascript
-// Step 1: Generate proposals (NOT deployed, returns up to 5 candidates)
-n8n_generate_workflow({
-  description: "Slack daily standup reminder at 9am every weekday"
-})
-// → {
-//     status: "proposals",
-//     proposals: [
-//       {
-//         id: "uuid-1",
-//         name: "Daily Standup Reminder",
-//         description: "...",
-//         flow_summary: "Schedule trigger → Slack message",
-//         credentials_needed: ["slackApi"]
-//       },
-//       ...
-//     ]
-//   }
-
-// Step 2: Deploy the proposal you picked
-n8n_generate_workflow({
-  description: "Slack daily standup reminder at 9am every weekday",
-  deploy_id: "uuid-1"
-})
-// → { status: "deployed", workflow_id, workflow_name, workflow_url,
-//     node_count, node_summary }
-```
-
-### Path B: Skip Cache → Preview → Confirm
-
-Use when none of the proposals match what you want.
-
-```javascript
-// Step 1: Bypass proposals; get a fresh preview (NOT deployed)
-n8n_generate_workflow({
-  description: "Webhook receives JSON, transforms it, POSTs to a REST API",
-  skip_cache: true
-})
-// → { status: "preview", ... }
-
-// Step 2: Deploy the preview
-n8n_generate_workflow({
-  description: "Webhook receives JSON, transforms it, POSTs to a REST API",
-  confirm_deploy: true
-})
-// → { status: "deployed", ... }
-```
-
-### Writing a Good Description
-
-The quality of the generated workflow is bound by the clarity of the description. Always include:
-
-- **Trigger type**: `webhook`, `schedule` (with cadence — "every 15 min", "weekdays at 9am"), `manual`, `form`, `chat`
-- **Services involved**: name them explicitly (Slack, Gmail, HubSpot, Postgres, etc.) — generic terms ("a chat tool") yield generic results
-- **Logic / flow**: branches, transforms, aggregation, deduplication, retry behavior
-
-**Bad**: `"Send a notification when something happens"`
-
-**Good**: `"When a new row is added to the 'leads' Postgres table, enrich it with Clearbit, then post a summary to the #sales Slack channel. Skip rows where 'company' is empty."`
-
-### Parameters
-
-| Parameter | Type | Use |
-|-----------|------|-----|
-| `description` | string (required) | Natural-language description |
-| `deploy_id` | string | ID of a proposal from a prior call — deploys it |
-| `skip_cache` | boolean | Skip proposals; generate from scratch and return a preview |
-| `confirm_deploy` | boolean | Deploy the most recent preview from this session |
-
-### Common Pitfalls
-
-- **Hosted-only** — on self-hosted, no workflow is generated; fall back to `n8n_deploy_template` or `n8n_create_workflow`
-- **Proposals are NOT deployed** — until you call again with `deploy_id` or `confirm_deploy`, nothing exists in n8n
-- **Inactive on deploy** — generated workflows are created in **inactive** state; credentials must be configured in the n8n UI before activation
-- **Per-session state** — pending proposals/preview live in MCP-session state; reconnecting loses them, and you'll need to re-issue the description
-
-### Recommended Follow-Up
-
-Always validate after deploying:
-```javascript
-n8n_generate_workflow({description: "...", deploy_id: "uuid-1"})
-// → workflow_id: "abc"
-
-n8n_validate_workflow({id: "abc"})
-// → catches any node-version or connection issues the generator missed
-
-// If issues found, n8n_autofix_workflow can resolve common ones
-n8n_autofix_workflow({id: "abc", applyFixes: true})
 ```
 
 ---
@@ -869,22 +842,42 @@ n8n_validate_workflow({
 
 **Use when**: Retrieving workflow details
 
+n8n has a **draft/publish model**: the workflow body holds the draft (your latest edits),
+while `mode: "active"` returns the published graph that's actually running. Pick the mode by
+how much you need and how big the workflow is.
+
 **Modes**:
-- `full` (default) - Complete workflow JSON
-- `details` - Full + execution stats
-- `structure` - Nodes + connections only
-- `minimal` - ID, name, active, tags
+- `full` (default) - Draft workflow JSON + metadata
+- `details` - Full + execution stats (success/error counts, last run)
+- `active` - The published (running) graph; returns `code: "NO_ACTIVE_VERSION"` if the workflow was never activated
+- `structure` - Nodes + connections only (topology, no `parameters`)
+- `filtered` - Full config of **only** the nodes named in `nodeNames` (matched by node name *or* node id), plus light metadata. Use it to read one heavy node — e.g. a Code node with long `jsCode`/`pythonCode` — on a large workflow that would otherwise get truncated client-side when fetched whole
+- `minimal` - ID, name, active, tags (fastest)
 
 ```javascript
-// Full workflow
+// Full draft workflow
 n8n_get_workflow({id: "workflow-id"})
 
-// Just structure
+// Just the topology (cheap; strips parameters)
 n8n_get_workflow({id: "workflow-id", mode: "structure"})
+
+// Read one heavy node without the whole workflow (avoids client-side truncation)
+n8n_get_workflow({id: "workflow-id", mode: "filtered", nodeNames: ["Process Data"]})
 
 // Minimal metadata
 n8n_get_workflow({id: "workflow-id", mode: "minimal"})
 ```
+
+**Recommended flow for big workflows**: `mode: "structure"` to discover node names cheaply →
+`mode: "filtered"` with those names to pull the specific heavy node's full config. This is the
+fix for the case where `full`/`active` returns a payload large enough that the client truncates
+it and you can't read the Code-node source at all.
+
+**`filtered` mode returns**: `{ id, name, active, isArchived, nodes[] (full config of matched nodes only), nodeCount (total in workflow), returnedCount, notFound? }`. It omits `connections` and the rest of the graph by design, so the response stays small.
+
+**`filtered` pitfalls**:
+- Requires a non-empty `nodeNames` array. Entries that match nothing come back in a `notFound` list rather than erroring, so a partial request stays transparent — check `notFound` before assuming a node is missing.
+- `nodeNames` matches each entry against node **name OR id** in one namespace, so `returnedCount` can exceed `nodeNames.length` when a name collides with another node's id, or when the workflow has duplicate node names. Disambiguate by the `id` on each returned node.
 
 ---
 
@@ -926,6 +919,79 @@ n8n_executions({
   id: "execution-id"
 })
 ```
+
+---
+
+## n8n_evaluations (EVALUATION TEST RUNS)
+
+**Use when**: Working with evaluation test runs — starting or cancelling a run, polling one in progress, comparing metrics across runs, pulling per-case results into a report or dashboard.
+
+Reads (`list_runs`/`get_run`/`list_cases`) require n8n >= 2.30 and an API key created on 2.30+; `run`/`cancel` require n8n >= 2.32 and a key created on 2.32+ — older keys silently lack the `testRun` scopes. A 403 can mean: a key created before the action's minimum version (re-create it), evaluations not licensed on the plan, or the key's owner lacking access to the workflow — for `run`/`cancel`, specifically the `workflow:execute` scope. Runs exist only for workflows with an evaluation trigger.
+
+### List Test Runs
+```javascript
+n8n_evaluations({
+  action: "list_runs",
+  workflowId: "workflow-id",
+  status: "completed"  // new, running, completed, error, cancelled
+})
+```
+
+### Get a Run (aggregated metrics)
+```javascript
+n8n_evaluations({
+  action: "get_run",
+  workflowId: "workflow-id",
+  runId: "run-id"
+})
+// → status, finalResult (success/error/warning), metrics, testCaseCount
+// metrics is a flat name → number/boolean map: your custom metrics plus
+// n8n's automatic ones (promptTokens, completionTokens, totalTokens, executionTime)
+```
+
+### Per-Case Results
+```javascript
+n8n_evaluations({
+  action: "list_cases",
+  workflowId: "workflow-id",
+  runId: "run-id"
+})
+// Default limit 20 — per-case inputs/outputs can be large; paginate with
+// cursor rather than raising the limit.
+// Each case carries an executionId — drill into the underlying execution
+// with n8n_executions({action: "get", id: executionId, mode: "error"})
+```
+
+### Start a Run
+```javascript
+n8n_evaluations({
+  action: "run",
+  workflowId: "workflow-id"
+})
+// → {id, status: "new", createdAt} — poll with get_run until completed
+```
+`run` executes the workflow once per dataset row — real nodes fire (HTTP calls,
+DB writes, sends) and LLM metric calls cost money. Ask the user before starting
+a run, especially against a large dataset.
+
+### Cancel a Run
+```javascript
+n8n_evaluations({
+  action: "cancel",
+  workflowId: "workflow-id",
+  runId: "run-id"
+})
+// → {id, status: "cancelled"} plus a note: in-flight cases stop
+// asynchronously — confirm with get_run that the run reached "cancelled"
+```
+
+**Gotchas**:
+- A 404 can mean three things: the instance predates the action's minimum version, the workflowId is wrong, or the runId belongs to a different workflow (the tool's error message disambiguates using the instance version when it can read it)
+- Pre-2.32 instances answer `run` with 405 (the route exists, GET-only) and `cancel` with 404 (the route does not exist); the tool folds both into its upgrade guidance
+- 409 on `run` = the workflow has no evaluation trigger; 409 on `cancel` = the run already finished
+- 402 on `run` = the license's evaluation-run quota is exhausted
+- Evaluations are license/quota-gated in n8n — an unlicensed instance answers `run`/`cancel` with 403, and its reads have no runs to return
+- Compare `metrics` across runs of the same workflow to catch prompt/model regressions
 
 ---
 
@@ -1032,6 +1098,7 @@ update → update → update → ... (56s avg between edits)
 - `n8n_workflow_versions` - Version control & rollback
 - `n8n_test_workflow` - Trigger execution
 - `n8n_executions` - Manage executions
+- `n8n_evaluations` - Evaluation test runs: reads (n8n 2.30+), run/cancel (n8n 2.32+)
 - `n8n_manage_datatable` - Data table and row management
 - `n8n_manage_credentials` - Credential CRUD + schema discovery
 - `n8n_audit_instance` - Security audit (built-in + custom scan)

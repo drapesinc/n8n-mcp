@@ -40,6 +40,7 @@ export declare class EnhancedConfigValidator extends ConfigValidator {
     private static deduplicateErrors;
     private static shouldFilterCredentialWarning;
     private static applyProfileFilters;
+    private static filterWarningsByProfile;
     private static enforceErrorHandlingForProfile;
     private static addErrorHandlingSuggestions;
     private static validateFixedCollectionStructures;

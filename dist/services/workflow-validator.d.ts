@@ -33,6 +33,12 @@ interface WorkflowJson {
     name?: string;
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
+    nodeGroups?: Array<{
+        id: string;
+        name: string;
+        nodeIds: string[];
+        description?: string;
+    }>;
     settings?: any;
     staticData?: any;
     pinData?: any;
@@ -78,16 +84,22 @@ export declare class WorkflowValidator {
         validateExpressions?: boolean;
         profile?: 'minimal' | 'runtime' | 'ai-friendly' | 'strict';
     }): Promise<WorkflowValidationResult>;
+    private validateNodeGroups;
     private validateWorkflowStructure;
     private validateAllNodes;
     private validateConnections;
     private validateConnectionOutputs;
     private validateErrorOutputConfiguration;
-    private validateAIToolConnection;
     private validateAIToolSource;
+    private pushCommunityToolUsageWarning;
+    private findConditionalAIToolExpression;
+    private validateConditionalAIToolMode;
     private getNodeOutputTypes;
     private validateNotAISubNode;
     private getShortNodeType;
+    private isCorePackageType;
+    private isAdvisoryProfile;
+    private getMainOutputCount;
     private getConditionalOutputInfo;
     private validateOutputIndexBounds;
     private validateConditionalBranchUsage;
@@ -99,6 +111,8 @@ export declare class WorkflowValidator {
     private countExpressionsInObject;
     private nodeHasInput;
     private checkWorkflowPatterns;
+    private workflowHasErrorHandling;
+    private nodeExecutesOnMainBranch;
     private getLongestLinearChain;
     private generateSuggestions;
     private checkNodeErrorHandling;

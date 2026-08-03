@@ -8,6 +8,7 @@ export declare class WorkflowDiffEngine {
     private tagsToAdd;
     private tagsToRemove;
     private transferToProjectId;
+    private authoredGroupNames;
     applyDiff(workflow: Workflow, request: WorkflowDiffRequest): Promise<WorkflowDiffResult>;
     private validateOperation;
     private applyOperation;
@@ -23,6 +24,7 @@ export declare class WorkflowDiffEngine {
     private applyAddNode;
     private applyRemoveNode;
     private applyUpdateNode;
+    private orderUpdateEntries;
     private applyPatchNodeField;
     private applyMoveNode;
     private applyEnableNode;
@@ -33,6 +35,11 @@ export declare class WorkflowDiffEngine {
     private applyRewireConnection;
     private applyUpdateSettings;
     private applyUpdateName;
+    private validateSetNodeGroups;
+    private resolveGroupMembers;
+    private applySetNodeGroups;
+    private authoredGroupNamesOrUndefined;
+    private finalizeNodeGroups;
     private applyAddTag;
     private applyRemoveTag;
     private validateActivateWorkflow;

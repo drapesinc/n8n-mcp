@@ -5,6 +5,26 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.N8nNodeLoader = void 0;
 const path_1 = __importDefault(require("path"));
+const module_1 = require("module");
+function createMissingDependencyStub() {
+    const stub = new Proxy(class MissingOptionalDependency {
+    }, {
+        get(target, prop) {
+            if (prop in target)
+                return Reflect.get(target, prop);
+            if (typeof prop === 'symbol')
+                return undefined;
+            return stub;
+        },
+        apply() {
+            return stub;
+        },
+        construct() {
+            return {};
+        }
+    });
+    return stub;
+}
 class N8nNodeLoader {
     constructor() {
         this.CORE_PACKAGES = [
@@ -33,7 +53,51 @@ class N8nNodeLoader {
         return path_1.default.dirname(pkgJsonPath);
     }
     loadNodeModule(absolutePath) {
-        return require(absolutePath);
+        try {
+            return require(absolutePath);
+        }
+        catch (error) {
+            if (error.code !== 'MODULE_NOT_FOUND') {
+                throw error;
+            }
+            return this.loadNodeModuleWithStubbedDependencies(absolutePath);
+        }
+    }
+    loadNodeModuleWithStubbedDependencies(absolutePath) {
+        const moduleInternals = module_1.Module;
+        const originalLoad = moduleInternals._load;
+        const stubbedDependencies = new Set();
+        moduleInternals._load = function (request, parent, isMain) {
+            try {
+                return originalLoad.call(this, request, parent, isMain);
+            }
+            catch (error) {
+                const err = error;
+                if (err.code === 'MODULE_NOT_FOUND' &&
+                    request !== absolutePath &&
+                    !request.startsWith('.') &&
+                    !path_1.default.isAbsolute(request) &&
+                    typeof err.message === 'string' &&
+                    err.message.includes(`'${request}'`)) {
+                    stubbedDependencies.add(request);
+                    return createMissingDependencyStub();
+                }
+                throw error;
+            }
+        };
+        try {
+            const nodeModule = require(absolutePath);
+            console.warn(`  ⚠ Loaded ${path_1.default.basename(absolutePath)} with stubbed missing dependencies: ${[...stubbedDependencies].join(', ')}`);
+            return nodeModule;
+        }
+        finally {
+            moduleInternals._load = originalLoad;
+        }
+    }
+    resolveNodeClass(nodeModule, nodeName) {
+        return (nodeModule.default ||
+            nodeModule[nodeName] ||
+            Object.values(nodeModule).find(exported => typeof exported === 'function'));
     }
     async loadPackageNodes(packageName, packagePath, packageJson) {
         const n8nConfig = packageJson.n8n || {};
@@ -45,9 +109,11 @@ class N8nNodeLoader {
                 try {
                     const fullPath = path_1.default.join(packageDir, nodePath);
                     const nodeModule = this.loadNodeModule(fullPath);
-                    const nodeNameMatch = nodePath.match(/\/([^\/]+)\.node\.(js|ts)$/);
-                    const nodeName = nodeNameMatch ? nodeNameMatch[1] : path_1.default.basename(nodePath, '.node.js');
-                    const NodeClass = nodeModule.default || nodeModule[nodeName] || Object.values(nodeModule)[0];
+                    const nodeNameMatch = nodePath.match(/\/([^\/]+)\.node(?:\.ee)?\.(js|ts)$/);
+                    const nodeName = nodeNameMatch
+                        ? nodeNameMatch[1]
+                        : path_1.default.basename(nodePath).replace(/\.node(?:\.ee)?\.(js|ts)$/, '');
+                    const NodeClass = this.resolveNodeClass(nodeModule, nodeName);
                     if (NodeClass) {
                         nodes.push({ packageName, nodeName, NodeClass });
                         console.log(`  ✓ Loaded ${nodeName} from ${packageName}`);
@@ -66,7 +132,7 @@ class N8nNodeLoader {
                 try {
                     const fullPath = path_1.default.join(packageDir, nodePath);
                     const nodeModule = this.loadNodeModule(fullPath);
-                    const NodeClass = nodeModule.default || nodeModule[nodeName] || Object.values(nodeModule)[0];
+                    const NodeClass = this.resolveNodeClass(nodeModule, nodeName);
                     if (NodeClass) {
                         nodes.push({ packageName, nodeName, NodeClass });
                         console.log(`  ✓ Loaded ${nodeName} from ${packageName}`);

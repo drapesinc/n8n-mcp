@@ -10,6 +10,7 @@ import { TelemetryBatchProcessor } from './batch-processor';
 import { TelemetryPerformanceMonitor } from './performance-monitor';
 import { TELEMETRY_BACKEND } from './telemetry-types';
 import { TelemetryError, TelemetryErrorType, TelemetryErrorAggregator } from './telemetry-error';
+import { telemetryFetch } from './telemetry-fetch';
 import { logger } from '../utils/logger';
 
 export class TelemetryManager {
@@ -89,16 +90,22 @@ export class TelemetryManager {
             eventsPerSecond: 1,
           },
         },
+        global: {
+          fetch: telemetryFetch,
+        },
       });
 
       // Update batch processor with Supabase client
       this.batchProcessor = new TelemetryBatchProcessor(
         this.supabase,
-        () => this.isEnabled()
+        () => this.isEnabled(),
+        {
+          onFlushRequested: () => this.flush(),
+        }
       );
 
-      this.batchProcessor.start();
       this.isInitialized = true;
+      this.batchProcessor.start();
 
       logger.debug('Telemetry initialized successfully');
     } catch (error) {

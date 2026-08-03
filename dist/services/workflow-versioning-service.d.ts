@@ -32,6 +32,7 @@ export interface RestoreResult {
     backupCreated: boolean;
     backupVersionId?: number;
     validationErrors?: string[];
+    warnings?: string[];
 }
 export interface BackupResult {
     versionId: number;
@@ -63,6 +64,7 @@ export interface VersionDiff {
     modifiedNodes: string[];
     connectionChanges: number;
     settingChanges: any;
+    nodeGroupChanges: number;
 }
 export declare class WorkflowVersioningService {
     private nodeRepository;

@@ -13,6 +13,7 @@ export declare function handleGetWorkflow(args: unknown, context?: InstanceConte
 export declare function handleGetWorkflowDetails(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleGetWorkflowStructure(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleGetWorkflowMinimal(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleGetWorkflowFiltered(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleGetWorkflowActive(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleUpdateWorkflow(args: unknown, repository: NodeRepository, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDeleteWorkflow(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
@@ -24,6 +25,11 @@ export declare function handleTestWorkflow(args: unknown, context?: InstanceCont
 export declare function handleGetExecution(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleListExecutions(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDeleteExecution(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleListTestRuns(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleGetTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleListTestCases(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleTriggerTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleCancelTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleHealthCheck(context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDiagnostic(request: any, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleWorkflowVersions(args: unknown, repository: NodeRepository, context?: InstanceContext): Promise<McpToolResponse>;

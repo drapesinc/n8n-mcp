@@ -161,9 +161,13 @@ class ConfigValidator {
     }
     static validatePropertyTypes(properties, config, errors) {
         for (const [key, value] of Object.entries(config)) {
-            const prop = properties.find(p => p.name === key);
-            if (!prop)
+            const candidates = properties.filter(p => p && p.name === key);
+            if (candidates.length === 0)
                 continue;
+            const prop = candidates.find(p => this.isPropertyVisible(p, config)) ?? candidates[0];
+            if (candidates.some(p => 'default' in p && JSON.stringify(value) === JSON.stringify(p.default))) {
+                continue;
+            }
             if (prop.type === 'string' && typeof value !== 'string') {
                 errors.push({
                     type: 'invalid_type',
@@ -188,22 +192,22 @@ class ConfigValidator {
                     fix: `Change ${key} to true or false`
                 });
             }
-            else if (prop.type === 'resourceLocator') {
+            else if (prop.type === 'resourceLocator' || prop.type === 'agentSelector') {
                 if (typeof value !== 'object' || value === null || Array.isArray(value)) {
                     const fixValue = typeof value === 'string' ? value : JSON.stringify(value);
                     errors.push({
                         type: 'invalid_type',
                         property: key,
-                        message: `Property '${key}' is a resourceLocator and must be an object with 'mode' and 'value' properties, got ${typeof value}`,
+                        message: `Property '${key}' has type ${prop.type} and must be an object with 'mode' and 'value' properties, got ${typeof value}`,
                         fix: `Change ${key} to { mode: "list", value: ${JSON.stringify(fixValue)} } or { mode: "id", value: ${JSON.stringify(fixValue)} }`
                     });
                 }
                 else {
-                    if (!value.mode) {
+                    if (value.mode === undefined || value.mode === null) {
                         errors.push({
                             type: 'missing_required',
                             property: `${key}.mode`,
-                            message: `resourceLocator '${key}' is missing required property 'mode'`,
+                            message: `${prop.type} '${key}' is missing required property 'mode'`,
                             fix: `Add mode property: { mode: "list", value: ${JSON.stringify(value.value || '')} }`
                         });
                     }
@@ -211,11 +215,11 @@ class ConfigValidator {
                         errors.push({
                             type: 'invalid_type',
                             property: `${key}.mode`,
-                            message: `resourceLocator '${key}.mode' must be a string, got ${typeof value.mode}`,
+                            message: `${prop.type} '${key}.mode' must be a string, got ${typeof value.mode}`,
                             fix: `Set mode to a valid string value`
                         });
                     }
-                    else if (prop.modes) {
+                    else if (value.mode !== '' && prop.modes) {
                         const modes = prop.modes;
                         if (!modes || typeof modes !== 'object') {
                             continue;
@@ -233,7 +237,7 @@ class ConfigValidator {
                             errors.push({
                                 type: 'invalid_value',
                                 property: `${key}.mode`,
-                                message: `resourceLocator '${key}.mode' must be one of [${allowedModes.join(', ')}], got '${value.mode}'`,
+                                message: `${prop.type} '${key}.mode' must be one of [${allowedModes.join(', ')}], got '${value.mode}'`,
                                 fix: `Change mode to one of: ${allowedModes.join(', ')}`
                             });
                         }
@@ -242,7 +246,7 @@ class ConfigValidator {
                         errors.push({
                             type: 'missing_required',
                             property: `${key}.value`,
-                            message: `resourceLocator '${key}' is missing required property 'value'`,
+                            message: `${prop.type} '${key}' is missing required property 'value'`,
                             fix: `Add value property to specify the ${prop.displayName || key}`
                         });
                     }
@@ -250,7 +254,14 @@ class ConfigValidator {
             }
             if (prop.type === 'options' && prop.options) {
                 const validValues = prop.options.map((opt) => typeof opt === 'string' ? opt : opt.value);
-                if (!validValues.includes(value)) {
+                const isExpression = typeof value === 'string' && value.startsWith('=');
+                const hasDynamicOptions = !!(prop.typeOptions?.loadOptionsMethod || prop.typeOptions?.loadOptions);
+                const isLegacyCodeLanguage = key === 'language' && value === 'python' && validValues.includes('pythonNative');
+                if (validValues.length > 0 &&
+                    !isExpression &&
+                    !hasDynamicOptions &&
+                    !isLegacyCodeLanguage &&
+                    !validValues.includes(value)) {
                     errors.push({
                         type: 'invalid_value',
                         property: key,
@@ -399,6 +410,13 @@ class ConfigValidator {
                 continue;
             }
             if (!visibleProps.find(p => p.name === key)) {
+                const value = config[key];
+                if (value === null || value === undefined || value === '') {
+                    continue;
+                }
+                if (prop && 'default' in prop && JSON.stringify(value) === JSON.stringify(prop.default)) {
+                    continue;
+                }
                 const visibilityReq = this.getVisibilityRequirement(prop, config);
                 warnings.push({
                     type: 'inefficient',

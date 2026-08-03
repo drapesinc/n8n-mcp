@@ -530,6 +530,45 @@ exports.TYPE_STRUCTURES = {
             'Used in Execute Workflow node',
         ],
     },
+    agentSelector: {
+        type: 'special',
+        jsType: 'object',
+        description: 'Resource locator for selecting an agent to send a message to',
+        structure: {
+            properties: {
+                mode: {
+                    type: 'string',
+                    description: 'How the agent is specified',
+                    enum: ['list', 'id'],
+                    required: true,
+                },
+                value: {
+                    type: 'string',
+                    description: 'The agent identifier',
+                    required: true,
+                },
+            },
+            required: ['mode', 'value'],
+        },
+        example: {
+            mode: 'list',
+            value: 'agent-123',
+        },
+        examples: [
+            { mode: 'id', value: 'agent-123' },
+            { mode: 'id', value: '{{ $json.agentId }}' },
+        ],
+        validation: {
+            allowEmpty: false,
+            allowExpressions: true,
+        },
+        notes: [
+            'Resource locator shape, validated like resourceLocator',
+            'Used in the Message an Agent node',
+            "n8n's editor also writes an __rl: true marker, which is not required",
+            'Added in n8n 2.31',
+        ],
+    },
     curlImport: {
         type: 'special',
         jsType: 'string',

@@ -77,8 +77,8 @@ async function shutdown(signal) {
     catch (error) {
         originalConsoleError('Error during shutdown:', error);
     }
-    process.stdin.pause();
-    process.stdin.destroy();
+    const { tearDownStdin } = require('../utils/stdin-teardown');
+    tearDownStdin();
     setTimeout(() => {
         process.exit(0);
     }, 500).unref();

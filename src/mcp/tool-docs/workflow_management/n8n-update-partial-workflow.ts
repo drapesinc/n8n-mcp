@@ -4,7 +4,7 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
   name: 'n8n_update_partial_workflow',
   category: 'workflow_management',
   essentials: {
-    description: 'Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, patchNodeField, moveNode, enable/disableNode, addConnection, removeConnection, rewireConnection, cleanStaleConnections, replaceConnections, updateSettings, updateName, add/removeTag, activateWorkflow, deactivateWorkflow, transferWorkflow. Supports smart parameters (branch, case) for multi-output nodes. Full support for AI connections (ai_languageModel, ai_tool, ai_memory, ai_embedding, ai_vectorStore, ai_document, ai_textSplitter, ai_outputParser).',
+    description: 'Update workflow incrementally with diff operations. Types: addNode, removeNode, updateNode, patchNodeField, moveNode, enable/disableNode, addConnection, removeConnection, rewireConnection, cleanStaleConnections, replaceConnections, updateSettings, updateName, setNodeGroups, add/removeTag, activateWorkflow, deactivateWorkflow, transferWorkflow. Supports smart parameters (branch, case) for multi-output nodes. Full support for AI connections (ai_languageModel, ai_tool, ai_memory, ai_embedding, ai_vectorStore, ai_document, ai_textSplitter, ai_outputParser).',
     keyParameters: ['id', 'operations', 'continueOnError'],
     example: 'n8n_update_partial_workflow({id: "wf_123", operations: [{type: "rewireConnection", source: "IF", from: "Old", to: "New", branch: "true"}]})',
     performance: 'Fast (50-200ms)',
@@ -23,11 +23,13 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
       'Auto-sanitization: ALL nodes auto-fixed during updates (operator structures, missing metadata)',
       'Node renames automatically update all connection references - no manual connection operations needed',
       'Activate/deactivate workflows: Use activateWorkflow/deactivateWorkflow operations (requires activatable triggers like webhook/schedule)',
-      'Transfer workflows between projects: Use transferWorkflow with destinationProjectId (enterprise feature)'
+      'Transfer workflows between projects: Use transferWorkflow with destinationProjectId (enterprise feature)',
+      'Canvas groups survive edits automatically: members removed by a diff are pruned, and a group n8n can no longer accept is ungrouped with a warning (nodes and connections are never changed)',
+      'Use setNodeGroups to create or replace canvas groups (n8n 2.28+); it replaces the whole list, so pass every group you want to keep'
     ]
   },
   full: {
-    description: `Updates workflows using surgical diff operations instead of full replacement. Supports 18 operation types for precise modifications. Operations are validated and applied atomically by default - all succeed or none are applied.
+    description: `Updates workflows using surgical diff operations instead of full replacement. Supports 20 operation types for precise modifications. Operations are validated and applied atomically by default - all succeed or none are applied.
 
 ## Available Operations:
 
@@ -47,11 +49,16 @@ export const n8nUpdatePartialWorkflowDoc: ToolDocumentation = {
 - **cleanStaleConnections**: Auto-remove all connections referencing non-existent nodes
 - **replaceConnections**: Replace entire connections object
 
-### Metadata Operations (4 types):
+### Metadata Operations (5 types):
 - **updateSettings**: Modify workflow settings
 - **updateName**: Rename the workflow
+- **setNodeGroups**: Replace the workflow's canvas groups (n8n 2.28+). Full replacement — pass every group to keep, or \`[]\` to ungroup everything. Each group takes \`name\` plus either \`nodeNames\` or \`nodeIds\`, and an optional \`description\` (max 155 chars, n8n 2.32+; dropped automatically on older instances). Group members must form a connected run with no trigger among them; n8n validates that on save and its message is returned unchanged if a group you asked for is rejected.
 - **addTag**: Add a workflow tag
 - **removeTag**: Remove a workflow tag
+
+### Canvas groups on every update
+
+n8n validates canvas groups on every write, including writes that have nothing to do with grouping. Groups are therefore reconciled automatically: members a diff deleted are pruned, a group left with no members is removed, and a group n8n refuses is ungrouped so the edit still lands. Every adjustment appears in \`details.warnings\`; nodes and connections are never altered to save a group.
 
 ### Workflow Activation Operations (2 types):
 - **activateWorkflow**: Activate the workflow to enable automatic execution via triggers
@@ -201,7 +208,7 @@ Please choose a different name.
 
 ## Removing Properties with null
 
-To remove a property from a node, set its value to \`null\` in the updates object. This is essential when migrating from deprecated properties or cleaning up optional configuration fields.
+To remove a property from a node, set its value to \`null\` in the updates object. This is essential when migrating from deprecated properties or cleaning up optional configuration fields. Over the MCP/JSON-RPC API always use \`null\` — an \`undefined\` value is dropped by JSON serialization before it reaches the server, so it would be a silent no-op. (Internally, in-process callers such as the workflow auto-fixer may pass \`undefined\`, which the diff engine now treats the same as \`null\`.)
 
 ### Why Use null?
 - **Property removal**: Setting a property to \`null\` removes it completely from the node object
@@ -251,6 +258,21 @@ n8n_update_partial_workflow({
     type: "updateNode",
     nodeName: "HTTP Request",
     updates: { "parameters.headers": null }
+  }]
+});
+
+// Remove single array elements: the array is spliced, so later elements shift
+// down. Several removals on the same array in one updates object are applied
+// from the highest index down, so the indices you pass are the ones you see.
+n8n_update_partial_workflow({
+  id: "wf_345",
+  operations: [{
+    type: "updateNode",
+    nodeName: "Edit Fields",
+    updates: {
+      "parameters.assignments.assignments[0]": null,
+      "parameters.assignments.assignments[1]": null
+    }
   }]
 });
 \`\`\`
@@ -438,7 +460,7 @@ n8n_update_partial_workflow({
       'When properties are mutually exclusive (e.g., continueOnFail and onError), setting only the new property will fail - you must remove the old one with null',
       'Removing a required property may cause validation errors - check node documentation first',
       'Nested property removal with dot notation only removes the specific nested field, not the entire parent object',
-      'Array index notation (e.g., "parameters.headers[0]") is not supported - remove the entire array property instead'
+      'Array elements are addressed by index in bracket or dot form (e.g., "parameters.assignments.assignments[0].value" or "parameters.assignments.assignments.0.value") - out-of-range indices are rejected, so new elements cannot be appended this way'
     ],
     relatedTools: ['n8n_update_full_workflow', 'n8n_get_workflow', 'validate_workflow', 'tools_documentation']
   }

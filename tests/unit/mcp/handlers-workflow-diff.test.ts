@@ -12,11 +12,20 @@ import {
 } from '@/utils/n8n-errors';
 import { z } from 'zod';
 
+const telemetryMocks = vi.hoisted(() => ({
+  trackWorkflowMutation: vi.fn(),
+}));
+
 // Mock dependencies
 vi.mock('@/services/workflow-diff-engine');
 vi.mock('@/services/n8n-api-client');
 vi.mock('@/config/n8n-api');
 vi.mock('@/utils/logger');
+vi.mock('@/telemetry/telemetry-manager', () => ({
+  telemetry: {
+    trackWorkflowMutation: telemetryMocks.trackWorkflowMutation,
+  },
+}));
 vi.mock('@/mcp/handlers-n8n-manager', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/mcp/handlers-n8n-manager')>();
   return {
@@ -72,6 +81,7 @@ describe('handlers-workflow-diff', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    telemetryMocks.trackWorkflowMutation.mockResolvedValue(undefined);
 
     // Setup mock API client
     mockApiClient = {
@@ -177,7 +187,264 @@ describe('handlers-workflow-diff', () => {
 
       expect(mockApiClient.getWorkflow).toHaveBeenCalledWith('test-workflow-id');
       expect(mockDiffEngine.applyDiff).toHaveBeenCalledWith(testWorkflow, diffRequest);
-      expect(mockApiClient.updateWorkflow).toHaveBeenCalledWith('test-workflow-id', updatedWorkflow);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledWith('test-workflow-id', updatedWorkflow, expect.objectContaining({ onWarning: expect.any(Function) }));
+    });
+
+    it('passes a setNodeGroups payload through to the engine', async () => {
+      // The operations schema is a closed z.object: a field it does not declare is stripped
+      // silently, and a setNodeGroups op arriving empty would read as "ungroup everything".
+      const testWorkflow = createTestWorkflow();
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: testWorkflow,
+        operationsApplied: 1,
+        authoredGroupNames: ['Deliver'],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(testWorkflow);
+
+      await handleUpdatePartialWorkflow(
+        {
+          id: 'test-workflow-id',
+          operations: [{ type: 'setNodeGroups', nodeGroups: [{ name: 'Deliver', nodeNames: ['Slack'] }] }],
+        },
+        mockRepository
+      );
+
+      const [, request] = mockDiffEngine.applyDiff.mock.calls[0];
+      expect(request.operations[0].nodeGroups).toEqual([{ name: 'Deliver', nodeNames: ['Slack'] }]);
+    });
+
+    it('passes a setNodeGroups payload through when the transport stringified it', async () => {
+      const testWorkflow = createTestWorkflow();
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({ success: true, workflow: testWorkflow, operationsApplied: 1 });
+      mockApiClient.updateWorkflow.mockResolvedValue(testWorkflow);
+
+      await handleUpdatePartialWorkflow(
+        {
+          id: 'test-workflow-id',
+          operations: [{ type: 'setNodeGroups', nodeGroups: '[{"name":"Deliver","nodeNames":["Slack"]}]' }],
+        },
+        mockRepository
+      );
+
+      const [, request] = mockDiffEngine.applyDiff.mock.calls[0];
+      expect(request.operations[0].nodeGroups).toEqual([{ name: 'Deliver', nodeNames: ['Slack'] }]);
+    });
+
+    it('tells the client which groups were authored, so a rejection is not swallowed', async () => {
+      const testWorkflow = createTestWorkflow();
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: testWorkflow,
+        operationsApplied: 1,
+        authoredGroupNames: ['Deliver'],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(testWorkflow);
+
+      await handleUpdatePartialWorkflow(
+        {
+          id: 'test-workflow-id',
+          operations: [{ type: 'setNodeGroups', nodeGroups: [{ name: 'Deliver', nodeNames: ['Slack'] }] }],
+        },
+        mockRepository
+      );
+
+      const [, , options] = mockApiClient.updateWorkflow.mock.calls[0];
+      expect(options.authoredGroups).toEqual(new Set(['Deliver']));
+    });
+
+    it('reports canvas-group adjustments made while saving', async () => {
+      const testWorkflow = createTestWorkflow();
+      mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: testWorkflow,
+        operationsApplied: 1,
+        applied: [0],
+        failed: [],
+      });
+      mockApiClient.updateWorkflow.mockImplementation(async (_id: string, _wf: unknown, options: any) => {
+        options?.onWarning?.('n8n rejected node group "Broken", so it was ungrouped to save the workflow');
+        return testWorkflow;
+      });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: [{ type: 'removeNode', nodeId: 'slack-node' }] },
+        mockRepository
+      );
+
+      expect(result.details?.warnings).toEqual([
+        { operation: -1, message: 'n8n rejected node group "Broken", so it was ungrouped to save the workflow' },
+      ]);
+    });
+
+    it('resolves without waiting for stalled telemetry after Set v3.4 addNode + addConnection (#944)', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const testWorkflow = createTestWorkflow();
+        const setNode = {
+          id: 'set-node',
+          name: 'Set',
+          type: 'n8n-nodes-base.set',
+          typeVersion: 3.4,
+          position: [500, 100],
+          parameters: {
+            assignments: {
+              assignments: [
+                {
+                  id: 'assignment-1',
+                  name: 'status',
+                  value: 'ready',
+                  type: 'string',
+                },
+              ],
+            },
+            options: {},
+          },
+        };
+        const diffRequest = {
+          id: 'test-workflow-id',
+          operations: [
+            {
+              type: 'addNode',
+              node: setNode,
+            },
+            {
+              type: 'addConnection',
+              source: 'HTTP Request',
+              target: 'Set',
+            },
+          ],
+        };
+        const updatedWorkflow = {
+          ...testWorkflow,
+          nodes: [...testWorkflow.nodes, setNode],
+          connections: {
+            ...testWorkflow.connections,
+            'HTTP Request': {
+              main: [[{ node: 'Set', type: 'main', index: 0 }]],
+            },
+          },
+        };
+
+        mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+        mockDiffEngine.applyDiff.mockResolvedValue({
+          success: true,
+          workflow: updatedWorkflow,
+          operationsApplied: 2,
+          message: 'Successfully applied 2 operations',
+          errors: [],
+          applied: [0, 1],
+          failed: [],
+        });
+        mockApiClient.updateWorkflow.mockResolvedValue(updatedWorkflow);
+
+        let signalTelemetryStarted!: () => void;
+        const telemetryStarted = new Promise<void>((resolve) => {
+          signalTelemetryStarted = resolve;
+        });
+        telemetryMocks.trackWorkflowMutation.mockImplementation(() => {
+          signalTelemetryStarted();
+          return new Promise<void>(() => {});
+        });
+
+        const handlerPromise = handleUpdatePartialWorkflow(diffRequest, mockRepository);
+        const outcomePromise = Promise.race([
+          handlerPromise.then((result) => ({ state: 'resolved' as const, result })),
+          new Promise<{ state: 'timed-out' }>((resolve) => {
+            setTimeout(() => resolve({ state: 'timed-out' }), 1_000);
+          }),
+        ]);
+
+        await telemetryStarted;
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await expect(outcomePromise).resolves.toMatchObject({
+          state: 'resolved',
+          result: {
+            success: true,
+            saved: true,
+            data: {
+              operationsApplied: 2,
+            },
+          },
+        });
+        expect(telemetryMocks.trackWorkflowMutation).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolName: 'n8n_update_partial_workflow',
+            operations: diffRequest.operations,
+            mutationSuccess: true,
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('resolves API failures without waiting for stalled mutation telemetry', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const testWorkflow = createTestWorkflow();
+        const diffRequest = {
+          id: 'test-workflow-id',
+          operations: [{ type: 'updateName', name: 'Renamed Workflow' }],
+        };
+        mockApiClient.getWorkflow.mockResolvedValue(testWorkflow);
+        mockDiffEngine.applyDiff.mockResolvedValue({
+          success: true,
+          workflow: { ...testWorkflow, name: 'Renamed Workflow' },
+          operationsApplied: 1,
+          message: 'Successfully applied 1 operation',
+          errors: [],
+          applied: [0],
+          failed: [],
+        });
+        mockApiClient.updateWorkflow.mockRejectedValue(
+          new N8nValidationError('Update rejected'),
+        );
+
+        let signalTelemetryStarted!: () => void;
+        const telemetryStarted = new Promise<void>((resolve) => {
+          signalTelemetryStarted = resolve;
+        });
+        telemetryMocks.trackWorkflowMutation.mockImplementation(() => {
+          signalTelemetryStarted();
+          return new Promise<void>(() => {});
+        });
+
+        const handlerPromise = handleUpdatePartialWorkflow(diffRequest, mockRepository);
+        const outcomePromise = Promise.race([
+          handlerPromise.then((result) => ({ state: 'resolved' as const, result })),
+          new Promise<{ state: 'timed-out' }>((resolve) => {
+            setTimeout(() => resolve({ state: 'timed-out' }), 1_000);
+          }),
+        ]);
+
+        await telemetryStarted;
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await expect(outcomePromise).resolves.toMatchObject({
+          state: 'resolved',
+          result: {
+            success: false,
+            code: 'VALIDATION_ERROR',
+          },
+        });
+        expect(telemetryMocks.trackWorkflowMutation).toHaveBeenCalledWith(
+          expect.objectContaining({
+            toolName: 'n8n_update_partial_workflow',
+            mutationSuccess: false,
+            mutationError: 'Update rejected',
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('normalizes HTTP MCP serialized addNode payloads before applying the diff (#814)', async () => {
@@ -665,7 +932,7 @@ describe('handlers-workflow-diff', () => {
 
       // updateWorkflow called twice: once with mutated body, once with snapshot.
       expect(mockApiClient.updateWorkflow).toHaveBeenCalledTimes(2);
-      expect(mockApiClient.updateWorkflow).toHaveBeenNthCalledWith(2, 'test-id', before);
+      expect(mockApiClient.updateWorkflow).toHaveBeenNthCalledWith(2, 'test-id', before, expect.objectContaining({ onWarning: expect.any(Function) }));
 
       expect(result).toEqual({
         success: false,
@@ -678,6 +945,41 @@ describe('handlers-workflow-diff', () => {
           priorVersionId: 'v1',
         },
       });
+    });
+
+    it('should report a canvas group the rollback had to drop', async () => {
+      // A rollback can only succeed by ungrouping a group the server no longer accepts. That is a
+      // real change to the restored workflow, so it must survive the error path.
+      const before = createTestWorkflow({ versionId: 'v1' });
+      const afterPersist = createTestWorkflow({ versionId: 'v2' });
+      const validationError = new N8nValidationError('Invalid workflow structure', {});
+
+      mockApiClient.getWorkflow
+        .mockResolvedValueOnce(before)
+        .mockResolvedValueOnce(afterPersist);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: before,
+        operationsApplied: 1,
+        errors: [],
+      });
+      mockApiClient.updateWorkflow
+        .mockRejectedValueOnce(validationError)
+        .mockImplementationOnce(async (_id: string, _wf: unknown, options: any) => {
+          options?.onWarning?.('n8n rejected node group "Stale", so it was ungrouped to save the workflow');
+          return before;
+        });
+
+      const result = await handleUpdatePartialWorkflow({
+        id: 'test-id',
+        operations: [{ type: 'removeNode', nodeId: 'node1' }],
+      }, mockRepository);
+
+      expect(result.success).toBe(false);
+      // Same shape as the success path, so a client reads details.warnings without branching.
+      expect(result.details?.warnings).toEqual([
+        { operation: -1, message: 'n8n rejected node group "Stale", so it was ungrouped to save the workflow' },
+      ]);
     });
 
     it('should NOT roll back when n8n rejected the PUT before persisting', async () => {

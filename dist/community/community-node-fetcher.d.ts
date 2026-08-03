@@ -108,7 +108,10 @@ export declare class CommunityNodeFetcher {
     private retryWithBackoff;
     fetchVerifiedNodes(progressCallback?: (message: string, current: number, total: number) => void): Promise<StrapiCommunityNode[]>;
     fetchNpmPackages(limit?: number, progressCallback?: (message: string, current: number, total: number) => void): Promise<NpmSearchResult[]>;
-    fetchPackageJson(packageName: string, version?: string): Promise<any | null>;
+    fetchPackageJson(packageName: string, version?: string, options?: {
+        maxRetries?: number;
+        timeout?: number;
+    }): Promise<any | null>;
     getPackageTarballUrl(packageName: string, version?: string): Promise<string | null>;
     fetchPackageWithReadme(packageName: string): Promise<NpmPackageWithReadme | null>;
     fetchReadmesBatch(packageNames: string[], progressCallback?: (message: string, current: number, total: number) => void, concurrency?: number): Promise<Map<string, string | null>>;

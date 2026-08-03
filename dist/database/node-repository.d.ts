@@ -14,6 +14,7 @@ export interface CommunityNodeFields {
 export declare class NodeRepository {
     private db;
     constructor(dbOrService: DatabaseAdapter | SQLiteStorageService);
+    transaction<T>(fn: () => T): T;
     pruneExpiredWorkflowVersions(): void;
     saveNode(node: ParsedNode & Partial<CommunityNodeFields>): void;
     getNode(nodeType: string): any;
@@ -51,7 +52,8 @@ export declare class NodeRepository {
         unverified: number;
     };
     hasNodeByNpmPackage(npmPackageName: string): boolean;
-    getNodeByNpmPackage(npmPackageName: string): any | null;
+    getNodesByNpmPackage(npmPackageName: string): any[];
+    deleteStaleCommunityNodes(npmPackageName: string, keepNodeTypes: string[]): number;
     deleteCommunityNodes(): number;
     updateNodeReadme(nodeType: string, readme: string): void;
     updateNodeAISummary(nodeType: string, summary: object): void;

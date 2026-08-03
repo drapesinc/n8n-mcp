@@ -5,21 +5,21 @@
 [![npm version](https://img.shields.io/npm/v/n8n-mcp.svg)](https://www.npmjs.com/package/n8n-mcp)
 [![codecov](https://codecov.io/gh/czlonkowski/n8n-mcp/graph/badge.svg?token=YOUR_TOKEN)](https://codecov.io/gh/czlonkowski/n8n-mcp)
 [![Tests](https://img.shields.io/badge/tests-5418%20passing-brightgreen.svg)](https://github.com/czlonkowski/n8n-mcp/actions)
-[![n8n version](https://img.shields.io/badge/n8n-2.23.2-orange.svg)](https://github.com/n8n-io/n8n)
+[![n8n version](https://img.shields.io/badge/n8n-2.31.6-orange.svg)](https://github.com/n8n-io/n8n)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fczlonkowski%2Fn8n--mcp-green.svg)](https://github.com/czlonkowski/n8n-mcp/pkgs/container/n8n-mcp)
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/n8n-mcp?referralCode=n8n-mcp)
 
-A Model Context Protocol (MCP) server that provides AI assistants with comprehensive access to n8n node documentation, properties, and operations. Deploy in minutes to give Claude and other AI assistants deep knowledge about n8n's 1,851 workflow automation nodes (822 core + 1,029 community).
+A Model Context Protocol (MCP) server that provides AI assistants with comprehensive access to n8n node documentation, properties, and operations. Deploy in minutes to give Claude and other AI assistants deep knowledge about n8n's 2,285 workflow automation nodes (828 core + 1,457 community).
 
 ## Overview
 
 n8n-MCP serves as a bridge between n8n's workflow automation platform and AI models, enabling them to understand and work with n8n nodes effectively. It provides structured access to:
 
-- **1,851 n8n nodes** - 822 core nodes + 1,029 community nodes (911 verified)
+- **2,285 n8n nodes** - 828 core nodes + 1,457 community nodes (1,295 verified)
 - **Node properties** - 99% coverage with detailed schemas
-- **Node operations** - 63.6% coverage of available actions
-- **Documentation** - 87% coverage from official n8n docs (including AI nodes)
-- **AI tools** - 265 AI-capable tool variants detected with full documentation
+- **Node operations** - 66.5% coverage of available actions
+- **Documentation** - 86% coverage from official n8n docs (including AI nodes)
+- **AI tools** - 267 AI-capable tool variants detected with full documentation
 - **Real-world examples** - 156 ranked configurations extracted from popular templates
 - **Template library** - 2,352 workflow templates with 99.96% AI metadata coverage
 - **Community nodes** - Search verified community integrations with `source` filter
@@ -66,6 +66,15 @@ Want to use n8n-MCP with your n8n instance? Check out our comprehensive [n8n Dep
 - Production deployment with Docker Compose
 - Cloud deployment on Hetzner, AWS, and other providers
 - Troubleshooting and security best practices
+
+### Cloudflare Access Authentication
+
+If your n8n instance sits behind Cloudflare Access (Zero Trust), provide your service token so n8n-MCP can authenticate:
+
+- `N8N_CF_CLIENT_ID` - Cloudflare Access Client ID
+- `N8N_CF_CLIENT_SECRET` - Cloudflare Access Client Secret
+
+When set, these are sent as `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers on n8n API requests, version/health probes, and webhook executions. The token is confined to the `N8N_API_URL` origin — webhook calls to a different host (e.g. a split `WEBHOOK_URL` origin) do not receive it, to avoid leaking the token.
 
 ## Connect your IDE
 
@@ -361,7 +370,7 @@ Save these instructions in your Claude Project for optimal n8n workflow assistan
   - `searchMode: 'by_metadata'` - Filter by `complexity`, `requiredService`, `targetAudience`
 - **`get_template`** - Get complete workflow JSON (modes: nodes_only, structure, full)
 
-### n8n Management Tools (13 tools - Requires API Configuration)
+### n8n Management Tools (16 tools - Requires API Configuration)
 These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 
 #### Workflow Management
@@ -379,6 +388,10 @@ These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 #### Execution Management
 - **`n8n_test_workflow`** - Test/trigger workflow execution (webhook, form, chat)
 - **`n8n_executions`** - Unified execution management (list, get, delete)
+- **`n8n_evaluations`** - Run and read evaluation test runs (list runs, aggregated metrics, per-case results on n8n 2.30+; trigger and cancel on 2.32+)
+
+#### Data Table Management
+- **`n8n_manage_datatable`** - Manage n8n data tables and rows (list, get, create, update, delete)
 
 #### Credential Management
 - **`n8n_manage_credentials`** - Manage n8n credentials (list, get, create, update, delete, getSchema)
@@ -388,6 +401,22 @@ These tools require `N8N_API_URL` and `N8N_API_KEY` in your configuration.
 
 #### System Tools
 - **`n8n_health_check`** - Check n8n API connectivity and features
+
+### Read-Only Deployment
+
+For governance-sensitive environments, use both env vars together. Fully disable tools that are write/destructive or handle sensitive data (`n8n_manage_credentials` and `n8n_manage_datatable` also offer read operations, but are removed entirely here because even reads expose sensitive material):
+
+```bash
+DISABLED_TOOLS=n8n_create_workflow,n8n_update_full_workflow,n8n_update_partial_workflow,n8n_delete_workflow,n8n_autofix_workflow,n8n_deploy_template,n8n_test_workflow,n8n_manage_credentials,n8n_manage_datatable
+```
+
+For tools that bundle read and write operations under one name, block only the destructive operations while keeping `list` and `get`:
+
+```bash
+DISABLED_TOOL_OPERATIONS=n8n_workflow_versions:delete,rollback,prune;n8n_executions:delete;n8n_evaluations:run,cancel
+```
+
+Combine with a read-only n8n API key (Settings → API in your n8n instance) for defence in depth. See [Read-Only Deployment Recipe](./docs/HTTP_DEPLOYMENT.md#read-only-deployment-recipe) for the full setup guide.
 
 ## Documentation
 
@@ -417,3 +446,9 @@ See [Acknowledgments](./docs/ACKNOWLEDGMENTS.md) for credits and template attrib
 <div align="center">
   <strong>Built with care for the n8n community</strong>
 </div>
+
+---
+
+> 💼 **Need it built for you?**
+>
+> Work with [AiAdvisors](https://www.aiadvisors.pl/en) — automation audits, builds, and operations by the team behind n8n-mcp and n8n-skills.

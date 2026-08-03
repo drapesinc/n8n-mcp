@@ -13,6 +13,7 @@ export declare class NodeSpecificValidators {
     private static validateSlackDeleteMessage;
     private static validateSlackCreateChannel;
     static validateGoogleSheets(context: NodeValidationContext): void;
+    private static hasColumnsMapping;
     private static validateGoogleSheetsAppend;
     private static validateGoogleSheetsRead;
     private static validateGoogleSheetsUpdate;
@@ -30,6 +31,14 @@ export declare class NodeSpecificValidators {
     private static validateJavaScriptCode;
     private static validatePythonCode;
     private static validateReturnStatement;
+    private static hasTopLevelPrimitiveReturn;
+    private static stripStringsCommentsRegex;
+    private static stripNestedJavaScriptFunctionBodies;
+    private static stripPythonStringsAndComments;
+    private static readonly NON_FUNCTION_HEADS;
+    private static startsJavaScriptFunctionBody;
+    private static readonly REGEX_PRECEDING_KEYWORDS;
+    private static regexLiteralStartsHere;
     private static validateN8nVariables;
     private static validateCodeSecurity;
     static validateSet(context: NodeValidationContext): void;

@@ -156,7 +156,7 @@ class CommunityNodeFetcher {
         logger_1.logger.info(`Fetched ${allPackages.length} community node packages from npm`);
         return allPackages.slice(0, limit);
     }
-    async fetchPackageJson(packageName, version) {
+    async fetchPackageJson(packageName, version, options) {
         if (!this.validatePackageName(packageName)) {
             logger_1.logger.warn(`Invalid package name rejected: ${packageName}`);
             return null;
@@ -165,9 +165,11 @@ class CommunityNodeFetcher {
             ? `${this.npmRegistryUrl}/${encodeURIComponent(packageName)}/${encodeURIComponent(version)}`
             : `${this.npmRegistryUrl}/${encodeURIComponent(packageName)}/latest`;
         return this.retryWithBackoff(async () => {
-            const response = await axios_1.default.get(url, { timeout: FETCH_CONFIG.NPM_REGISTRY_TIMEOUT });
+            const response = await axios_1.default.get(url, {
+                timeout: options?.timeout ?? FETCH_CONFIG.NPM_REGISTRY_TIMEOUT
+            });
             return response.data;
-        }, `Fetching package.json for ${packageName}${version ? `@${version}` : ''}`);
+        }, `Fetching package.json for ${packageName}${version ? `@${version}` : ''}`, options?.maxRetries ?? this.maxRetries);
     }
     async getPackageTarballUrl(packageName, version) {
         const packageJson = await this.fetchPackageJson(packageName, version);

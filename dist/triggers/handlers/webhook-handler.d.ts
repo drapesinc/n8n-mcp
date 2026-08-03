@@ -18,8 +18,8 @@ export declare class WebhookHandler extends BaseTriggerHandler<WebhookTriggerInp
         workflowId: string;
         triggerType: "webhook";
         data?: Record<string, unknown> | undefined;
-        timeout?: number | undefined;
         headers?: Record<string, string> | undefined;
+        timeout?: number | undefined;
         httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
         waitForResponse?: boolean | undefined;
         webhookPath?: string | undefined;
@@ -27,8 +27,8 @@ export declare class WebhookHandler extends BaseTriggerHandler<WebhookTriggerInp
         workflowId: string;
         triggerType: "webhook";
         data?: Record<string, unknown> | undefined;
-        timeout?: number | undefined;
         headers?: Record<string, string> | undefined;
+        timeout?: number | undefined;
         httpMethod?: "GET" | "POST" | "PUT" | "DELETE" | undefined;
         waitForResponse?: boolean | undefined;
         webhookPath?: string | undefined;

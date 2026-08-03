@@ -4,9 +4,7 @@ export declare class TelemetryBatchProcessor {
     private supabase;
     private isEnabled;
     private flushTimer?;
-    private isFlushingEvents;
-    private isFlushingWorkflows;
-    private isFlushingMutations;
+    private flushQueue;
     private circuitBreaker;
     private metrics;
     private flushTimes;
@@ -14,16 +12,25 @@ export declare class TelemetryBatchProcessor {
     private readonly maxDeadLetterSize;
     private eventListeners;
     private started;
-    constructor(supabase: SupabaseClient | null, isEnabled: () => boolean);
+    private readonly operationTimeout;
+    private readonly onFlushRequested?;
+    constructor(supabase: SupabaseClient | null, isEnabled: () => boolean, options?: {
+        operationTimeout?: number;
+        onFlushRequested?: () => void | Promise<void>;
+    });
     start(): void;
     stop(): void;
+    private requestFlush;
+    private flushAndExit;
     flush(events?: TelemetryEvent[], workflows?: WorkflowTelemetry[], mutations?: WorkflowMutationRecord[]): Promise<void>;
+    private flushQueuedBatch;
     private flushEvents;
     private flushWorkflows;
     private flushMutations;
-    private executeWithRetry;
+    private executeWithTimeout;
     private createBatches;
     private deduplicateWorkflows;
+    private addUnsentBatchesToDeadLetterQueue;
     private addToDeadLetterQueue;
     private processDeadLetterQueue;
     private recordFlushTime;

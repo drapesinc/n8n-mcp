@@ -27,6 +27,21 @@ const MAX_CODE_LENGTH = 200_000;
  */
 const MAX_SHORT_INPUT_LENGTH = 2_000;
 
+/**
+ * Max distance the function-head detector scans backward from a `{` to find the
+ * matching `(`. A real parameter list is short; capping the walk keeps brace
+ * scanning linear on adversarial input (e.g. many unmatched `) {`).
+ */
+const MAX_PARAM_SCAN = 2_000;
+
+/**
+ * Detects a top-level primitive return in a JS Code node. Keyword literals
+ * require a trailing word boundary so identifiers that merely start with one
+ * (e.g. `return trueItems`) are not misflagged. Module-level + flagless so it
+ * can be reused without `lastIndex` state.
+ */
+const JS_PRIMITIVE_RETURN_RE = /return\s+(?:(?:true|false|null|undefined)\b|\d+|['"`])/m;
+
 export interface NodeValidationContext {
   config: Record<string, any>;
   errors: ValidationError[];
@@ -310,12 +325,22 @@ export class NodeSpecificValidators {
     errors.push(...filteredErrors);
   }
   
+  /**
+   * In Google Sheets v4+, the `columns` resourceMapper (mappingMode "defineBelow" /
+   * "autoMapInputData") carries the range/values via matchingColumns + schema, so the
+   * legacy range/values fields are not required. An empty `columns: {}` object does not
+   * count — a real mapping has at least a mappingMode or a value.
+   */
+  private static hasColumnsMapping(config: any): boolean {
+    return !!(config.columns && (config.columns.mappingMode || config.columns.value));
+  }
+
   private static validateGoogleSheetsAppend(context: NodeValidationContext): void {
     const { config, errors, warnings, autofix } = context;
 
     // In Google Sheets v4+, range is only required if NOT using the columns resourceMapper
     // The columns parameter is a resourceMapper introduced in v4 that handles range automatically
-    if (!config.range && !config.columns) {
+    if (!config.range && !this.hasColumnsMapping(config)) {
       errors.push({
         type: 'missing_required',
         property: 'range',
@@ -337,41 +362,41 @@ export class NodeSpecificValidators {
   }
   
   private static validateGoogleSheetsRead(context: NodeValidationContext): void {
-    const { config, errors, suggestions } = context;
-    
-    if (!config.range) {
-      errors.push({
-        type: 'missing_required',
-        property: 'range',
-        message: 'Range is required for read operation',
-        fix: 'Specify range like "Sheet1!A:B" or "Sheet1!A1:B10"'
-      });
-    }
-    
+    const { config, suggestions } = context;
+
+    // Range is NOT required for read: in Sheets v4+ the sheet is selected via
+    // the sheetName resourceLocator and reads default to the whole sheet;
+    // range is an optional advanced field.
+
     // Suggest data structure options
     if (!config.options?.dataStructure) {
       suggestions.push('Consider setting options.dataStructure to "object" for easier data manipulation');
     }
   }
-  
+
   private static validateGoogleSheetsUpdate(context: NodeValidationContext): void {
     const { config, errors } = context;
-    
-    if (!config.range) {
+
+    // In Google Sheets v4+, the columns resourceMapper (mappingMode: "defineBelow" / "autoMapInputData")
+    // handles both range and values automatically via matchingColumns + schema.
+    // Range/values are only required when NOT using columns mapping.
+    const hasColumnsMapping = this.hasColumnsMapping(config);
+
+    if (!config.range && !hasColumnsMapping) {
       errors.push({
         type: 'missing_required',
         property: 'range',
-        message: 'Range is required for update operation',
-        fix: 'Specify the exact range to update like "Sheet1!A1:B10"'
+        message: 'Range or columns mapping is required for update operation',
+        fix: 'Specify range like "Sheet1!A1:B10" OR use columns with mappingMode (e.g. defineBelow)'
       });
     }
-    
-    if (!config.values && !config.rawData) {
+
+    if (!config.values && !config.rawData && !hasColumnsMapping) {
       errors.push({
         type: 'missing_required',
         property: 'values',
-        message: 'Values are required for update operation',
-        fix: 'Provide the data to write to the spreadsheet'
+        message: 'Values or columns mapping is required for update operation',
+        fix: 'Provide data via values/rawData OR use columns.value with defineBelow mapping'
       });
     }
   }
@@ -550,8 +575,10 @@ export class NodeSpecificValidators {
     
     switch (operation) {
       case 'find':
-        // Query validation
-        if (config.query) {
+        // Query validation. Expression values ('=...' prefix or {{ }}
+        // interpolation) resolve to JSON at runtime, so they are not parsed.
+        if (config.query && typeof config.query === 'string'
+            && !config.query.trim().startsWith('=') && !config.query.includes('{{')) {
           try {
             JSON.parse(config.query);
           } catch (e) {
@@ -967,11 +994,23 @@ export class NodeSpecificValidators {
   ): void {
     const { config, errors, warnings, suggestions } = context;
     const query = config.query || config.deleteQuery || config.updateQuery || '';
-    
-    if (!query) return;
-    
+
+    if (!query || typeof query !== 'string') return;
+
     const lowerQuery = query.toLowerCase();
-    
+
+    // Expression-valued queries ('=...' prefix or {{ }} interpolation) resolve
+    // at runtime; the static text is not the final SQL, so destructive-keyword
+    // findings are downgraded from errors to warnings.
+    const isExpression = query.trim().startsWith('=') || query.includes('{{');
+
+    // Keyword checks match statement positions only (start of query or after
+    // ';'), so identifiers like drop_off_date / deleted_at can't trip them.
+    const statementText = lowerQuery.replace(/^\s*=/, '');
+    const startsStatement = (keyword: string): boolean =>
+      new RegExp(`(^|;)\\s*${keyword}\\b`).test(statementText);
+    const hasWhere = /\bwhere\b/.test(statementText);
+
     // SQL injection checks
     if (query.includes('${') || query.includes('{{')) {
       warnings.push({
@@ -979,46 +1018,64 @@ export class NodeSpecificValidators {
         message: 'Query contains template expressions that might be vulnerable to SQL injection',
         suggestion: 'Use parameterized queries with query parameters instead of string interpolation'
       });
-      
+
       suggestions.push('Example: Use "SELECT * FROM users WHERE id = $1" with queryParams: [userId]');
     }
-    
+
     // DELETE without WHERE
-    if (lowerQuery.includes('delete') && !lowerQuery.includes('where')) {
-      errors.push({
-        type: 'invalid_value',
-        property: 'query',
-        message: 'DELETE query without WHERE clause will delete all records',
-        fix: 'Add a WHERE clause to specify which records to delete'
-      });
+    if (startsStatement('delete') && !hasWhere) {
+      if (isExpression) {
+        warnings.push({
+          type: 'security',
+          property: 'query',
+          message: 'DELETE query without WHERE clause will delete all records',
+          suggestion: 'The query contains an expression resolved at runtime - make sure the final SQL includes a WHERE clause'
+        });
+      } else {
+        errors.push({
+          type: 'invalid_value',
+          property: 'query',
+          message: 'DELETE query without WHERE clause will delete all records',
+          fix: 'Add a WHERE clause to specify which records to delete'
+        });
+      }
     }
-    
+
     // UPDATE without WHERE
-    if (lowerQuery.includes('update') && !lowerQuery.includes('where')) {
+    if (startsStatement('update') && !hasWhere) {
       warnings.push({
         type: 'security',
         message: 'UPDATE query without WHERE clause will update all records',
         suggestion: 'Add a WHERE clause to specify which records to update'
       });
     }
-    
+
     // TRUNCATE warning
-    if (lowerQuery.includes('truncate')) {
+    if (startsStatement('truncate')) {
       warnings.push({
         type: 'security',
         message: 'TRUNCATE will remove all data from the table',
         suggestion: 'Consider using DELETE with WHERE clause if you need to keep some data'
       });
     }
-    
+
     // DROP warning
-    if (lowerQuery.includes('drop')) {
-      errors.push({
-        type: 'invalid_value',
-        property: 'query',
-        message: 'DROP operations are extremely dangerous and will permanently delete database objects',
-        fix: 'Use this only if you really intend to delete tables/databases permanently'
-      });
+    if (startsStatement('drop')) {
+      if (isExpression) {
+        warnings.push({
+          type: 'security',
+          property: 'query',
+          message: 'DROP operations are extremely dangerous and will permanently delete database objects',
+          suggestion: 'The query contains an expression resolved at runtime - make sure this DROP is intentional'
+        });
+      } else {
+        errors.push({
+          type: 'invalid_value',
+          property: 'query',
+          message: 'DROP operations are extremely dangerous and will permanently delete database objects',
+          fix: 'Use this only if you really intend to delete tables/databases permanently'
+        });
+      }
     }
     
     // Performance suggestions
@@ -1203,7 +1260,10 @@ export class NodeSpecificValidators {
    */
   static validateCode(context: NodeValidationContext): void {
     const { config, errors, warnings, suggestions, autofix } = context;
-    const language = config.language || 'javaScript';
+    const rawLanguage = config.language || 'javaScript';
+    // n8n's Code node accepts both the current 'pythonNative' UI value and the
+    // legacy 'python' value at runtime; both store code in pythonCode.
+    const language = rawLanguage === 'pythonNative' ? 'python' : rawLanguage;
     const codeField = language === 'python' ? 'pythonCode' : 'jsCode';
     const code = config[codeField] || '';
     
@@ -1386,8 +1446,15 @@ export class NodeSpecificValidators {
     suggestions: string[],
     mode: string = 'runOnceForAllItems'
   ): void {
-    const hasReturn = /return\s+/.test(code);
-    
+    // Detect a *real* top-level return. For JS, scan the stripped view so a
+    // return that only appears inside a comment, string, or nested function
+    // body (e.g. `// return "x"`) does not satisfy the "must return data" check.
+    // Skip the strip for very large code (mirrors hasTopLevelPrimitiveReturn).
+    const returnScanCode = (language === 'javaScript' && code.length <= MAX_CODE_LENGTH)
+      ? this.stripNestedJavaScriptFunctionBodies(code)
+      : code;
+    const hasReturn = /return\s+/.test(returnScanCode);
+
     if (!hasReturn) {
       errors.push({
         type: 'missing_required',
@@ -1407,24 +1474,11 @@ export class NodeSpecificValidators {
       // Only check return format in runOnceForAllItems mode (the default).
       const isRunOncePerItem = mode === 'runOnceForEachItem';
 
-      // Check for object return without array
-      if (!isRunOncePerItem && /return\s+{(?!.*\[).*}\s*;?$/s.test(code) && !code.includes('json:')) {
-        errors.push({
-          type: 'invalid_value',
-          property: 'jsCode',
-          message: 'Return value must be an array of objects',
-          fix: 'Wrap in array: return [{json: yourObject}]'
-        });
-      }
+      // NOTE: a bare object return (e.g. `return {a: 1}`) is intentionally NOT
+      // flagged: n8n auto-wraps a single returned object into [{json: {...}}]
+      // in runOnceForAllItems mode (verified against a live n8n instance).
 
-      // Skip primitive return check when helper functions are present,
-      // since we can't distinguish top-level vs nested returns without AST.
-      // Matches: function name(), const/let/var name = [async] function/arrow.
-      // Length guard caps CodeQL polynomial-ReDoS exposure on the
-      // alternation with nested `[^)]*` groups.
-      const hasHelperFunctions = code.length <= MAX_CODE_LENGTH
-        && /(?:function\s+\w+\s*\(|(?:const|let|var)\s+\w+\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|\w+\s*=>))/.test(code);
-      if (!isRunOncePerItem && !hasHelperFunctions && /return\s+(true|false|null|undefined|\d+|['"`])/m.test(code)) {
+      if (!isRunOncePerItem && this.hasTopLevelPrimitiveReturn(code)) {
         errors.push({
           type: 'invalid_value',
           property: 'jsCode',
@@ -1477,6 +1531,327 @@ export class NodeSpecificValidators {
       }
     }
   }
+
+  private static hasTopLevelPrimitiveReturn(code: string): boolean {
+    if (code.length > MAX_CODE_LENGTH) {
+      return JS_PRIMITIVE_RETURN_RE.test(code);
+    }
+
+    const topLevelCode = this.stripNestedJavaScriptFunctionBodies(code);
+    return JS_PRIMITIVE_RETURN_RE.test(topLevelCode);
+  }
+
+  /**
+   * Blanks JavaScript string literals, comments and regex literals while
+   * KEEPING function-body code. Template-literal string parts are blanked but
+   * `${...}` interpolation code is preserved. Used by the n8n-variable
+   * heuristics so `{{...}}`, bare `$` and bare `helpers.` are detected inside
+   * `.map(item => { ... })` callbacks, not just at the top level.
+   */
+  private static stripStringsCommentsRegex(code: string): string {
+    return this.stripNestedJavaScriptFunctionBodies(code, false);
+  }
+
+  private static stripNestedJavaScriptFunctionBodies(code: string, blankFunctionBodies: boolean = true): string {
+    let result = '';
+    let braceDepth = 0;
+    const functionBodyDepths: number[] = [];
+    // Brace depths at which a template-literal `${...}` interpolation was
+    // opened. Interpolation content is real code (and may nest further
+    // templates), so the scanner re-enters code state until the matching `}`.
+    const templateInterpolationDepths: number[] = [];
+    let state: 'code' | 'single' | 'double' | 'template' | 'lineComment' | 'blockComment' | 'regex' = 'code';
+    // Tracks whether we are inside a `[...]` character class while in regex state,
+    // so an unescaped `/` inside the class does not prematurely end the literal.
+    let inRegexClass = false;
+
+    for (let i = 0; i < code.length; i++) {
+      const char = code[i];
+      const next = code[i + 1];
+      const inFunctionBody = functionBodyDepths.length > 0;
+
+      if (state === 'lineComment') {
+        result += char === '\n' ? '\n' : ' ';
+        if (char === '\n') state = 'code';
+        continue;
+      }
+
+      if (state === 'blockComment') {
+        result += char === '\n' ? '\n' : ' ';
+        if (char === '*' && next === '/') {
+          result += ' ';
+          i++;
+          state = 'code';
+        }
+        continue;
+      }
+
+      if (state === 'single' || state === 'double' || state === 'template') {
+        if (state === 'template' && char === '$' && next === '{') {
+          result += '  ';
+          i++;
+          braceDepth++;
+          templateInterpolationDepths.push(braceDepth);
+          state = 'code';
+          continue;
+        }
+        result += char === '\n' ? '\n' : ' ';
+        if (char === '\\') {
+          if (next) {
+            result += next === '\n' ? '\n' : ' ';
+            i++;
+          }
+          continue;
+        }
+        if (
+          (state === 'single' && char === "'") ||
+          (state === 'double' && char === '"') ||
+          (state === 'template' && char === '`')
+        ) {
+          state = 'code';
+        }
+        continue;
+      }
+
+      if (state === 'regex') {
+        // A real regex literal never spans a raw newline; hitting one means we
+        // misclassified a division operator — bail back to code on this line.
+        if (char === '\n') {
+          state = 'code';
+          result += '\n';
+          continue;
+        }
+        result += ' ';
+        if (char === '\\') {
+          if (next !== undefined) {
+            result += ' ';
+            i++;
+          }
+          continue;
+        }
+        if (char === '[') inRegexClass = true;
+        else if (char === ']') inRegexClass = false;
+        else if (char === '/' && !inRegexClass) state = 'code';
+        continue;
+      }
+
+      if (char === '/' && next === '/') {
+        result += '  ';
+        i++;
+        state = 'lineComment';
+        continue;
+      }
+
+      if (char === '/' && next === '*') {
+        result += '  ';
+        i++;
+        state = 'blockComment';
+        continue;
+      }
+
+      // Regex literal (not division). Blank its contents so `{`/`}` inside it
+      // (e.g. str.replace(/}/g, '')) do not skew brace depth.
+      if (char === '/' && this.regexLiteralStartsHere(code, i)) {
+        result += ' ';
+        inRegexClass = false;
+        state = 'regex';
+        continue;
+      }
+
+      if (char === "'") {
+        result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+        state = 'single';
+        continue;
+      }
+
+      if (char === '"') {
+        result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+        state = 'double';
+        continue;
+      }
+
+      if (char === '`') {
+        result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+        state = 'template';
+        continue;
+      }
+
+      if (char === '{') {
+        if (this.startsJavaScriptFunctionBody(code, i)) {
+          functionBodyDepths.push(braceDepth + 1);
+        }
+        braceDepth++;
+        result += (blankFunctionBodies && functionBodyDepths.length > 0) ? ' ' : char;
+        continue;
+      }
+
+      if (char === '}') {
+        if (templateInterpolationDepths[templateInterpolationDepths.length - 1] === braceDepth) {
+          templateInterpolationDepths.pop();
+          braceDepth = Math.max(0, braceDepth - 1);
+          result += ' ';
+          state = 'template';
+          continue;
+        }
+        result += (blankFunctionBodies && inFunctionBody) ? ' ' : char;
+        if (functionBodyDepths[functionBodyDepths.length - 1] === braceDepth) {
+          functionBodyDepths.pop();
+        }
+        braceDepth = Math.max(0, braceDepth - 1);
+        continue;
+      }
+
+      result += (blankFunctionBodies && inFunctionBody) ? (char === '\n' ? '\n' : ' ') : char;
+    }
+
+    return result;
+  }
+
+  /**
+   * Blanks Python string literals (single/double/triple-quoted) and `#` line
+   * comments so heuristic substring checks don't fire on string content.
+   * Newlines are preserved to keep the view line-aligned with the source.
+   */
+  private static stripPythonStringsAndComments(code: string): string {
+    let result = '';
+    let i = 0;
+    while (i < code.length) {
+      const char = code[i];
+
+      if (char === '#') {
+        while (i < code.length && code[i] !== '\n') {
+          result += ' ';
+          i++;
+        }
+        continue;
+      }
+
+      if (char === "'" || char === '"') {
+        const triple = code.slice(i, i + 3) === char.repeat(3);
+        const delim = triple ? char.repeat(3) : char;
+        result += ' '.repeat(delim.length);
+        i += delim.length;
+        while (i < code.length) {
+          if (code[i] === '\\') {
+            result += code[i + 1] === '\n' ? ' \n' : '  ';
+            i += 2;
+            continue;
+          }
+          if (code.slice(i, i + delim.length) === delim) {
+            result += ' '.repeat(delim.length);
+            i += delim.length;
+            break;
+          }
+          // A single-quoted (non-triple) string cannot span a raw newline;
+          // treat it as terminated to stay in sync on malformed code.
+          if (code[i] === '\n' && !triple) {
+            result += '\n';
+            i++;
+            break;
+          }
+          result += code[i] === '\n' ? '\n' : ' ';
+          i++;
+        }
+        continue;
+      }
+
+      result += char;
+      i++;
+    }
+    return result;
+  }
+
+  // Identifiers that look like `name(...) {` but are control flow, not function bodies.
+  // `await` covers `for await (... of ...) {` (the head's trailing word is `await`).
+  private static readonly NON_FUNCTION_HEADS = new Set([
+    'if', 'for', 'while', 'switch', 'catch', 'with', 'await',
+  ]);
+
+  private static startsJavaScriptFunctionBody(code: string, openBraceIndex: number): boolean {
+    // Arrow function: ... => {
+    const prefix = code.slice(Math.max(0, openBraceIndex - 500), openBraceIndex);
+    if (/=>\s*$/.test(prefix)) return true;
+
+    // function declarations/expressions and method shorthand look like
+    // `<keyword/name>(<params>) {`. The param list can contain nested parens
+    // (e.g. a default value that calls another function:
+    // `function f(x = a.b()) {`), so locate the matching `(` by scanning
+    // backward with a paren counter rather than a greedy `\([^)]*\)` regex
+    // that stops at the first inner `)`.
+    let i = openBraceIndex - 1;
+    // Skip whitespace and any block comment between the `)` and the `{`
+    // (e.g. `function f() /* note */ {`).
+    while (i >= 0) {
+      if (/\s/.test(code[i])) { i--; continue; }
+      if (code[i] === '/' && i > 0 && code[i - 1] === '*') {
+        i -= 2; // step onto the char before the closing `*/`
+        while (i >= 1 && !(code[i - 1] === '/' && code[i] === '*')) i--;
+        i -= 2; // step before the opening `/*`
+        continue;
+      }
+      break;
+    }
+    if (i < 0 || code[i] !== ')') return false;
+
+    // Bound the backward walk: a real parameter list is short, so cap the scan
+    // distance. Without this, adversarial input (many unmatched `) {`) would
+    // make each brace walk to the start of the file — quadratic overall.
+    const scanFloor = Math.max(0, i - MAX_PARAM_SCAN);
+    let depth = 0;
+    let j = i;
+    for (; j >= scanFloor; j--) {
+      const c = code[j];
+      if (c === ')') depth++;
+      else if (c === '(') { depth--; if (depth === 0) break; }
+    }
+    if (depth !== 0) return false; // unbalanced, or matching '(' beyond the scan window
+
+    // `head` is the text immediately before the matching `(` (the name area).
+    const head = code.slice(Math.max(0, j - 60), j);
+
+    // function declaration/expression, incl. generators: function, function*,
+    // async function, function gen.
+    if (/(?:^|[^\w$])(?:async\s+)?function\s*\*?(?:\s+[\w$]+)?\s*$/.test(head)) return true;
+
+    // Method shorthand / class method / getter-setter / (async) generator method.
+    // Exclude control-flow keywords whose head also looks like `name(`.
+    const methodHead = /(?:^|[^\w$.])(?:(?:async|get|set)\s+)?\*?\s*([\w$]+)\s*$/.exec(head);
+    if (methodHead && !this.NON_FUNCTION_HEADS.has(methodHead[1])) return true;
+
+    return false;
+  }
+
+  // Keywords after which a `/` begins a regex literal rather than division.
+  private static readonly REGEX_PRECEDING_KEYWORDS = new Set([
+    'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void',
+    'do', 'else', 'yield', 'await', 'case', 'throw',
+  ]);
+
+  /**
+   * Decide whether a `/` at `slashIndex` (already known not to start `//` or `/*`)
+   * begins a regex literal vs. a division operator, by inspecting the previous
+   * significant token. Used only to keep brace counting balanced, so erring toward
+   * "regex" is bounded by the newline bail-out in the scanner.
+   */
+  private static regexLiteralStartsHere(code: string, slashIndex: number): boolean {
+    let j = slashIndex - 1;
+    while (j >= 0 && /\s/.test(code[j])) j--;
+    if (j < 0) return true; // start of input → regex
+    const c = code[j];
+    // After a value (identifier / number / `)` / `]` / `.` / a closing string or
+    // template quote), `/` is division...
+    if (/[\w$)\].'"`]/.test(c)) {
+      // ...unless the trailing word is a keyword that precedes a regex.
+      if (/[\w$]/.test(c)) {
+        let k = j;
+        while (k >= 0 && /[\w$]/.test(code[k])) k--;
+        const word = code.slice(k + 1, j + 1);
+        return this.REGEX_PRECEDING_KEYWORDS.has(word);
+      }
+      return false;
+    }
+    return true; // after ( , = : [ ! & | ? { } ; etc. → regex
+  }
   
   private static validateN8nVariables(
     code: string,
@@ -1485,25 +1860,43 @@ export class NodeSpecificValidators {
     suggestions: string[],
     errors: ValidationError[]
   ): void {
-    // Check if code accesses input data
+    // Several heuristics below scan a stripped view (string/comment/regex
+    // contents blanked) so tokens inside string literals cannot trip them.
+    // Function-body code is KEPT so the checks also see inside `.map()`/
+    // `.filter()` callbacks. Falls back to the raw code above the length cap
+    // (mirrors other checks).
+    const scanView = code.length <= MAX_CODE_LENGTH
+      ? (language === 'javaScript'
+        ? this.stripStringsCommentsRegex(code)
+        : this.stripPythonStringsAndComments(code))
+      : code;
+
+    // Check if code accesses input data. `$(` covers the $('Node Name')
+    // accessor; static/workflow context references mark intentional
+    // no-input (generator-style) nodes.
     const inputPatterns = language === 'javaScript'
-      ? ['items', '$input', '$json', '$node', '$prevNode']
+      ? ['items', '$input', '$json', '$node', '$prevNode', '$(', '$getWorkflowStaticData', '$workflow', '$execution', '$vars']
       : ['items', '_input'];
-    
-    const usesInput = inputPatterns.some(pattern => code.includes(pattern));
-    
+
+    // Scan the stripped view so a pattern inside a string literal or comment
+    // (e.g. a log message mentioning "$json") doesn't count as input access;
+    // template-literal interpolation code is preserved in the view.
+    const usesInput = inputPatterns.some(pattern => scanView.includes(pattern));
+
     if (!usesInput && code.length > 50) {
       warnings.push({
-        type: 'missing_common',
+        type: 'best_practice',
         message: 'Code doesn\'t reference input data',
         suggestion: language === 'javaScript'
           ? 'Access input with: items, $input.all(), or $json (single-item mode)'
           : 'Access input with: items variable'
       });
     }
-    
-    // Check for expression syntax in Code nodes
-    if (code.includes('{{') && code.includes('}}')) {
+
+    // Check for expression syntax in Code nodes. Scans the stripped view:
+    // {{ }} inside string literals (prompts, payloads, mustache templates)
+    // is valid code that n8n runs fine.
+    if (scanView.includes('{{') && scanView.includes('}}')) {
       errors.push({
         type: 'invalid_value',
         property: language === 'python' ? 'pythonCode' : 'jsCode',
@@ -1537,17 +1930,19 @@ export class NodeSpecificValidators {
     
     // Check for common variable mistakes
     if (language === 'javaScript') {
-      // Using $ without proper variable
-      if (/\$(?![a-zA-Z_(])/.test(code) && !code.includes('${')) {
+      // Using $ without proper variable. Scans the stripped view so `$` in
+      // regex literals (end anchors like /x$/) and string content can't trip it.
+      if (/\$(?![a-zA-Z_(])/.test(scanView) && !scanView.includes('${')) {
         warnings.push({
           type: 'best_practice',
           message: 'Invalid $ usage detected',
           suggestion: 'n8n variables start with $: $json, $input, $node, $workflow, $execution'
         });
       }
-      
-      // Check for helpers usage
-      if (code.includes('helpers.') && !code.includes('$helpers')) {
+
+      // Only flag a truly bare `helpers.` — `this.helpers.*` and `$helpers.*`
+      // are valid runtime accessors, and any `x.helpers.` is member access.
+      if (/(?<![.\w$])helpers\s*\./.test(scanView)) {
         warnings.push({
           type: 'invalid_value',
           property: 'jsCode',
@@ -1653,17 +2048,30 @@ export class NodeSpecificValidators {
     language: string,
     warnings: ValidationWarning[]
   ): void {
-    // Security checks
+    // Scan the string/comment/regex-stripped view so tokens inside string
+    // literals (e.g. a prompt mentioning "eval(") don't warn — security-type
+    // warnings survive every profile, so raw-string scanning is pure noise.
+    // Template-literal interpolation code is preserved in the view.
+    const securityView = language === 'javaScript'
+      ? this.stripStringsCommentsRegex(code)
+      : this.stripPythonStringsAndComments(code);
+    // Security checks. The lookbehind excludes member access (regex.exec(),
+    // obj.eval()) and identifiers that merely end in the keyword
+    // (getUserFunction(), retrieval()).
     const dangerousPatterns = [
-      { pattern: /eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
-      { pattern: /Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
-      { pattern: language === 'python' ? /exec\s*\(/ : /exec\s*\(/, message: 'Avoid exec() - it\'s a security risk' },
+      { pattern: /(?<![.\w$])eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
+      { pattern: /(?<![.\w$])Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
+      // Global-object forms (window.eval(), globalThis.Function()) slip past the
+      // member-access lookbehind above but are the same dynamic-eval sinks.
+      { pattern: /(?:window|globalThis)\s*\.\s*eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
+      { pattern: /(?:window|globalThis)\s*\.\s*Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
+      { pattern: /(?<![.\w$])exec\s*\(/, message: 'Avoid exec() - it\'s a security risk' },
       { pattern: /process\.env/, message: 'Limited environment access in Code nodes' },
       { pattern: /import\s+\*/, message: 'Avoid import * - be specific about imports' }
     ];
     
     dangerousPatterns.forEach(({ pattern, message }) => {
-      if (pattern.test(code)) {
+      if (pattern.test(securityView)) {
         warnings.push({
           type: 'security',
           message,
@@ -1710,8 +2118,16 @@ export class NodeSpecificValidators {
       });
     }
     
-    // File system access warning
-    if (/\b(fs|path|child_process)\b/.test(code)) {
+    // File system access warning. Requires actual module usage (require/import
+    // of fs/path/child_process, or fs./child_process. member access) — the bare
+    // words are extremely common as data field names (e.g. item.json.path).
+    const fsModuleUsagePatterns = [
+      /require\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
+      /\bimport\b[^;\n]*\bfrom\s*['"](?:node:)?(?:fs|path|child_process)['"]/,
+      /\bimport\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
+      /(?<![.\w$])(?:fs|child_process)\s*\.\s*\w/
+    ];
+    if (fsModuleUsagePatterns.some(pattern => pattern.test(code))) {
       warnings.push({
         type: 'security',
         message: 'File system and process access not available in Code nodes',
@@ -1726,8 +2142,13 @@ export class NodeSpecificValidators {
   static validateSet(context: NodeValidationContext): void {
     const { config, errors, warnings } = context;
 
-    // Validate jsonOutput when present (used in JSON mode or when directly setting JSON)
-    if (config.jsonOutput !== undefined && config.jsonOutput !== null && config.jsonOutput !== '') {
+    // Validate jsonOutput when present (used in JSON mode or when directly setting JSON).
+    // Expression values ('=...' prefix or {{ }} interpolation) resolve to JSON
+    // at runtime and cannot be statically parsed.
+    const jsonOutputIsExpression = typeof config.jsonOutput === 'string'
+      && (config.jsonOutput.trim().startsWith('=') || config.jsonOutput.includes('{{'));
+    if (config.jsonOutput !== undefined && config.jsonOutput !== null && config.jsonOutput !== ''
+        && !jsonOutputIsExpression) {
       try {
         const parsed = JSON.parse(config.jsonOutput);
 

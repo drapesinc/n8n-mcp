@@ -69,9 +69,9 @@ class DocumentationBatchProcessor {
         if (nodes.length === 0) {
             return { fetched: 0, failed: 0, skipped: 0, errors: [] };
         }
-        const packageNames = nodes
-            .map((n) => n.npmPackageName)
-            .filter((name) => !!name);
+        const packageNames = [
+            ...new Set(nodes.map((n) => n.npmPackageName).filter((name) => !!name)),
+        ];
         const readmeMap = await this.fetcher.fetchReadmesBatch(packageNames, progressCallback, concurrency);
         let fetched = 0;
         let failed = 0;
@@ -117,35 +117,55 @@ class DocumentationBatchProcessor {
             return { generated: 0, failed: nodes.length, skipped: 0, errors: [error] };
         }
         logger_1.logger.info(`LLM connection successful: ${connectionTest.message}`);
-        const inputs = nodes.map((node) => ({
-            nodeType: node.nodeType,
-            displayName: node.displayName,
-            description: node.description,
-            readme: node.npmReadme || '',
-            npmPackageName: node.npmPackageName,
-        }));
+        const packageGroups = new Map();
+        for (const node of nodes) {
+            const key = node.npmPackageName || node.nodeType;
+            const group = packageGroups.get(key);
+            if (group) {
+                group.push(node);
+            }
+            else {
+                packageGroups.set(key, [node]);
+            }
+        }
+        const targetsByNodeType = new Map();
+        const inputs = [];
+        for (const group of packageGroups.values()) {
+            const [representative] = group;
+            targetsByNodeType.set(representative.nodeType, group);
+            inputs.push({
+                nodeType: representative.nodeType,
+                displayName: representative.displayName,
+                description: representative.description,
+                readme: representative.npmReadme || '',
+                npmPackageName: representative.npmPackageName,
+                nodeNames: group.map((node) => node.displayName || node.nodeType),
+            });
+        }
         const results = await this.generator.generateBatch(inputs, concurrency, progressCallback);
         let generated = 0;
         let failed = 0;
         const errors = [];
         for (const result of results) {
+            const targets = targetsByNodeType.get(result.nodeType) ?? [{ nodeType: result.nodeType }];
             if (result.error) {
                 errors.push(`${result.nodeType}: ${result.error}`);
-                failed++;
+                failed += targets.length;
+                continue;
             }
-            else {
+            for (const target of targets) {
                 try {
-                    this.repository.updateNodeAISummary(result.nodeType, result.summary);
+                    this.repository.updateNodeAISummary(target.nodeType, result.summary);
                     generated++;
                 }
                 catch (error) {
-                    const msg = `Failed to save summary for ${result.nodeType}: ${error}`;
+                    const msg = `Failed to save summary for ${target.nodeType}: ${error}`;
                     errors.push(msg);
                     failed++;
                 }
             }
         }
-        logger_1.logger.info(`AI summary generation complete: ${generated} generated, ${failed} failed`);
+        logger_1.logger.info(`AI summary generation complete: ${generated} row(s) from ${inputs.length} package(s), ${failed} failed`);
         return { generated, failed, skipped: 0, errors };
     }
     getStats() {

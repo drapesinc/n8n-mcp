@@ -90,7 +90,8 @@ function validateAIAgent(node, reverseConnections, workflow) {
                 severity: 'warning',
                 nodeId: node.id,
                 nodeName: node.name,
-                message: `AI Agent "${node.name}" has 2 language models but needsFallback is not enabled. Set needsFallback=true or remove the second model.`
+                message: `AI Agent "${node.name}" has 2 language models but needsFallback is not enabled. Set needsFallback=true or remove the second model.`,
+                code: 'MULTIPLE_LANGUAGE_MODELS_NO_FALLBACK'
             });
         }
     }
@@ -107,10 +108,10 @@ function validateAIAgent(node, reverseConnections, workflow) {
     if (node.parameters.hasOutputParser === true) {
         if (outputParserConnections.length === 0) {
             issues.push({
-                severity: 'error',
+                severity: 'warning',
                 nodeId: node.id,
                 nodeName: node.name,
-                message: `AI Agent "${node.name}" has hasOutputParser=true but no ai_outputParser connection. Connect an output parser or set hasOutputParser=false.`,
+                message: `AI Agent "${node.name}" has hasOutputParser=true but no ai_outputParser connection. The agent will run but return a plain string - connect an output parser or set hasOutputParser=false.`,
                 code: 'MISSING_OUTPUT_PARSER'
             });
         }
@@ -143,7 +144,8 @@ function validateAIAgent(node, reverseConnections, workflow) {
             });
         }
     }
-    if (!node.parameters.systemMessage) {
+    const systemMessage = node.parameters.options?.systemMessage ?? node.parameters.systemMessage;
+    if (!systemMessage) {
         issues.push({
             severity: 'info',
             nodeId: node.id,
@@ -151,7 +153,9 @@ function validateAIAgent(node, reverseConnections, workflow) {
             message: `AI Agent "${node.name}" has no systemMessage. Consider adding one to define the agent's role, capabilities, and constraints.`
         });
     }
-    else if (node.parameters.systemMessage.trim().length < MIN_SYSTEM_MESSAGE_LENGTH) {
+    else if (typeof systemMessage === 'string' &&
+        !systemMessage.startsWith('=') &&
+        systemMessage.trim().length < MIN_SYSTEM_MESSAGE_LENGTH) {
         issues.push({
             severity: 'info',
             nodeId: node.id,
@@ -320,13 +324,22 @@ function validateBasicLLMChain(node, reverseConnections) {
             code: 'MISSING_LANGUAGE_MODEL'
         });
     }
-    else if (languageModelConnections.length > 1) {
+    else if (languageModelConnections.length > 2) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `Basic LLM Chain "${node.name}" has ${languageModelConnections.length} ai_languageModel connections. Basic LLM Chain only supports 1 language model (no fallback).`,
+            message: `Basic LLM Chain "${node.name}" has ${languageModelConnections.length} ai_languageModel connections. Maximum is 2 (for fallback model support).`,
             code: 'MULTIPLE_LANGUAGE_MODELS'
+        });
+    }
+    else if (languageModelConnections.length === 2 && !node.parameters.needsFallback) {
+        issues.push({
+            severity: 'warning',
+            nodeId: node.id,
+            nodeName: node.name,
+            message: `Basic LLM Chain "${node.name}" has 2 language models but needsFallback is not enabled. n8n will only use the first model. Set needsFallback=true or remove the second model.`,
+            code: 'MULTIPLE_LANGUAGE_MODELS_NO_FALLBACK'
         });
     }
     const memoryConnections = incoming.filter(c => c.type === 'ai_memory');

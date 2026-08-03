@@ -89,7 +89,6 @@ class SingleSessionHTTPServer {
         this.sessionTimeout = parseInt(process.env.SESSION_TIMEOUT_MINUTES || '30', 10) * 60 * 1000;
         this.authToken = null;
         this.cleanupTimer = null;
-        this.generateWorkflowHandler = options?.generateWorkflowHandler;
         this.additionalTools = options?.additionalTools;
         this.validateEnvironment();
         this.startSessionCleanup();
@@ -393,7 +392,8 @@ class SingleSessionHTTPServer {
                     let sessionIdToUse;
                     const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
                     const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
-                    if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
+                    const allowConcurrentSessions = process.env.MULTI_TENANT_ALLOW_CONCURRENT_SESSIONS === 'true';
+                    if (isMultiTenantEnabled && sessionStrategy === 'instance' && !allowConcurrentSessions && instanceContext?.instanceId) {
                         const sessionsToRemove = [];
                         for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
                             if (context?.instanceId === instanceContext.instanceId) {
@@ -431,7 +431,6 @@ class SingleSessionHTTPServer {
                         sessionIdToUse = sessionId || (0, uuid_1.v4)();
                     }
                     const server = new server_1.N8NDocumentationMCPServer(instanceContext, undefined, {
-                        generateWorkflowHandler: this.generateWorkflowHandler,
                         additionalTools: this.additionalTools,
                     });
                     transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
@@ -599,7 +598,6 @@ class SingleSessionHTTPServer {
             throw new Error(`Session limit reached (${MAX_SESSIONS})`);
         }
         const server = new server_1.N8NDocumentationMCPServer(undefined, undefined, {
-            generateWorkflowHandler: this.generateWorkflowHandler,
             additionalTools: this.additionalTools,
         });
         const transport = new sse_js_1.SSEServerTransport('/messages', res);
@@ -1226,6 +1224,15 @@ class SingleSessionHTTPServer {
                 if (!validation.valid) {
                     const reason = validation.errors?.join(', ') || 'invalid context';
                     logger_1.logger.warn(`Skipping session ${sessionState.sessionId} - invalid context: ${reason}`);
+                    logSecurityEvent('session_restore_failed', {
+                        sessionId: sessionState.sessionId,
+                        reason
+                    });
+                    continue;
+                }
+                if (!sessionState.context.n8nApiUrl || !sessionState.context.n8nApiKey) {
+                    const reason = 'restored context missing required tenant credentials (both n8nApiUrl and n8nApiKey are required)';
+                    logger_1.logger.warn(`Skipping session ${sessionState.sessionId} - ${reason}`);
                     logSecurityEvent('session_restore_failed', {
                         sessionId: sessionState.sessionId,
                         reason

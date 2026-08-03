@@ -6,7 +6,7 @@ exports.searchToolDocumentation = searchToolDocumentation;
 exports.getToolsByCategory = getToolsByCategory;
 exports.getAllCategories = getAllCategories;
 const tool_docs_1 = require("./tool-docs");
-function getToolDocumentation(toolName, depth = 'essentials') {
+function getToolDocumentation(toolName, depth = 'essentials', disabledOperations) {
     if (toolName === 'javascript_code_node_guide') {
         return getJavaScriptCodeNodeGuide(depth);
     }
@@ -17,10 +17,13 @@ function getToolDocumentation(toolName, depth = 'essentials') {
     if (!tool) {
         return `Tool '${toolName}' not found. Use tools_documentation() to see available tools.`;
     }
+    const disabledNotice = disabledOperations && disabledOperations.size > 0
+        ? `\n> **Server policy**: The following operations are disabled in this deployment: ${[...disabledOperations].join(', ')}\n`
+        : '';
     if (depth === 'essentials') {
         const { essentials } = tool;
         return `# ${tool.name}
-
+${disabledNotice}
 ${essentials.description}
 
 **Example**: ${essentials.example}
@@ -36,7 +39,7 @@ For full documentation, use: tools_documentation({topic: "${toolName}", depth: "
     }
     const { full } = tool;
     return `# ${tool.name}
-
+${disabledNotice}
 ${full.description}
 
 ## Parameters
@@ -63,7 +66,14 @@ ${full.pitfalls.map(p => `- ${p}`).join('\n')}
 ## Related Tools
 ${full.relatedTools.map(t => `- ${t}`).join('\n')}`;
 }
-function getToolsOverview(depth = 'essentials') {
+function buildDisabledOpsOverviewSection(disabledToolOps) {
+    if (!disabledToolOps || disabledToolOps.size === 0)
+        return '';
+    const lines = [...disabledToolOps.entries()]
+        .map(([tool, ops]) => `- **${tool}**: ${[...ops].join(', ')}`);
+    return `\n\n## Server Policy: Disabled Operations\nThe following operations are disabled in this deployment and will be rejected if called:\n${lines.join('\n')}`;
+}
+function getToolsOverview(depth = 'essentials', disabledToolOps) {
     const packageJson = require('../../package.json');
     const supportedN8nVersion = packageJson.dependencies?.['n8n-nodes-base']?.replace(/[^0-9.]/g, '') || 'latest';
     if (depth === 'essentials') {
@@ -134,11 +144,11 @@ When working with Code nodes, always start by calling the relevant guide:
 - n8n_autofix_workflow - Auto-fix common issues
 - n8n_test_workflow - Test/trigger workflows (webhook, form, chat, execute)
 - n8n_executions - Unified execution management (action='get'/'list'/'delete')
+- n8n_evaluations - Run and read evaluation test runs (action='list_runs'/'get_run'/'list_cases' on n8n 2.30+, 'run'/'cancel' on 2.32+)
 - n8n_health_check - Check n8n API connectivity
 - n8n_workflow_versions - Version history and rollback
 - n8n_deploy_template - Deploy templates directly to n8n instance
 - n8n_manage_datatable - Manage data tables and rows
-- n8n_generate_workflow - Generate workflow from natural language description
 
 ## Performance Characteristics
 - Instant (<10ms): search_nodes, get_node (minimal/standard)
@@ -147,7 +157,7 @@ When working with Code nodes, always start by calling the relevant guide:
 - Network-dependent: All n8n_* tools
 
 For comprehensive documentation on any tool:
-tools_documentation({topic: "tool_name", depth: "full"})`;
+tools_documentation({topic: "tool_name", depth: "full"})${buildDisabledOpsOverviewSection(disabledToolOps)}`;
     }
     const categories = getAllCategories();
     return `# n8n MCP Tools - Complete Reference
@@ -180,7 +190,7 @@ ${tools.map(toolName => {
 - n8n API tools only available when N8N_API_URL and N8N_API_KEY are configured
 
 For detailed documentation on any tool:
-tools_documentation({topic: "tool_name", depth: "full"})`;
+tools_documentation({topic: "tool_name", depth: "full"})${buildDisabledOpsOverviewSection(disabledToolOps)}`;
 }
 function searchToolDocumentation(keyword) {
     const results = [];

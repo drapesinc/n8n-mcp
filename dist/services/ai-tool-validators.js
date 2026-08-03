@@ -30,7 +30,7 @@ function validateHTTPRequestTool(node) {
     const issues = [];
     if (!getToolDescription(node)) {
         issues.push({
-            severity: 'error',
+            severity: 'warning',
             nodeId: node.id,
             nodeName: node.name,
             message: `HTTP Request Tool "${node.name}" has no toolDescription. Add a clear description to help the LLM know when to use this API.`,
@@ -206,7 +206,7 @@ function validateVectorStoreTool(node, reverseConnections, workflow) {
     const issues = [];
     if (!getToolDescription(node)) {
         issues.push({
-            severity: 'error',
+            severity: 'warning',
             nodeId: node.id,
             nodeName: node.name,
             message: `Vector Store Tool "${node.name}" has no toolDescription. Add one to explain what data it searches.`,
@@ -238,7 +238,7 @@ function validateWorkflowTool(node, reverseConnections) {
     const issues = [];
     if (!getToolDescription(node)) {
         issues.push({
-            severity: 'error',
+            severity: 'warning',
             nodeId: node.id,
             nodeName: node.name,
             message: `Workflow Tool "${node.name}" has no toolDescription. Add one to help the LLM know when to use this tool.`,
@@ -260,11 +260,10 @@ function validateAIAgentTool(node, reverseConnections) {
     const issues = [];
     if (!getToolDescription(node)) {
         issues.push({
-            severity: 'error',
+            severity: 'info',
             nodeId: node.id,
             nodeName: node.name,
-            message: `AI Agent Tool "${node.name}" has no toolDescription. Add one to help the LLM know when to use this tool.`,
-            code: 'MISSING_TOOL_DESCRIPTION'
+            message: `AI Agent Tool "${node.name}" has no toolDescription. n8n uses the generic default "AI Agent that can call other tools" - add a specific description to improve tool selection.`
         });
     }
     if (node.parameters.maxIterations !== undefined) {
@@ -290,22 +289,17 @@ function validateAIAgentTool(node, reverseConnections) {
 }
 function validateMCPClientTool(node) {
     const issues = [];
-    if (!getToolDescription(node)) {
+    const transport = node.parameters.serverTransport;
+    const hasEndpoint = transport === 'sse' ? Boolean(node.parameters.sseEndpoint) :
+        transport === 'httpStreamable' ? Boolean(node.parameters.endpointUrl) :
+            Boolean(node.parameters.sseEndpoint || node.parameters.endpointUrl);
+    if (!hasEndpoint) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `MCP Client Tool "${node.name}" has no toolDescription. Add one to help the LLM know when to use this tool.`,
-            code: 'MISSING_TOOL_DESCRIPTION'
-        });
-    }
-    if (!node.parameters.serverUrl) {
-        issues.push({
-            severity: 'error',
-            nodeId: node.id,
-            nodeName: node.name,
-            message: `MCP Client Tool "${node.name}" has no serverUrl. Configure the MCP server URL.`,
-            code: 'MISSING_SERVER_URL'
+            message: `MCP Client Tool "${node.name}" has no MCP endpoint configured. Set sseEndpoint (SSE transport) or endpointUrl (HTTP Streamable transport).`,
+            code: 'MISSING_MCP_ENDPOINT'
         });
     }
     return issues;
@@ -318,15 +312,6 @@ function validateThinkTool(_node) {
 }
 function validateSerpApiTool(node) {
     const issues = [];
-    if (!getToolDescription(node)) {
-        issues.push({
-            severity: 'error',
-            nodeId: node.id,
-            nodeName: node.name,
-            message: `SerpApi Tool "${node.name}" has no toolDescription. Add one to explain when to use Google search.`,
-            code: 'MISSING_TOOL_DESCRIPTION'
-        });
-    }
     if (!node.credentials || !node.credentials.serpApiApi) {
         issues.push({
             severity: 'warning',
@@ -339,15 +324,6 @@ function validateSerpApiTool(node) {
 }
 function validateWikipediaTool(node) {
     const issues = [];
-    if (!getToolDescription(node)) {
-        issues.push({
-            severity: 'error',
-            nodeId: node.id,
-            nodeName: node.name,
-            message: `Wikipedia Tool "${node.name}" has no toolDescription. Add one to explain when to use Wikipedia.`,
-            code: 'MISSING_TOOL_DESCRIPTION'
-        });
-    }
     if (node.parameters.language) {
         const validLanguageCodes = /^[a-z]{2,3}$/;
         if (!validLanguageCodes.test(node.parameters.language)) {
@@ -363,15 +339,6 @@ function validateWikipediaTool(node) {
 }
 function validateSearXngTool(node) {
     const issues = [];
-    if (!getToolDescription(node)) {
-        issues.push({
-            severity: 'error',
-            nodeId: node.id,
-            nodeName: node.name,
-            message: `SearXNG Tool "${node.name}" has no toolDescription. Add one to explain when to use SearXNG.`,
-            code: 'MISSING_TOOL_DESCRIPTION'
-        });
-    }
     if (!node.parameters.baseUrl) {
         issues.push({
             severity: 'error',

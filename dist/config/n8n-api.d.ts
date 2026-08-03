@@ -3,6 +3,8 @@ export declare function getN8nApiConfig(): {
     apiKey: string;
     timeout: number;
     maxRetries: number;
+    cfClientId: string | undefined;
+    cfClientSecret: string | undefined;
 } | null;
 export declare function isN8nApiConfigured(): boolean;
 export declare function getN8nApiConfigFromContext(context: {

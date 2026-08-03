@@ -41,6 +41,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         };
         this.applyProfileFilters(enhancedResult, profile);
         this.addOperationSpecificEnhancements(nodeType, config, filteredProperties, enhancedResult);
+        this.filterWarningsByProfile(enhancedResult, profile);
         enhancedResult.errors = this.deduplicateErrors(enhancedResult.errors);
         enhancedResult.nextSteps = this.generateNextSteps(enhancedResult);
         enhancedResult.valid = enhancedResult.errors.length === 0;
@@ -73,9 +74,17 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
     }
     static applyNodeDefaults(properties, config) {
         const result = { ...config };
-        for (const prop of properties) {
-            if (prop.name && prop.default !== undefined && result[prop.name] === undefined) {
-                result[prop.name] = prop.default;
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (const prop of properties) {
+                if (prop.name &&
+                    prop.default !== undefined &&
+                    result[prop.name] === undefined &&
+                    this.isPropertyVisible(prop, result)) {
+                    result[prop.name] = prop.default;
+                    changed = true;
+                }
             }
         }
         return result;
@@ -234,9 +243,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         }
         if (url && url.startsWith('=')) {
             const expressionContent = url.slice(1);
-            const lowerExpression = expressionContent.toLowerCase();
-            if (expressionContent.startsWith('www.') ||
-                (expressionContent.includes('{{') && !lowerExpression.includes('http'))) {
+            if (expressionContent.startsWith('www.')) {
                 result.warnings.push({
                     type: 'invalid_value',
                     property: 'url',
@@ -295,6 +302,30 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         switch (profile) {
             case 'minimal':
                 result.errors = result.errors.filter(e => e.type === 'missing_required');
+                break;
+            case 'runtime':
+                result.errors = result.errors.filter(e => e.type === 'missing_required' ||
+                    e.type === 'invalid_value' ||
+                    (e.type === 'invalid_type' && e.message.includes('undefined')));
+                break;
+            case 'strict':
+                if (result.warnings.length === 0 && result.errors.length === 0) {
+                    result.suggestions.push('Consider adding error handling with onError property and timeout configuration');
+                    result.suggestions.push('Add authentication if connecting to external services');
+                }
+                this.enforceErrorHandlingForProfile(result, profile);
+                break;
+            case 'ai-friendly':
+            default:
+                this.addErrorHandlingSuggestions(result);
+                break;
+        }
+        this.filterWarningsByProfile(result, profile);
+    }
+    static filterWarningsByProfile(result, profile) {
+        switch (profile) {
+            case 'minimal':
+            case 'runtime':
                 result.warnings = result.warnings.filter(w => {
                     if (this.shouldFilterCredentialWarning(w)) {
                         return false;
@@ -303,29 +334,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                 });
                 result.suggestions = [];
                 break;
-            case 'runtime':
-                result.errors = result.errors.filter(e => e.type === 'missing_required' ||
-                    e.type === 'invalid_value' ||
-                    (e.type === 'invalid_type' && e.message.includes('undefined')));
-                result.warnings = result.warnings.filter(w => {
-                    if (this.shouldFilterCredentialWarning(w)) {
-                        return false;
-                    }
-                    if (w.type === 'security' || w.type === 'deprecated')
-                        return true;
-                    if (w.type === 'inefficient' && w.message && w.message.includes('not visible')) {
-                        return false;
-                    }
-                    return false;
-                });
-                result.suggestions = [];
-                break;
             case 'strict':
-                if (result.warnings.length === 0 && result.errors.length === 0) {
-                    result.suggestions.push('Consider adding error handling with onError property and timeout configuration');
-                    result.suggestions.push('Add authentication if connecting to external services');
-                }
-                this.enforceErrorHandlingForProfile(result, profile);
                 break;
             case 'ai-friendly':
             default:
@@ -347,7 +356,6 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                     }
                     return true;
                 });
-                this.addErrorHandlingSuggestions(result);
                 break;
         }
     }
@@ -583,6 +591,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         }
     }
     static validateSpecialTypeStructures(config, properties, result) {
+        const typeVersion = typeof config['@version'] === 'number' ? config['@version'] : undefined;
         for (const [key, value] of Object.entries(config)) {
             if (value === undefined || value === null)
                 continue;
@@ -601,6 +610,9 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
             }
             else if (propDef.type === 'resourceLocator') {
                 structureType = 'resourceLocator';
+            }
+            else if (propDef.type === 'agentSelector') {
+                structureType = 'agentSelector';
             }
             if (!structureType)
                 continue;
@@ -628,25 +640,30 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                 });
             }
             if (typeof value === 'object' && value !== null) {
-                this.validateComplexTypeStructure(key, value, structureType, structure, result);
+                this.validateComplexTypeStructure(key, value, structureType, structure, result, typeVersion);
             }
             if (structureType === 'filter' && value.conditions) {
                 this.validateFilterOperations(value.conditions, key, result);
             }
         }
     }
-    static validateComplexTypeStructure(propertyName, value, type, structure, result) {
+    static validateComplexTypeStructure(propertyName, value, type, structure, result, typeVersion) {
         switch (type) {
-            case 'filter':
-                if (!value.combinator) {
-                    result.errors.push({
-                        type: 'invalid_configuration',
-                        property: `${propertyName}.combinator`,
-                        message: 'Filter must have a combinator field',
-                        fix: 'Add combinator: "and" or combinator: "or" to the filter configuration'
-                    });
+            case 'filter': {
+                const legacyConditionKeys = ['string', 'number', 'boolean', 'dateTime'];
+                const usedLegacyKeys = legacyConditionKeys.filter(k => Array.isArray(value[k]));
+                if (usedLegacyKeys.length > 0) {
+                    if (typeVersion !== undefined && typeVersion >= 2) {
+                        result.errors.push({
+                            type: 'invalid_configuration',
+                            property: propertyName,
+                            message: `Node typeVersion ${typeVersion} uses the v2 filter format, but '${propertyName}' contains v1-style conditions (${usedLegacyKeys.join(', ')}). n8n ignores them and the node will always take the true branch`,
+                            fix: 'Convert to the v2 format: { combinator: "and", conditions: [{ leftValue, rightValue, operator: { type, operation } }] }'
+                        });
+                    }
+                    break;
                 }
-                else if (value.combinator !== 'and' && value.combinator !== 'or') {
+                if (value.combinator !== undefined && value.combinator !== 'and' && value.combinator !== 'or') {
                     result.errors.push({
                         type: 'invalid_configuration',
                         property: `${propertyName}.combinator`,
@@ -654,15 +671,16 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                         fix: 'Set combinator to either "and" or "or"'
                     });
                 }
-                if (!value.conditions) {
+                const nonCombinatorKeys = Object.keys(value).filter(k => k !== 'combinator');
+                if (value.conditions === undefined && nonCombinatorKeys.length === 0) {
                     result.errors.push({
                         type: 'invalid_configuration',
-                        property: `${propertyName}.conditions`,
+                        property: propertyName,
                         message: 'Filter must have a conditions field',
-                        fix: 'Add conditions array to the filter configuration'
+                        fix: 'Add a conditions array: { combinator: "and", conditions: [{ leftValue, rightValue, operator: { type, operation } }] }'
                     });
                 }
-                else if (!Array.isArray(value.conditions)) {
+                else if (value.conditions !== undefined && value.conditions !== null && !Array.isArray(value.conditions)) {
                     result.errors.push({
                         type: 'invalid_configuration',
                         property: `${propertyName}.conditions`,
@@ -671,32 +689,37 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                     });
                 }
                 break;
-            case 'resourceLocator':
-                if (!value.mode) {
+            }
+            case 'agentSelector':
+            case 'resourceLocator': {
+                const suggestedModes = type === 'agentSelector' ? ['list', 'id'] : ['id', 'url', 'list'];
+                const quoted = suggestedModes.map((mode) => `"${mode}"`).join(', ');
+                if (value.mode === undefined || value.mode === null) {
                     result.errors.push({
                         type: 'invalid_configuration',
                         property: `${propertyName}.mode`,
-                        message: 'ResourceLocator must have a mode field',
-                        fix: 'Add mode: "id", mode: "url", or mode: "list" to the resourceLocator configuration'
+                        message: `${type} must have a mode field`,
+                        fix: `Add a mode field set to one of: ${quoted}`
                     });
                 }
-                else if (!['id', 'url', 'list', 'name'].includes(value.mode)) {
+                else if (value.mode !== '' && !['id', 'url', 'list', 'name'].includes(value.mode)) {
                     result.errors.push({
                         type: 'invalid_configuration',
                         property: `${propertyName}.mode`,
                         message: `Invalid mode value: ${value.mode}. Must be "id", "url", "list", or "name"`,
-                        fix: 'Set mode to one of: "id", "url", "list", "name"'
+                        fix: `Set mode to one of: ${quoted}`
                     });
                 }
                 if (!value.hasOwnProperty('value')) {
                     result.errors.push({
                         type: 'invalid_configuration',
                         property: `${propertyName}.value`,
-                        message: 'ResourceLocator must have a value field',
-                        fix: 'Add value field to the resourceLocator configuration'
+                        message: `${type} must have a value field`,
+                        fix: 'Add value field to the configuration'
                     });
                 }
                 break;
+            }
             case 'assignmentCollection':
                 if (!value.assignments) {
                     result.errors.push({

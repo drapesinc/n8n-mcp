@@ -2,10 +2,8 @@
 import express from 'express';
 import { InstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
-import { GenerateWorkflowHandler } from './types/generate-workflow';
 import type { AdditionalTool } from './types/additional-tools';
 export interface SingleSessionHTTPServerOptions {
-    generateWorkflowHandler?: GenerateWorkflowHandler;
     additionalTools?: AdditionalTool[];
 }
 export declare class SingleSessionHTTPServer {
@@ -19,7 +17,6 @@ export declare class SingleSessionHTTPServer {
     private sessionTimeout;
     private authToken;
     private cleanupTimer;
-    private generateWorkflowHandler?;
     private additionalTools?;
     constructor(options?: SingleSessionHTTPServerOptions);
     private startSessionCleanup;

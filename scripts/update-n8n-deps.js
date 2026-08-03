@@ -12,6 +12,9 @@ const path = require('path');
 class N8nDependencyUpdater {
   constructor() {
     this.packageJsonPath = path.join(__dirname, '..', 'package.json');
+    // The Docker builder installs its own minimal dependency set rather than the
+    // repo's, so its n8n-workflow pin has to be updated alongside package.json.
+    this.dockerfilePath = path.join(__dirname, '..', 'Dockerfile');
     // Track n8n-nodes-base directly (the package our loader actually requires).
     // The full `n8n` meta package was dropped in favor of this leaner dep tree.
     this.mainPackage = 'n8n-nodes-base';
@@ -140,8 +143,55 @@ class N8nDependencyUpdater {
       JSON.stringify(packageJson, null, 2) + '\n',
       'utf8'
     );
-    
+
+    this.syncDockerfilePins(packageJson);
+
     return true;
+  }
+
+  /**
+   * Align the Dockerfile's build-dependency pins with package.json.
+   *
+   * The builder stage installs its own minimal dependency set instead of the
+   * repo's, so every version in it is a hand-maintained copy that drifts. Two
+   * ways that has broken the image: a stale n8n-workflow compiles src/ against
+   * older type definitions (a type added in a newer n8n then fails only in
+   * Docker), and a stale zod fails `npm install` outright, because n8n-workflow
+   * declares an exact zod peer dependency.
+   *
+   * Every pin naming a direct dependency is rewritten; anything the repo does
+   * not depend on directly (e.g. @types/uuid) is left alone.
+   */
+  syncDockerfilePins(packageJson) {
+    if (!fs.existsSync(this.dockerfilePath)) {
+      console.log('   ⚠️  Dockerfile not found - skipping build-dependency pin sync');
+      return;
+    }
+
+    const declared = { ...packageJson.dependencies, ...packageJson.devDependencies };
+    const dockerfile = fs.readFileSync(this.dockerfilePath, 'utf8');
+    const synced = [];
+
+    // Matches `name@version` install arguments, including scoped package names
+    const updated = dockerfile.replace(
+      /(^|\s)((?:@[^\s@/]+\/)?[^\s@/]+)@([^\s\\]+)/g,
+      (match, lead, name, version) => {
+        const declaredVersion = declared[name];
+        if (!declaredVersion || declaredVersion === version) return match;
+
+        synced.push(`${name} ${version} -> ${declaredVersion}`);
+        return `${lead}${name}@${declaredVersion}`;
+      }
+    );
+
+    if (!synced.length) {
+      console.log('   Dockerfile build-dependency pins already match package.json');
+      return;
+    }
+
+    fs.writeFileSync(this.dockerfilePath, updated, 'utf8');
+    console.log(`   Synced ${synced.length} Dockerfile pin(s) with package.json:`);
+    for (const entry of synced) console.log(`     ${entry}`);
   }
 
   /**
@@ -184,7 +234,7 @@ class N8nDependencyUpdater {
   runValidation() {
     console.log('\n🧪 Running validation tests...');
     try {
-      execSync('npm run validate && npm run test-nodes', { 
+      execSync('npm run validate', {
         cwd: path.join(__dirname, '..'),
         stdio: 'inherit'
       });

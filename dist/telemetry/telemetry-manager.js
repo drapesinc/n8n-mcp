@@ -41,6 +41,7 @@ const batch_processor_1 = require("./batch-processor");
 const performance_monitor_1 = require("./performance-monitor");
 const telemetry_types_1 = require("./telemetry-types");
 const telemetry_error_1 = require("./telemetry-error");
+const telemetry_fetch_1 = require("./telemetry-fetch");
 const logger_1 = require("../utils/logger");
 class TelemetryManager {
     constructor() {
@@ -84,10 +85,15 @@ class TelemetryManager {
                         eventsPerSecond: 1,
                     },
                 },
+                global: {
+                    fetch: telemetry_fetch_1.telemetryFetch,
+                },
             });
-            this.batchProcessor = new batch_processor_1.TelemetryBatchProcessor(this.supabase, () => this.isEnabled());
-            this.batchProcessor.start();
+            this.batchProcessor = new batch_processor_1.TelemetryBatchProcessor(this.supabase, () => this.isEnabled(), {
+                onFlushRequested: () => this.flush(),
+            });
             this.isInitialized = true;
+            this.batchProcessor.start();
             logger_1.logger.debug('Telemetry initialized successfully');
         }
         catch (error) {

@@ -13,6 +13,8 @@ const n8nApiConfigSchema = zod_1.z.object({
     N8N_API_KEY: zod_1.z.string().min(1).optional(),
     N8N_API_TIMEOUT: zod_1.z.coerce.number().positive().default(30000),
     N8N_API_MAX_RETRIES: zod_1.z.coerce.number().positive().default(3),
+    N8N_CF_CLIENT_ID: zod_1.z.string().trim().optional(),
+    N8N_CF_CLIENT_SECRET: zod_1.z.string().trim().optional(),
 });
 let envLoaded = false;
 function getN8nApiConfig() {
@@ -33,6 +35,8 @@ function getN8nApiConfig() {
         apiKey: config.N8N_API_KEY,
         timeout: config.N8N_API_TIMEOUT,
         maxRetries: config.N8N_API_MAX_RETRIES,
+        cfClientId: config.N8N_CF_CLIENT_ID,
+        cfClientSecret: config.N8N_CF_CLIENT_SECRET,
     };
 }
 function isN8nApiConfigured() {
@@ -48,6 +52,8 @@ function getN8nApiConfigFromContext(context) {
         apiKey: context.n8nApiKey,
         timeout: context.n8nApiTimeout ?? 30000,
         maxRetries: context.n8nApiMaxRetries ?? 3,
+        cfClientId: undefined,
+        cfClientSecret: undefined,
     };
 }
 //# sourceMappingURL=n8n-api.js.map

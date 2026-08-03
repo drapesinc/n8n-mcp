@@ -96,6 +96,7 @@ const workflowDiffSchema = zod_1.z.object({
         settings: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
         name: zod_1.z.string().optional(),
         tag: zod_1.z.string().optional(),
+        nodeGroups: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
         destinationProjectId: zod_1.z.string().min(1).optional(),
         id: zod_1.z.string().optional(),
     }).transform((op) => {
@@ -327,9 +328,14 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
             }
         }
         try {
+            const groupWarnings = [];
+            const groupWriteOptions = {
+                authoredGroups: new Set(diffResult.authoredGroupNames ?? []),
+                onWarning: (message) => groupWarnings.push(message),
+            };
             let updatedWorkflow;
             try {
-                updatedWorkflow = await client.updateWorkflow(input.id, diffResult.workflow);
+                updatedWorkflow = await client.updateWorkflow(input.id, diffResult.workflow, groupWriteOptions);
             }
             catch (updateError) {
                 if (workflowBefore && !input.validateOnly) {
@@ -358,7 +364,9 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     let rollbackPerformed = false;
                     let rollbackErrorMessage;
                     try {
-                        await client.updateWorkflow(input.id, workflowBefore);
+                        await client.updateWorkflow(input.id, workflowBefore, {
+                            onWarning: (message) => groupWarnings.push(message),
+                        });
                         rollbackPerformed = true;
                         logger_1.logger.warn('updateWorkflow failed; rolled back to prior state', {
                             workflowId: input.id,
@@ -379,6 +387,9 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                             rollbackPerformed,
                             ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
                             ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),
+                            ...(groupWarnings.length > 0
+                                ? { warnings: groupWarnings.map(message => ({ operation: -1, message })) }
+                                : {}),
                         };
                         const suffix = rollbackPerformed
                             ? ' (workflow restored to prior state)'
@@ -516,7 +527,7 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                 }
             }
             if (workflowBefore && !input.validateOnly) {
-                trackWorkflowMutation({
+                void trackWorkflowMutation({
                     sessionId,
                     toolName: 'n8n_update_partial_workflow',
                     userIntent: input.intent || 'Partial workflow update',
@@ -546,13 +557,13 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     applied: diffResult.applied,
                     failed: diffResult.failed,
                     errors: diffResult.errors,
-                    warnings: mergeWarnings(diffResult.warnings, tagWarnings)
+                    warnings: mergeWarnings(diffResult.warnings, [...tagWarnings, ...groupWarnings])
                 }
             };
         }
         catch (error) {
             if (workflowBefore && !input.validateOnly) {
-                trackWorkflowMutation({
+                void trackWorkflowMutation({
                     sessionId,
                     toolName: 'n8n_update_partial_workflow',
                     userIntent: input.intent || 'Partial workflow update',
@@ -628,6 +639,10 @@ function inferIntentFromOperations(operations) {
                 return `Rewire ${op.source || 'node'} from ${op.from || ''} to ${op.to || ''}`.trim();
             case 'updateName':
                 return `Rename workflow to "${op.name || ''}"`;
+            case 'setNodeGroups':
+                return Array.isArray(op.nodeGroups) && op.nodeGroups.length === 0
+                    ? 'Remove all canvas groups'
+                    : `Set canvas groups (${Array.isArray(op.nodeGroups) ? op.nodeGroups.length : 0})`;
             case 'activateWorkflow':
                 return 'Activate workflow';
             case 'deactivateWorkflow':

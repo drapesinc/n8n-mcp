@@ -44,8 +44,7 @@ npm run start:http # HTTP mode for remote access
 # Build & Test
 npm run build          # Build TypeScript
 npm run rebuild        # Rebuild node database
-npm run test-nodes     # Test critical nodes
-npm run validate       # Validate node data
+npm run validate       # Validate node data (includes critical-node checks)
 npm test               # Run all tests
 
 # Update Dependencies

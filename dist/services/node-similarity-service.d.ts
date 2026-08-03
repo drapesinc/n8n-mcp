@@ -23,6 +23,7 @@ export interface CommonMistakePattern {
 export declare class NodeSimilarityService {
     private static readonly SCORING_THRESHOLD;
     private static readonly TYPO_EDIT_DISTANCE;
+    private static readonly MIN_CATEGORY_MATCH_LENGTH;
     private static readonly SHORT_SEARCH_LENGTH;
     private static readonly CACHE_DURATION_MS;
     private static readonly AUTO_FIX_CONFIDENCE;

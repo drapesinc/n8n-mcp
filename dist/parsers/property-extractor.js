@@ -1,15 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PropertyExtractor = void 0;
+const node_types_1 = require("../types/node-types");
 class PropertyExtractor {
     extractProperties(nodeClass) {
         const properties = [];
-        let instance;
-        try {
-            instance = typeof nodeClass === 'function' ? new nodeClass() : nodeClass;
-        }
-        catch (e) {
-        }
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
         if (instance?.nodeVersions) {
             const versions = Object.keys(instance.nodeVersions).map(Number);
             if (versions.length > 0) {
@@ -30,32 +26,17 @@ class PropertyExtractor {
         return properties;
     }
     getNodeDescription(nodeClass) {
-        let description;
-        if (typeof nodeClass === 'function') {
-            try {
-                const instance = new nodeClass();
-                const inst = instance;
-                description = inst.description || inst.baseDescription || {};
-            }
-            catch (e) {
-                const nodeClassAny = nodeClass;
-                description = nodeClassAny.description || {};
-            }
+        if (typeof nodeClass !== 'function') {
+            return nodeClass.description || {};
         }
-        else {
-            const inst = nodeClass;
-            description = inst.description || {};
-        }
-        return description;
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
+        return instance
+            ? instance.description || instance.baseDescription || {}
+            : nodeClass.description || {};
     }
     extractOperations(nodeClass) {
         const operations = [];
-        let instance;
-        try {
-            instance = typeof nodeClass === 'function' ? new nodeClass() : nodeClass;
-        }
-        catch (e) {
-        }
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
         if (instance?.nodeVersions) {
             const versions = Object.keys(instance.nodeVersions).map(Number);
             if (versions.length > 0) {
@@ -112,31 +93,29 @@ class PropertyExtractor {
         }
         return operations;
     }
+    declaresToolUse(description) {
+        const usableAsTool = description?.usableAsTool;
+        return usableAsTool !== undefined && usableAsTool !== null && usableAsTool !== false;
+    }
     detectAIToolCapability(nodeClass) {
-        const description = this.getNodeDescription(nodeClass);
-        if (description?.usableAsTool === true)
-            return true;
-        if (description?.actions?.some((a) => a.usableAsTool === true))
-            return true;
-        const nodeClassAny = nodeClass;
-        if (nodeClassAny.nodeVersions) {
-            for (const version of Object.values(nodeClassAny.nodeVersions)) {
-                if (version.description?.usableAsTool === true)
-                    return true;
-            }
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
+        const description = instance?.description || instance?.baseDescription || this.getNodeDescription(nodeClass);
+        const nodeVersions = nodeClass.nodeVersions ?? instance?.nodeVersions;
+        if (nodeVersions) {
+            const currentVersion = instance?.currentVersion ??
+                description?.defaultVersion ??
+                Math.max(...Object.keys(nodeVersions).map(Number));
+            const versionDescription = nodeVersions[currentVersion]?.description;
+            if (versionDescription)
+                return this.declaresToolUse(versionDescription);
         }
-        const aiIndicators = ['openai', 'anthropic', 'huggingface', 'cohere', 'ai'];
-        const nodeName = description?.name?.toLowerCase() || '';
-        return aiIndicators.some(indicator => nodeName.includes(indicator));
+        if (this.declaresToolUse(description))
+            return true;
+        return description?.actions?.some((a) => this.declaresToolUse(a)) === true;
     }
     extractCredentials(nodeClass) {
         const credentials = [];
-        let instance;
-        try {
-            instance = typeof nodeClass === 'function' ? new nodeClass() : nodeClass;
-        }
-        catch (e) {
-        }
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
         if (instance?.nodeVersions) {
             const versions = Object.keys(instance.nodeVersions).map(Number);
             if (versions.length > 0) {

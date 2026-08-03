@@ -41,6 +41,7 @@ const docs_mapper_1 = require("../mappers/docs-mapper");
 const node_repository_1 = require("../database/node-repository");
 const tool_variant_generator_1 = require("../services/tool-variant-generator");
 const template_sanitizer_1 = require("../utils/template-sanitizer");
+const core_node_check_1 = require("./core-node-check");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 async function rebuild() {
@@ -54,8 +55,8 @@ async function rebuild() {
     const toolVariantGenerator = new tool_variant_generator_1.ToolVariantGenerator();
     const schema = fs.readFileSync(path.join(__dirname, '../../src/database/schema.sql'), 'utf8');
     db.exec(schema);
-    db.exec('DELETE FROM nodes');
-    console.log('🗑️  Cleared existing data\n');
+    db.exec('DELETE FROM nodes WHERE is_community = 0 OR is_community IS NULL');
+    console.log('🗑️  Cleared core/base nodes (community nodes preserved)\n');
     const nodes = await loader.loadAllNodes();
     console.log(`📦 Loaded ${nodes.length} nodes from packages\n`);
     const stats = {
@@ -133,6 +134,16 @@ async function rebuild() {
     console.log('\n🔍 Rebuilding FTS5 search index...');
     db.prepare("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')").run();
     console.log('✅ FTS5 index rebuilt successfully');
+    console.log('\n🧩 Checking core node completeness...');
+    try {
+        (0, core_node_check_1.assertCoreNodesPresent)(repository);
+        console.log('✅ All canonical core nodes present');
+    }
+    catch (error) {
+        console.error(`❌ ${error.message}`);
+        db.close();
+        process.exit(1);
+    }
     console.log('\n🔍 Running validation checks...');
     try {
         const validationResults = validateDatabase(repository);
@@ -256,6 +267,9 @@ function validateDatabase(repository) {
     };
 }
 if (require.main === module) {
-    rebuild().catch(console.error);
+    rebuild().catch(error => {
+        console.error(error);
+        process.exit(1);
+    });
 }
 //# sourceMappingURL=rebuild.js.map

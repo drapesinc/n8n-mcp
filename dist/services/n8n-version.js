@@ -70,8 +70,9 @@ function getSupportedSettingsProperties(version) {
     }
     return supported;
 }
-async function fetchN8nVersion(baseUrl, pinnedAgents) {
-    const cached = versionCache.get(baseUrl);
+async function fetchN8nVersion(baseUrl, options) {
+    const { headers, pinnedAgents, forceRefresh } = options ?? {};
+    const cached = forceRefresh ? undefined : versionCache.get(baseUrl);
     if (cached && Date.now() - cached.fetchedAt < VERSION_CACHE_TTL_MS) {
         logger_1.logger.debug(`Using cached n8n version for ${baseUrl}: ${cached.info.version}`);
         return cached.info;
@@ -82,6 +83,7 @@ async function fetchN8nVersion(baseUrl, pinnedAgents) {
         logger_1.logger.debug(`Fetching n8n version from ${settingsUrl}`);
         const response = await axios_1.default.get(settingsUrl, {
             timeout: 5000,
+            headers,
             validateStatus: (status) => status < 500,
             maxRedirects: 0,
             httpAgent: pinnedAgents?.httpAgent,

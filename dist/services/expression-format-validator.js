@@ -115,28 +115,15 @@ class ExpressionFormatValidator {
                 severity: 'error'
             };
         }
-        const hasExpression = universalResults.some(r => r.hasExpression);
-        if (hasExpression && typeof value === 'string') {
-            const fieldName = fieldPath.split('.').pop() || '';
-            const confidenceScore = confidence_scorer_1.ConfidenceScorer.scoreResourceLocatorRecommendation(fieldName, context.nodeType, value);
-            if (confidenceScore.value >= 0.5) {
-                return {
-                    fieldPath,
-                    currentValue: value,
-                    correctedValue: this.generateCorrection(value, true),
-                    issueType: 'needs-resource-locator',
-                    explanation: `Field '${fieldName}' should use resource locator format for better compatibility. (Confidence: ${Math.round(confidenceScore.value * 100)}%)`,
-                    severity: 'warning',
-                    confidence: confidenceScore.value
-                };
-            }
-        }
         return null;
     }
-    static validateNodeParameters(parameters, context) {
+    static validateNodeParameters(parameters, context, profile) {
         const issues = [];
         const visited = new WeakSet();
         this.validateRecursive(parameters, '', context, issues, visited);
+        if (profile === 'minimal' || profile === 'runtime') {
+            return issues.filter(i => i.issueType !== 'missing-cached-result-name');
+        }
         return issues;
     }
     static validateRecursive(obj, path, context, issues, visited, depth = 0) {
@@ -177,6 +164,8 @@ class ExpressionFormatValidator {
                 if (key.startsWith('__'))
                     return;
                 if (key === 'jsCode' || key === 'pythonCode' || key === 'functionCode')
+                    return;
+                if (/\[\d+\]/.test(key))
                     return;
                 const newPath = path ? `${path}.${key}` : key;
                 this.validateRecursive(value, newPath, context, issues, visited, depth + 1);

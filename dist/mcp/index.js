@@ -40,6 +40,7 @@ const telemetry_cli_1 = require("../telemetry/telemetry-cli");
 const early_error_logger_1 = require("../telemetry/early-error-logger");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
 const fs_1 = require("fs");
+const stdin_teardown_1 = require("../utils/stdin-teardown");
 process.on('uncaughtException', (error) => {
     if (process.env.MCP_MODE !== 'stdio') {
         console.error('Uncaught Exception:', error);
@@ -128,9 +129,9 @@ async function main() {
                     try {
                         logger_1.logger.info(`Shutdown initiated by: ${signal}`);
                         await server.shutdown();
-                        if (process.stdin && !process.stdin.destroyed) {
-                            process.stdin.pause();
-                            process.stdin.destroy();
+                        (0, stdin_teardown_1.tearDownStdin)();
+                        if (process.platform === 'win32') {
+                            process.exit(0);
                         }
                         setTimeout(() => {
                             logger_1.logger.warn('Shutdown timeout exceeded, forcing exit');

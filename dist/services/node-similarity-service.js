@@ -181,8 +181,11 @@ class NodeSimilarityService {
         let categoryMatch = 0;
         if (node.category) {
             const categoryClean = this.normalizeNodeType(node.category);
-            if (cleanInvalid.includes(categoryClean) || categoryClean.includes(cleanInvalid)) {
-                categoryMatch = 20;
+            if (categoryClean.length >= NodeSimilarityService.MIN_CATEGORY_MATCH_LENGTH) {
+                const invalidTokens = invalidType.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+                if (invalidTokens.includes(categoryClean)) {
+                    categoryMatch = 20;
+                }
             }
         }
         let packageMatch = 0;
@@ -240,12 +243,14 @@ class NodeSimilarityService {
             .replace(/[^a-z0-9]/g, '')
             .trim();
     }
-    getStringSimilarity(s1, s2) {
+    getStringSimilarity(s1, s2, maxDistance = 5) {
         if (s1 === s2)
             return 1;
         if (!s1 || !s2)
             return 0;
-        const distance = this.getEditDistance(s1, s2);
+        const distance = this.getEditDistance(s1, s2, maxDistance);
+        if (distance > maxDistance)
+            return 0;
         const maxLen = Math.max(s1.length, s2.length);
         return 1 - (distance / maxLen);
     }
@@ -346,6 +351,7 @@ class NodeSimilarityService {
 exports.NodeSimilarityService = NodeSimilarityService;
 NodeSimilarityService.SCORING_THRESHOLD = 50;
 NodeSimilarityService.TYPO_EDIT_DISTANCE = 2;
+NodeSimilarityService.MIN_CATEGORY_MATCH_LENGTH = 4;
 NodeSimilarityService.SHORT_SEARCH_LENGTH = 5;
 NodeSimilarityService.CACHE_DURATION_MS = 5 * 60 * 1000;
 NodeSimilarityService.AUTO_FIX_CONFIDENCE = 0.9;

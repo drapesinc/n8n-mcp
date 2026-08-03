@@ -13,6 +13,9 @@ class NodeRepository {
         }
         this.db = dbOrService;
     }
+    transaction(fn) {
+        return this.db.transaction(fn);
+    }
     pruneExpiredWorkflowVersions() {
         const days = parseInt(process.env.WORKFLOW_VERSION_RETENTION_DAYS || String(DEFAULT_WORKFLOW_VERSION_RETENTION_DAYS), 10);
         if (!Number.isFinite(days) || days <= 0) {
@@ -441,11 +444,26 @@ class NodeRepository {
         const result = this.db.prepare('SELECT 1 FROM nodes WHERE npm_package_name = ? LIMIT 1').get(npmPackageName);
         return !!result;
     }
-    getNodeByNpmPackage(npmPackageName) {
-        const row = this.db.prepare('SELECT * FROM nodes WHERE npm_package_name = ?').get(npmPackageName);
-        if (!row)
-            return null;
-        return this.parseNodeRow(row);
+    getNodesByNpmPackage(npmPackageName) {
+        const rows = this.db.prepare('SELECT * FROM nodes WHERE npm_package_name = ? ORDER BY node_type').all(npmPackageName);
+        return rows.map(row => this.parseNodeRow(row));
+    }
+    deleteStaleCommunityNodes(npmPackageName, keepNodeTypes) {
+        if (keepNodeTypes.length === 0) {
+            return 0;
+        }
+        const where = `
+      WHERE npm_package_name = ? AND is_community = 1 AND is_verified = 0
+        AND node_type NOT IN (${keepNodeTypes.map(() => '?').join(', ')})
+    `;
+        const params = [npmPackageName, ...keepNodeTypes];
+        const stale = this.db.prepare(`SELECT COUNT(*) as count FROM nodes ${where}`).get(...params);
+        const staleCount = stale?.count ?? 0;
+        if (staleCount === 0) {
+            return 0;
+        }
+        this.db.prepare(`DELETE FROM nodes ${where}`).run(...params);
+        return staleCount;
     }
     deleteCommunityNodes() {
         const result = this.db.prepare('DELETE FROM nodes WHERE is_community = 1').run();

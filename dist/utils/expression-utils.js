@@ -5,6 +5,7 @@ exports.containsExpression = containsExpression;
 exports.shouldSkipLiteralValidation = shouldSkipLiteralValidation;
 exports.extractExpressionContent = extractExpressionContent;
 exports.extractBracketExpressions = extractBracketExpressions;
+exports.hasDanglingOpenBracket = hasDanglingOpenBracket;
 exports.hasBracketExpression = hasBracketExpression;
 exports.hasMixedContent = hasMixedContent;
 function isExpression(value) {
@@ -46,6 +47,19 @@ function extractBracketExpressions(value) {
         i = end + 2;
     }
     return results;
+}
+function hasDanglingOpenBracket(value) {
+    let cursor = 0;
+    while (cursor < value.length) {
+        const start = value.indexOf('{{', cursor);
+        if (start === -1)
+            return false;
+        const end = value.indexOf('}}', start + 2);
+        if (end === -1)
+            return true;
+        cursor = end + 2;
+    }
+    return false;
 }
 function hasBracketExpression(value) {
     if (typeof value !== 'string')

@@ -30,10 +30,10 @@ exports.toolsDocumentation = {
     n8n_autofix_workflow: workflow_management_1.n8nAutofixWorkflowDoc,
     n8n_test_workflow: workflow_management_1.n8nTestWorkflowDoc,
     n8n_executions: workflow_management_1.n8nExecutionsDoc,
+    n8n_evaluations: workflow_management_1.n8nEvaluationsDoc,
     n8n_workflow_versions: workflow_management_1.n8nWorkflowVersionsDoc,
     n8n_deploy_template: workflow_management_1.n8nDeployTemplateDoc,
     n8n_manage_datatable: workflow_management_1.n8nManageDatatableDoc,
-    n8n_generate_workflow: workflow_management_1.n8nGenerateWorkflowDoc,
     n8n_manage_credentials: workflow_management_1.n8nManageCredentialsDoc
 };
 //# sourceMappingURL=index.js.map

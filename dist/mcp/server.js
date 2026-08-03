@@ -90,6 +90,8 @@ class N8NDocumentationMCPServer {
         this.previousToolTimestamp = Date.now();
         this.earlyLogger = null;
         this.disabledToolsCache = null;
+        this.disabledToolOperationsCache = null;
+        this.filteredToolDefinitionsCache = null;
         this.useSharedDatabase = false;
         this.sharedDbState = null;
         this.isShutdown = false;
@@ -98,7 +100,6 @@ class N8NDocumentationMCPServer {
         this.workflowPatternsCache = null;
         this.instanceContext = instanceContext;
         this.earlyLogger = earlyLogger || null;
-        this.generateWorkflowHandler = options?.generateWorkflowHandler;
         this.registerAdditionalTools(options?.additionalTools || []);
         const envDbPath = process.env.NODE_DB_PATH;
         let dbPath = null;
@@ -392,6 +393,102 @@ class N8NDocumentationMCPServer {
         this.disabledToolsCache = new Set(tools);
         return this.disabledToolsCache;
     }
+    getDisabledToolOperations() {
+        if (this.disabledToolOperationsCache !== null) {
+            return this.disabledToolOperationsCache;
+        }
+        const result = new Map();
+        let envVal = process.env.DISABLED_TOOL_OPERATIONS || '';
+        if (!envVal) {
+            this.disabledToolOperationsCache = result;
+            this.filteredToolDefinitionsCache = new Map();
+            return result;
+        }
+        if (envVal.length > 10000) {
+            logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS environment variable too long (${envVal.length} chars), truncating to 10000`);
+            envVal = envVal.substring(0, 10000);
+        }
+        let entries = envVal.split(';').map(e => e.trim()).filter(Boolean);
+        if (entries.length > 50) {
+            logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS contains ${entries.length} entries, limiting to first 50`);
+            entries = entries.slice(0, 50);
+        }
+        for (const entry of entries) {
+            const colonIdx = entry.indexOf(':');
+            if (colonIdx === -1)
+                continue;
+            const toolName = entry.substring(0, colonIdx).trim();
+            const opsStr = entry.substring(colonIdx + 1).trim();
+            if (!toolName || !opsStr)
+                continue;
+            const ops = opsStr.split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
+            if (ops.length === 0)
+                continue;
+            const existing = result.get(toolName) ?? new Set();
+            ops.forEach(op => existing.add(op));
+            result.set(toolName, existing);
+        }
+        for (const [toolName, ops] of result) {
+            const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[toolName];
+            if (!paramName) {
+                logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: unknown tool '${toolName}' — no per-operation filtering applied. Eligible tools: ${Object.keys(tools_n8n_manager_1.TOOL_OPERATION_PARAM).join(', ')}`);
+                continue;
+            }
+            const tool = tools_n8n_manager_1.n8nManagementTools.find(t => t.name === toolName);
+            const enumValues = tool?.inputSchema?.properties?.[paramName]?.enum ?? [];
+            for (const op of ops) {
+                if (enumValues.length > 0 && !enumValues.includes(op)) {
+                    logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: '${op}' is not a valid ${paramName} for '${toolName}' (valid: ${enumValues.join(', ')}); it will have no effect.`);
+                }
+            }
+        }
+        if (result.size > 0) {
+            const summary = [...result.entries()]
+                .map(([t, ops]) => `${t}: [${[...ops].join(', ')}]`)
+                .join('; ');
+            logger_1.logger.info(`Disabled tool operations configured: ${summary}`);
+        }
+        this.disabledToolOperationsCache = result;
+        this.filteredToolDefinitionsCache = this.buildFilteredToolDefinitions(result);
+        return result;
+    }
+    buildFilteredToolDefinitions(disabledOps) {
+        const cache = new Map();
+        for (const [toolName, ops] of disabledOps) {
+            const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[toolName];
+            if (!paramName)
+                continue;
+            const original = tools_n8n_manager_1.n8nManagementTools.find(t => t.name === toolName);
+            if (!original)
+                continue;
+            const cloned = JSON.parse(JSON.stringify(original));
+            const param = cloned.inputSchema?.properties?.[paramName];
+            if (param?.enum) {
+                param.enum = param.enum.filter(v => !ops.has(v.toLowerCase()));
+                if (param.enum.length === 0) {
+                    logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: all operations for '${toolName}' are disabled ` +
+                        `but the tool still appears in ListTools. ` +
+                        `Consider adding '${toolName}' to DISABLED_TOOLS instead.`);
+                }
+                if (param.description) {
+                    const disabledList = [...ops].join(', ');
+                    param.description = `${param.description} (disabled by server policy: ${disabledList})`;
+                }
+            }
+            const disabledList = [...ops].join(', ');
+            cloned.description = `${cloned.description}\n\n> Operations disabled by server policy: ${disabledList}`;
+            const destructive = tools_n8n_manager_1.DESTRUCTIVE_TOOL_OPERATIONS[toolName];
+            if (destructive && cloned.annotations) {
+                const remaining = param?.enum ?? [];
+                const stillDestructive = remaining.some(v => destructive.has(String(v).toLowerCase()));
+                if (!stillDestructive) {
+                    cloned.annotations = { ...cloned.annotations, readOnlyHint: true, destructiveHint: false };
+                }
+            }
+            cache.set(toolName, cloned);
+        }
+        return cache;
+    }
     setupHandlers() {
         this.server.setRequestHandler(types_js_1.InitializeRequestSchema, async (request) => {
             const clientVersion = request.params.protocolVersion;
@@ -478,6 +575,11 @@ class N8NDocumentationMCPServer {
                     description: tool.description
                 });
             });
+            const disabledToolOps = this.getDisabledToolOperations();
+            if (disabledToolOps.size > 0 && this.filteredToolDefinitionsCache) {
+                tools = tools.map(tool => this.filteredToolDefinitionsCache.get(tool.name) ?? tool);
+            }
+            ui_1.UIAppRegistry.injectToolMeta(tools);
             return { tools };
         });
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
@@ -499,7 +601,8 @@ class N8NDocumentationMCPServer {
                                 message: `Tool '${name}' is not available in this deployment. It has been disabled via DISABLED_TOOLS environment variable.`,
                                 tool: name
                             }, null, 2)
-                        }]
+                        }],
+                    isError: true
                 };
             }
             let processedArgs = args;
@@ -547,6 +650,30 @@ class N8NDocumentationMCPServer {
             processedArgs = this.coerceStringifiedJsonParams(name, processedArgs);
             if (processedArgs) {
                 processedArgs = JSON.parse(JSON.stringify(processedArgs));
+            }
+            const disabledToolOps = this.getDisabledToolOperations();
+            const disabledOpsForTool = disabledToolOps.get(name);
+            if (disabledOpsForTool && disabledOpsForTool.size > 0) {
+                const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[name];
+                if (paramName) {
+                    const requestedOp = processedArgs?.[paramName];
+                    if (requestedOp && disabledOpsForTool.has(String(requestedOp).toLowerCase())) {
+                        logger_1.logger.warn(`Attempted to call disabled operation: ${name}.${requestedOp}`);
+                        return {
+                            content: [{
+                                    type: 'text',
+                                    text: JSON.stringify({
+                                        error: 'OPERATION_DISABLED',
+                                        message: `Operation '${requestedOp}' on tool '${name}' is disabled by server policy.`,
+                                        tool: name,
+                                        operation: requestedOp,
+                                        disabledOperations: [...disabledOpsForTool]
+                                    }, null, 2)
+                                }],
+                            isError: true
+                        };
+                    }
+                }
             }
             const isAdditionalTool = this.additionalToolsByName.has(name);
             try {
@@ -804,6 +931,17 @@ class N8NDocumentationMCPServer {
                         ? { valid: true, errors: [] }
                         : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
                     break;
+                case 'n8n_evaluations': {
+                    const evalErrors = [];
+                    if (!args.action)
+                        evalErrors.push({ field: 'action', message: 'action is required' });
+                    if (!args.workflowId)
+                        evalErrors.push({ field: 'workflowId', message: 'workflowId is required' });
+                    validationResult = evalErrors.length === 0
+                        ? { valid: true, errors: [] }
+                        : { valid: false, errors: evalErrors };
+                    break;
+                }
                 case 'n8n_manage_datatable':
                     validationResult = args.action
                         ? { valid: true, errors: [] }
@@ -1033,6 +1171,17 @@ class N8NDocumentationMCPServer {
         if (disabledTools.has(name)) {
             throw new Error(`Tool '${name}' is disabled via DISABLED_TOOLS environment variable`);
         }
+        const disabledToolOps = this.getDisabledToolOperations();
+        const disabledOpsForTool = disabledToolOps.get(name);
+        if (disabledOpsForTool && disabledOpsForTool.size > 0) {
+            const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[name];
+            if (paramName) {
+                const requestedOp = args[paramName];
+                if (requestedOp && disabledOpsForTool.has(String(requestedOp).toLowerCase())) {
+                    throw new Error(`Operation '${requestedOp}' on tool '${name}' is disabled by server policy`);
+                }
+            }
+        }
         logger_1.logger.info(`Tool execution: ${name}`, (0, redaction_1.summarizeToolCallArgs)(args));
         if (typeof args !== 'object' || args === null) {
             throw new Error(`Invalid arguments for tool ${name}: expected object, got ${typeof args}`);
@@ -1172,6 +1321,8 @@ class N8NDocumentationMCPServer {
                         return n8nHandlers.handleGetWorkflowMinimal(args, ctx);
                     case 'active':
                         return n8nHandlers.handleGetWorkflowActive(args, ctx);
+                    case 'filtered':
+                        return n8nHandlers.handleGetWorkflowFiltered(args, ctx);
                     case 'full':
                     default:
                         return n8nHandlers.handleGetWorkflow(args, ctx);
@@ -1227,6 +1378,33 @@ class N8NDocumentationMCPServer {
                         throw new Error(`Unknown action: ${execAction}. Valid actions: get, list, delete`);
                 }
             }
+            case 'n8n_evaluations': {
+                this.validateToolParams(name, args, ['action', 'workflowId']);
+                const evalAction = args.action;
+                switch (evalAction) {
+                    case 'list_runs':
+                        return n8nHandlers.handleListTestRuns(args, this.instanceContext);
+                    case 'get_run':
+                        if (!args.runId) {
+                            throw new Error('runId is required for action=get_run');
+                        }
+                        return n8nHandlers.handleGetTestRun(args, this.instanceContext);
+                    case 'list_cases':
+                        if (!args.runId) {
+                            throw new Error('runId is required for action=list_cases');
+                        }
+                        return n8nHandlers.handleListTestCases(args, this.instanceContext);
+                    case 'run':
+                        return n8nHandlers.handleTriggerTestRun(args, this.instanceContext);
+                    case 'cancel':
+                        if (!args.runId) {
+                            throw new Error('runId is required for action=cancel');
+                        }
+                        return n8nHandlers.handleCancelTestRun(args, this.instanceContext);
+                    default:
+                        throw new Error(`Unknown action: ${evalAction}. Valid actions: list_runs, get_run, list_cases, run, cancel`);
+                }
+            }
             case 'n8n_health_check':
                 if (args.mode === 'diagnostic') {
                     return n8nHandlers.handleDiagnostic({ params: { arguments: args } }, this.resolveContextFromArgs(args));
@@ -1277,44 +1455,6 @@ class N8NDocumentationMCPServer {
             }
             case 'n8n_audit_instance':
                 return n8nHandlers.handleAuditInstance(args, this.instanceContext);
-            case 'n8n_generate_workflow': {
-                this.validateToolParams(name, args, ['description']);
-                if (this.generateWorkflowHandler && this.instanceContext) {
-                    await this.ensureInitialized();
-                    if (!this.repository) {
-                        throw new Error('Repository not initialized');
-                    }
-                    const repo = this.repository;
-                    const ctx = this.instanceContext;
-                    const helpers = {
-                        createWorkflow: (wfArgs) => n8nHandlers.handleCreateWorkflow(wfArgs, ctx),
-                        validateWorkflow: (id) => n8nHandlers.handleValidateWorkflow({ id }, repo, ctx),
-                        autofixWorkflow: (id) => n8nHandlers.handleAutofixWorkflow({ id }, repo, ctx),
-                        getWorkflow: (id) => n8nHandlers.handleGetWorkflow({ id }, ctx),
-                    };
-                    try {
-                        const result = await this.generateWorkflowHandler(args, ctx, helpers);
-                        return result ?? { success: false, error: 'Handler returned no result' };
-                    }
-                    catch (err) {
-                        const message = err instanceof Error ? err.message : String(err);
-                        return { success: false, error: message };
-                    }
-                }
-                return {
-                    hosted_only: true,
-                    message: 'The n8n_generate_workflow tool is available exclusively on the hosted version of n8n-mcp. ' +
-                        'It uses AI to generate complete, validated n8n workflows from natural language descriptions.\n\n' +
-                        'To access this feature:\n' +
-                        '1. Register for free at https://dashboard.n8n-mcp.com\n' +
-                        '2. Connect your n8n instance\n' +
-                        '3. Use your hosted API key in your MCP client\n\n' +
-                        'The hosted service includes:\n' +
-                        '- 73,000+ pre-built workflow templates with instant deployment\n' +
-                        '- AI-powered fresh generation for custom workflows\n' +
-                        '- Automatic validation and error correction'
-                };
-            }
             default:
                 throw new Error(`Unknown tool: ${name}`);
         }
@@ -1387,15 +1527,22 @@ class N8NDocumentationMCPServer {
         if (!node) {
             throw new Error(`Node ${nodeType} not found`);
         }
+        const isCommunityNode = node.isCommunity ?? false;
+        const isMarkedAsAITool = node.isAITool ?? false;
+        let aiToolFlagSource = null;
+        if (isMarkedAsAITool) {
+            aiToolFlagSource = isCommunityNode ? 'declared-or-ai-category' : 'declared-property';
+        }
         const aiToolCapabilities = {
             canBeUsedAsTool: true,
-            hasUsableAsToolProperty: node.isAITool ?? false,
-            requiresEnvironmentVariable: !(node.isAITool ?? false) && node.package !== 'n8n-nodes-base',
+            hasUsableAsToolProperty: isMarkedAsAITool,
+            aiToolFlagSource,
+            requiresEnvironmentVariable: isCommunityNode,
             toolConnectionType: 'ai_tool',
             commonToolUseCases: this.getCommonAIToolUseCases(node.nodeType),
-            environmentRequirement: node.package && node.package !== 'n8n-nodes-base' ?
-                'N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true' :
-                null
+            environmentRequirement: isCommunityNode
+                ? 'N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true'
+                : null
         };
         let outputs = undefined;
         if (node.outputNames && Array.isArray(node.outputNames) && node.outputNames.length > 0) {
@@ -2003,11 +2150,11 @@ class N8NDocumentationMCPServer {
             tools,
             totalCount: tools.length,
             requirements: {
-                environmentVariable: 'N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true',
-                nodeProperty: 'usableAsTool: true',
+                environmentVariable: 'N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true (community nodes only; built-in tools need no environment variable)',
+                nodeProperty: 'usableAsTool (declared; community nodes may instead carry the codex AI category)',
             },
             usage: {
-                description: 'These nodes have the usableAsTool property set to true, making them optimized for AI agent usage.',
+                description: 'These nodes are marked as AI tools. For built-in nodes this reflects a declared usableAsTool property; for community nodes it can also be inferred from the package\'s AI category, since community metadata often omits the property.',
                 note: 'ANY node in n8n can be used as an AI tool by connecting it to the ai_tool port of an AI Agent node.',
                 examples: [
                     'Regular nodes like Slack, Google Sheets, or HTTP Request can be used as tools',
@@ -2431,7 +2578,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             totalVersions: versions.length,
             hasVersionHistory: versions.length > 0
         };
-        this.cache.set(cacheKey, summary, 86400000);
+        this.cache.set(cacheKey, summary, 86400);
         return summary;
     }
     versionMetadataUnavailable(nodeType, extra = {}) {
@@ -2761,61 +2908,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             } : undefined
         };
     }
-    async getNodeAsToolInfo(nodeType) {
-        await this.ensureInitialized();
-        if (!this.repository)
-            throw new Error('Repository not initialized');
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
-        let node = this.repository.getNode(normalizedType);
-        if (!node && normalizedType !== nodeType) {
-            node = this.repository.getNode(nodeType);
-        }
-        if (!node) {
-            const alternatives = (0, node_utils_1.getNodeTypeAlternatives)(normalizedType);
-            for (const alt of alternatives) {
-                const found = this.repository.getNode(alt);
-                if (found) {
-                    node = found;
-                    break;
-                }
-            }
-        }
-        if (!node) {
-            throw new Error(`Node ${nodeType} not found`);
-        }
-        const commonUseCases = this.getCommonAIToolUseCases(node.nodeType);
-        const aiToolCapabilities = {
-            canBeUsedAsTool: true,
-            hasUsableAsToolProperty: node.isAITool,
-            requiresEnvironmentVariable: !node.isAITool && node.package !== 'n8n-nodes-base',
-            connectionType: 'ai_tool',
-            commonUseCases,
-            requirements: {
-                connection: 'Connect to the "ai_tool" port of an AI Agent node',
-                environment: node.package !== 'n8n-nodes-base' ?
-                    'Set N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true for community nodes' :
-                    'No special environment variables needed for built-in nodes'
-            },
-            examples: this.getAIToolExamples(node.nodeType),
-            tips: [
-                'Give the tool a clear, descriptive name in the AI Agent settings',
-                'Write a detailed tool description to help the AI understand when to use it',
-                'Test the node independently before connecting it as a tool',
-                node.isAITool ?
-                    'This node is optimized for AI tool usage' :
-                    'This is a regular node that can be used as an AI tool'
-            ]
-        };
-        return {
-            nodeType: node.nodeType,
-            workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package, node.nodeType),
-            displayName: node.displayName,
-            description: node.description,
-            package: node.package,
-            isMarkedAsAITool: node.isAITool,
-            aiToolCapabilities
-        };
-    }
     getOutputDescriptions(nodeType, outputName, index) {
         if (nodeType === 'nodes-base.splitInBatches') {
             if (outputName === 'done' && index === 0) {
@@ -2933,53 +3025,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
         return undefined;
     }
-    getAIToolExamples(nodeType) {
-        const exampleMap = {
-            'nodes-base.slack': {
-                toolName: 'Send Slack Message',
-                toolDescription: 'Sends a message to a specified Slack channel or user. Use this to notify team members about important events or results.',
-                nodeConfig: {
-                    resource: 'message',
-                    operation: 'post',
-                    channel: '={{ $fromAI("channel", "The Slack channel to send to, e.g. #general") }}',
-                    text: '={{ $fromAI("message", "The message content to send") }}'
-                }
-            },
-            'nodes-base.googleSheets': {
-                toolName: 'Update Google Sheet',
-                toolDescription: 'Reads or updates data in a Google Sheets spreadsheet. Use this to log information, retrieve data, or update records.',
-                nodeConfig: {
-                    operation: 'append',
-                    sheetId: 'your-sheet-id',
-                    range: 'A:Z',
-                    dataMode: 'autoMap'
-                }
-            },
-            'nodes-base.httpRequest': {
-                toolName: 'Call API',
-                toolDescription: 'Makes HTTP requests to external APIs. Use this to fetch data, trigger webhooks, or integrate with any web service.',
-                nodeConfig: {
-                    method: '={{ $fromAI("method", "HTTP method: GET, POST, PUT, DELETE") }}',
-                    url: '={{ $fromAI("url", "The complete API endpoint URL") }}',
-                    sendBody: true,
-                    bodyContentType: 'json',
-                    jsonBody: '={{ $fromAI("body", "Request body as JSON object") }}'
-                }
-            }
-        };
-        for (const [key, example] of Object.entries(exampleMap)) {
-            if (nodeType.includes(key)) {
-                return example;
-            }
-        }
-        return {
-            toolName: 'Custom Tool',
-            toolDescription: 'Performs specific operations. Describe what this tool does and when to use it.',
-            nodeConfig: {
-                note: 'Configure the node based on its specific requirements'
-            }
-        };
-    }
     async validateNodeMinimal(nodeType, config) {
         await this.ensureInitialized();
         if (!this.repository)
@@ -3026,10 +3071,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         };
     }
     async getToolsDocumentation(topic, depth = 'essentials') {
+        const disabledToolOps = this.getDisabledToolOperations();
         if (!topic || topic === 'overview') {
-            return (0, tools_documentation_1.getToolsOverview)(depth);
+            return (0, tools_documentation_1.getToolsOverview)(depth, disabledToolOps.size > 0 ? disabledToolOps : undefined);
         }
-        return (0, tools_documentation_1.getToolDocumentation)(topic, depth);
+        const toolDisabledOps = disabledToolOps.get(topic);
+        return (0, tools_documentation_1.getToolDocumentation)(topic, depth, toolDisabledOps);
     }
     async connect(transport) {
         await this.ensureInitialized();

@@ -35,6 +35,14 @@ export class NodeRepository {
   }
 
   /**
+   * Run several repository writes as one unit, so a failure part-way through
+   * leaves no half-applied state behind.
+   */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn);
+  }
+
+  /**
    * Age-based housekeeping: remove version backups past the retention window.
    * Called once during database initialization. Internal maintenance only —
    * not callable by tenants and not tenant-scoped (deterministic retention,
@@ -690,15 +698,51 @@ export class NodeRepository {
   }
 
   /**
-   * Get node by npm package name
+   * Get every node stored for an npm package. A package can ship several nodes,
+   * each of which gets its own row (#967).
    */
-  getNodeByNpmPackage(npmPackageName: string): any | null {
-    const row = this.db.prepare(
-      'SELECT * FROM nodes WHERE npm_package_name = ?'
-    ).get(npmPackageName) as any;
+  getNodesByNpmPackage(npmPackageName: string): any[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM nodes WHERE npm_package_name = ? ORDER BY node_type'
+    ).all(npmPackageName) as any[];
 
-    if (!row) return null;
-    return this.parseNodeRow(row);
+    return rows.map(row => this.parseNodeRow(row));
+  }
+
+  /**
+   * Delete unverified community rows for an npm package that are keyed by a node
+   * type outside the given set, returning how many rows were removed. Rows are
+   * keyed by node_type, so a sync that resolves a corrected (#949) or larger
+   * (#967) set of node types for a package would otherwise insert new rows and
+   * leave the outdated ones in search results.
+   */
+  deleteStaleCommunityNodes(npmPackageName: string, keepNodeTypes: string[]): number {
+    // "Keep nothing" is a caller bug, not an intent to wipe the package: deleting
+    // every unverified row of a package is deleteCommunityNodes' job, not this one.
+    if (keepNodeTypes.length === 0) {
+      return 0;
+    }
+
+    // Both statements are built from one WHERE so the reported count cannot drift
+    // from what is deleted. The count comes from a SELECT rather than the run
+    // result because the sql.js adapter reports a fixed change count of 1.
+    const where = `
+      WHERE npm_package_name = ? AND is_community = 1 AND is_verified = 0
+        AND node_type NOT IN (${keepNodeTypes.map(() => '?').join(', ')})
+    `;
+    const params = [npmPackageName, ...keepNodeTypes];
+
+    const stale = this.db.prepare(
+      `SELECT COUNT(*) as count FROM nodes ${where}`
+    ).get(...params) as { count: number } | undefined;
+
+    const staleCount = stale?.count ?? 0;
+    if (staleCount === 0) {
+      return 0;
+    }
+
+    this.db.prepare(`DELETE FROM nodes ${where}`).run(...params);
+    return staleCount;
   }
 
   /**

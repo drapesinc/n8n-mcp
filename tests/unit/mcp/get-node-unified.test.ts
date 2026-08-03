@@ -986,7 +986,7 @@ describe('Unified get_node Tool', () => {
       expect(cacheSetSpy).toHaveBeenCalledWith(
         expect.any(String),
         expect.any(Object),
-        86400000 // 24 hours in milliseconds
+        86400 // 24 hours in seconds (SimpleCache.set treats the TTL as seconds)
       );
     });
 

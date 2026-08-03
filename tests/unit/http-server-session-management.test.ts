@@ -419,6 +419,52 @@ describe('HTTP Server Session Management', () => {
       expect((server as any).transports['session-a']).toBeUndefined();
       expect(oldTransport.close).toHaveBeenCalled();
     });
+
+    it('should keep same-instance sessions alive in instance mode when concurrent sessions are allowed', async () => {
+      mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
+        return await fn();
+      });
+      process.env.ENABLE_MULTI_TENANT = 'true';
+      process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
+      // Opt-in: allow several MCP clients to target the same instance at once
+      // (e.g. an automation agent + an IDE + a web client), instead of each
+      // initialize evicting the others' live sessions.
+      process.env.MULTI_TENANT_ALLOW_CONCURRENT_SESSIONS = 'true';
+      server = new SingleSessionHTTPServer();
+
+      const instanceContext = {
+        instanceId: 'tenant-a'
+      };
+
+      const existingTransport = {
+        close: vi.fn().mockResolvedValue(undefined)
+      };
+      (server as any).transports['session-a'] = existingTransport;
+      (server as any).servers['session-a'] = {};
+      (server as any).sessionMetadata['session-a'] = {
+        lastAccess: new Date(),
+        createdAt: new Date()
+      };
+      (server as any).sessionContexts['session-a'] = instanceContext;
+
+      const second = createMockReqRes();
+      second.req.method = 'POST';
+      second.req.body = {
+        jsonrpc: '2.0',
+        method: 'initialize',
+        params: {},
+        id: 2
+      };
+
+      await server.handleRequest(second.req as any, second.res as any, instanceContext);
+      // One macrotask tick drains the mocked onsessioninitialized callback
+      // (scheduled with setTimeout(0)); no real delay is needed.
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      // The pre-existing same-instance session must survive the new initialize.
+      expect((server as any).transports['session-a']).toBe(existingTransport);
+      expect(existingTransport.close).not.toHaveBeenCalled();
+    });
   });
 
   describe('Session Expiration and Cleanup', () => {

@@ -21,6 +21,7 @@ const DEFAULT_CONFIG = {
     apiKey: 'not-needed',
     timeout: 60000,
     maxTokens: 2000,
+    sendThinkingKwargs: true,
 };
 class DocumentationGenerator {
     constructor(config) {
@@ -36,6 +37,7 @@ class DocumentationGenerator {
         this.maxTokens = fullConfig.maxTokens;
         this.timeout = fullConfig.timeout;
         this.temperature = fullConfig.temperature;
+        this.sendThinkingKwargs = fullConfig.sendThinkingKwargs;
     }
     async generateSummary(input) {
         try {
@@ -89,6 +91,20 @@ class DocumentationGenerator {
     }
     buildPrompt(input) {
         const truncatedReadme = this.truncateReadme(input.readme, 6000);
+        if (input.nodeNames?.length) {
+            return `
+Package Information:
+- Package: ${input.npmPackageName || 'unknown'}
+- Nodes: ${input.nodeNames.join(', ')}
+- Description: ${input.description || 'No description provided'}
+
+README Content:
+${truncatedReadme}
+
+Based on the README and package information above, generate a structured documentation summary
+covering the package as a whole, including every node listed above.
+`.trim();
+        }
         return `
 Node Information:
 - Name: ${input.displayName}
@@ -203,7 +219,7 @@ Guidelines:
                     messages,
                     max_completion_tokens: maxTokens,
                     ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
-                    chat_template_kwargs: { enable_thinking: false },
+                    ...(this.sendThinkingKwargs ? { chat_template_kwargs: { enable_thinking: false } } : {}),
                 }),
                 signal: controller.signal,
             });
@@ -231,6 +247,7 @@ function createDocumentationGenerator() {
     try {
         const host = new URL(baseUrl).hostname;
         const isCloud = host === 'openai.com' || host.endsWith('.openai.com') ||
+            host.endsWith('.openai.azure.com') || host.endsWith('.azure.com') ||
             host === 'anthropic.com' || host.endsWith('.anthropic.com');
         isLocalServer = !isCloud;
     }
@@ -242,6 +259,7 @@ function createDocumentationGenerator() {
         timeout,
         ...(apiKey ? { apiKey } : {}),
         ...(isLocalServer ? { temperature: 0.3 } : {}),
+        sendThinkingKwargs: isLocalServer,
     });
 }
 //# sourceMappingURL=documentation-generator.js.map

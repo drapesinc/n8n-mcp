@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
 import { InstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
-import { GenerateWorkflowHandler } from './types/generate-workflow';
 import type { AdditionalTool } from './types/additional-tools';
 export interface EngineHealth {
     status: 'healthy' | 'unhealthy';
@@ -17,7 +16,6 @@ export interface EngineHealth {
 export interface EngineOptions {
     sessionTimeout?: number;
     logLevel?: 'error' | 'warn' | 'info' | 'debug';
-    generateWorkflowHandler?: GenerateWorkflowHandler;
     additionalTools?: AdditionalTool[];
 }
 export declare class N8NMCPEngine {

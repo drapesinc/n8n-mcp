@@ -42,9 +42,7 @@ function mutationToSupabaseFormat(mutation: WorkflowMutationRecord): Record<stri
 
 export class TelemetryBatchProcessor {
   private flushTimer?: NodeJS.Timeout;
-  private isFlushingEvents: boolean = false;
-  private isFlushingWorkflows: boolean = false;
-  private isFlushingMutations: boolean = false;
+  private flushQueue: Promise<void> = Promise.resolve();
   private circuitBreaker: TelemetryCircuitBreaker;
   private metrics: TelemetryMetrics = {
     eventsTracked: 0,
@@ -65,12 +63,20 @@ export class TelemetryBatchProcessor {
     sigterm?: () => void;
   } = {};
   private started: boolean = false;
+  private readonly operationTimeout: number;
+  private readonly onFlushRequested?: () => void | Promise<void>;
 
   constructor(
     private supabase: SupabaseClient | null,
-    private isEnabled: () => boolean
+    private isEnabled: () => boolean,
+    options: {
+      operationTimeout?: number;
+      onFlushRequested?: () => void | Promise<void>;
+    } = {}
   ) {
     this.circuitBreaker = new TelemetryCircuitBreaker();
+    this.operationTimeout = options.operationTimeout ?? TELEMETRY_CONFIG.OPERATION_TIMEOUT;
+    this.onFlushRequested = options.onFlushRequested;
   }
 
   /**
@@ -87,7 +93,7 @@ export class TelemetryBatchProcessor {
 
     // Set up periodic flushing
     this.flushTimer = setInterval(() => {
-      this.flush();
+      void this.requestFlush();
     }, TELEMETRY_CONFIG.BATCH_FLUSH_INTERVAL);
 
     // Prevent timer from keeping process alive
@@ -97,14 +103,14 @@ export class TelemetryBatchProcessor {
     }
 
     // Set up process exit handlers with stored references for cleanup
-    this.eventListeners.beforeExit = () => this.flush();
+    this.eventListeners.beforeExit = () => {
+      void this.requestFlush();
+    };
     this.eventListeners.sigint = () => {
-      this.flush();
-      process.exit(0);
+      void this.flushAndExit();
     };
     this.eventListeners.sigterm = () => {
-      this.flush();
-      process.exit(0);
+      void this.flushAndExit();
     };
 
     process.on('beforeExit', this.eventListeners.beforeExit);
@@ -141,9 +147,49 @@ export class TelemetryBatchProcessor {
   }
 
   /**
+   * Ask the queue owner to flush, falling back to an empty processor flush for
+   * standalone callers that do not provide a queue-aware callback.
+   */
+  private requestFlush(): Promise<void> {
+    const requestedFlush = this.onFlushRequested
+      ? this.onFlushRequested()
+      : this.flush();
+
+    return Promise.resolve(requestedFlush).catch(error => {
+      logger.debug('Scheduled telemetry flush failed:', error);
+    });
+  }
+
+  private async flushAndExit(): Promise<void> {
+    await this.requestFlush();
+    process.exit(0);
+  }
+
+  /**
    * Flush events, workflows, and mutations to Supabase
    */
-  async flush(events?: TelemetryEvent[], workflows?: WorkflowTelemetry[], mutations?: WorkflowMutationRecord[]): Promise<void> {
+  flush(events?: TelemetryEvent[], workflows?: WorkflowTelemetry[], mutations?: WorkflowMutationRecord[]): Promise<void> {
+    // Capture each caller's batches before queuing so later caller mutations cannot
+    // change or empty data that is waiting behind an in-progress flush.
+    const queuedEvents = events ? [...events] : undefined;
+    const queuedWorkflows = workflows ? [...workflows] : undefined;
+    const queuedMutations = mutations ? [...mutations] : undefined;
+
+    const queuedFlush = this.flushQueue.then(() =>
+      this.flushQueuedBatch(queuedEvents, queuedWorkflows, queuedMutations)
+    );
+
+    // Keep the queue usable after an unexpected rejection while preserving that
+    // rejection for the caller that owns this particular flush.
+    this.flushQueue = queuedFlush.catch(() => undefined);
+    return queuedFlush;
+  }
+
+  private async flushQueuedBatch(
+    events?: TelemetryEvent[],
+    workflows?: WorkflowTelemetry[],
+    mutations?: WorkflowMutationRecord[]
+  ): Promise<void> {
     if (!this.isEnabled() || !this.supabase) return;
 
     // Check circuit breaker
@@ -192,16 +238,13 @@ export class TelemetryBatchProcessor {
    * Flush events with batching
    */
   private async flushEvents(events: TelemetryEvent[]): Promise<boolean> {
-    if (this.isFlushingEvents || events.length === 0) return true;
-
-    this.isFlushingEvents = true;
-
     try {
       // Batch events
       const batches = this.createBatches(events, TELEMETRY_CONFIG.MAX_BATCH_SIZE);
 
-      for (const batch of batches) {
-        const result = await this.executeWithRetry(async () => {
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex];
+        const result = await this.executeWithTimeout(async () => {
           const { error } = await this.supabase!
             .from('telemetry_events')
             .insert(batch);
@@ -218,9 +261,9 @@ export class TelemetryBatchProcessor {
           this.metrics.eventsTracked += batch.length;
           this.metrics.batchesSent++;
         } else {
-          this.metrics.eventsFailed += batch.length;
-          this.metrics.batchesFailed++;
-          this.addToDeadLetterQueue(batch);
+          const unsent = this.addUnsentBatchesToDeadLetterQueue(batches, batchIndex);
+          this.metrics.eventsFailed += unsent.itemCount;
+          this.metrics.batchesFailed += unsent.batchCount;
           return false;
         }
       }
@@ -234,8 +277,6 @@ export class TelemetryBatchProcessor {
         { error: error instanceof Error ? error.message : String(error) },
         true
       );
-    } finally {
-      this.isFlushingEvents = false;
     }
   }
 
@@ -243,10 +284,6 @@ export class TelemetryBatchProcessor {
    * Flush workflows with deduplication
    */
   private async flushWorkflows(workflows: WorkflowTelemetry[]): Promise<boolean> {
-    if (this.isFlushingWorkflows || workflows.length === 0) return true;
-
-    this.isFlushingWorkflows = true;
-
     try {
       // Deduplicate workflows by hash
       const uniqueWorkflows = this.deduplicateWorkflows(workflows);
@@ -255,8 +292,9 @@ export class TelemetryBatchProcessor {
       // Batch workflows
       const batches = this.createBatches(uniqueWorkflows, TELEMETRY_CONFIG.MAX_BATCH_SIZE);
 
-      for (const batch of batches) {
-        const result = await this.executeWithRetry(async () => {
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex];
+        const result = await this.executeWithTimeout(async () => {
           const { error } = await this.supabase!
             .from('telemetry_workflows')
             .insert(batch);
@@ -273,9 +311,9 @@ export class TelemetryBatchProcessor {
           this.metrics.eventsTracked += batch.length;
           this.metrics.batchesSent++;
         } else {
-          this.metrics.eventsFailed += batch.length;
-          this.metrics.batchesFailed++;
-          this.addToDeadLetterQueue(batch);
+          const unsent = this.addUnsentBatchesToDeadLetterQueue(batches, batchIndex);
+          this.metrics.eventsFailed += unsent.itemCount;
+          this.metrics.batchesFailed += unsent.batchCount;
           return false;
         }
       }
@@ -289,8 +327,6 @@ export class TelemetryBatchProcessor {
         { error: error instanceof Error ? error.message : String(error) },
         true
       );
-    } finally {
-      this.isFlushingWorkflows = false;
     }
   }
 
@@ -298,16 +334,13 @@ export class TelemetryBatchProcessor {
    * Flush workflow mutations with batching
    */
   private async flushMutations(mutations: WorkflowMutationRecord[]): Promise<boolean> {
-    if (this.isFlushingMutations || mutations.length === 0) return true;
-
-    this.isFlushingMutations = true;
-
     try {
       // Batch mutations
       const batches = this.createBatches(mutations, TELEMETRY_CONFIG.MAX_BATCH_SIZE);
 
-      for (const batch of batches) {
-        const result = await this.executeWithRetry(async () => {
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+        const batch = batches[batchIndex];
+        const result = await this.executeWithTimeout(async () => {
           // Convert camelCase to snake_case for Supabase
           const snakeCaseBatch = batch.map(mutation => mutationToSupabaseFormat(mutation));
 
@@ -335,9 +368,9 @@ export class TelemetryBatchProcessor {
           this.metrics.eventsTracked += batch.length;
           this.metrics.batchesSent++;
         } else {
-          this.metrics.eventsFailed += batch.length;
-          this.metrics.batchesFailed++;
-          this.addToDeadLetterQueue(batch);
+          const unsent = this.addUnsentBatchesToDeadLetterQueue(batches, batchIndex);
+          this.metrics.eventsFailed += unsent.itemCount;
+          this.metrics.batchesFailed += unsent.batchCount;
           return false;
         }
       }
@@ -354,57 +387,40 @@ export class TelemetryBatchProcessor {
         { error: error instanceof Error ? error.message : String(error) },
         true
       );
-    } finally {
-      this.isFlushingMutations = false;
     }
   }
 
   /**
-   * Execute operation with exponential backoff retry
+   * Execute one operation attempt bounded by the configured timeout
    */
-  private async executeWithRetry<T>(
+  private async executeWithTimeout<T>(
     operation: () => Promise<T>,
     operationName: string
   ): Promise<T | null> {
-    let lastError: Error | null = null;
-    let delay = TELEMETRY_CONFIG.RETRY_DELAY;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let result: T | null;
 
-    for (let attempt = 1; attempt <= TELEMETRY_CONFIG.MAX_RETRIES; attempt++) {
-      try {
-        // In test environment, execute without timeout but still handle errors
-        if (process.env.NODE_ENV === 'test' && process.env.VITEST) {
-          const result = await operation();
-          return result;
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Operation timed out')), this.operationTimeout);
+
+        // A best-effort telemetry request must not keep the process alive.
+        if (typeof timeout === 'object' && timeout !== null && 'unref' in timeout) {
+          timeout.unref();
         }
+      });
 
-        // Create a timeout promise
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error('Operation timed out')), TELEMETRY_CONFIG.OPERATION_TIMEOUT);
-        });
-
-        // Race between operation and timeout
-        const result = await Promise.race([operation(), timeoutPromise]) as T;
-        return result;
-      } catch (error) {
-        lastError = error as Error;
-        logger.debug(`${operationName} attempt ${attempt} failed:`, error);
-
-        if (attempt < TELEMETRY_CONFIG.MAX_RETRIES) {
-          // Skip delay in test environment when using fake timers
-          if (!(process.env.NODE_ENV === 'test' && process.env.VITEST)) {
-            // Exponential backoff with jitter
-            const jitter = Math.random() * 0.3 * delay; // 30% jitter
-            const waitTime = delay + jitter;
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-            delay *= 2; // Double the delay for next attempt
-          }
-          // In test mode, continue to next retry attempt without delay
-        }
-      }
+      result = await Promise.race([operation(), timeoutPromise]) as T;
+    } catch (error) {
+      logger.debug(`${operationName} failed:`, error);
+      result = null;
     }
 
-    logger.debug(`${operationName} failed after ${TELEMETRY_CONFIG.MAX_RETRIES} attempts:`, lastError);
-    return null;
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+
+    return result;
   }
 
   /**
@@ -438,6 +454,22 @@ export class TelemetryBatchProcessor {
   }
 
   /**
+   * Preserve the failed batch and every later batch that was not attempted.
+   */
+  private addUnsentBatchesToDeadLetterQueue<
+    T extends TelemetryEvent | WorkflowTelemetry | WorkflowMutationRecord
+  >(batches: T[][], failedBatchIndex: number): { itemCount: number; batchCount: number } {
+    const unsentBatches = batches.slice(failedBatchIndex);
+    const unsentItems = unsentBatches.flat();
+    this.addToDeadLetterQueue(unsentItems);
+
+    return {
+      itemCount: unsentItems.length,
+      batchCount: unsentBatches.length,
+    };
+  }
+
+  /**
    * Add failed items to dead letter queue
    */
   private addToDeadLetterQueue(items: (TelemetryEvent | WorkflowTelemetry | WorkflowMutationRecord)[]): void {
@@ -466,10 +498,13 @@ export class TelemetryBatchProcessor {
 
     const events: TelemetryEvent[] = [];
     const workflows: WorkflowTelemetry[] = [];
+    const mutations: WorkflowMutationRecord[] = [];
 
-    // Separate events and workflows
+    // Separate events, workflows, and mutations
     for (const item of this.deadLetterQueue) {
-      if ('workflow_hash' in item) {
+      if ('workflowHashBefore' in item) {
+        mutations.push(item as WorkflowMutationRecord);
+      } else if ('workflow_hash' in item) {
         workflows.push(item as WorkflowTelemetry);
       } else {
         events.push(item as TelemetryEvent);
@@ -485,6 +520,9 @@ export class TelemetryBatchProcessor {
     }
     if (workflows.length > 0) {
       await this.flushWorkflows(workflows);
+    }
+    if (mutations.length > 0) {
+      await this.flushMutations(mutations);
     }
   }
 

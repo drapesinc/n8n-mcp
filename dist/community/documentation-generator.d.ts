@@ -28,6 +28,7 @@ export interface DocumentationInput {
     description?: string;
     readme: string;
     npmPackageName?: string;
+    nodeNames?: string[];
 }
 export interface DocumentationResult {
     nodeType: string;
@@ -41,6 +42,7 @@ export interface DocumentationGeneratorConfig {
     timeout?: number;
     maxTokens?: number;
     temperature?: number;
+    sendThinkingKwargs?: boolean;
 }
 export declare class DocumentationGenerator {
     private client;
@@ -50,6 +52,7 @@ export declare class DocumentationGenerator {
     private maxTokens;
     private timeout;
     private temperature?;
+    private sendThinkingKwargs;
     constructor(config: DocumentationGeneratorConfig);
     generateSummary(input: DocumentationInput): Promise<DocumentationResult>;
     generateBatch(inputs: DocumentationInput[], concurrency?: number, progressCallback?: (message: string, current: number, total: number) => void): Promise<DocumentationResult[]>;

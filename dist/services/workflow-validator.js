@@ -17,8 +17,10 @@ const ai_tool_validators_1 = require("./ai-tool-validators");
 const node_type_utils_1 = require("../utils/node-type-utils");
 const node_classification_1 = require("../utils/node-classification");
 const n8n_validation_1 = require("./n8n-validation");
+const node_groups_1 = require("./node-groups");
 const tool_variant_generator_1 = require("./tool-variant-generator");
 const logger = new logger_1.Logger({ prefix: '[WorkflowValidator]' });
+const ADD_ERROR_HANDLING_ADVISORY = 'Consider adding error handling to your workflow';
 exports.VALID_CONNECTION_TYPES = new Set([
     'main',
     'error',
@@ -78,9 +80,14 @@ class WorkflowValidator {
                 if (workflow.nodes.length > 0) {
                     this.checkWorkflowPatterns(workflow, result, profile);
                 }
+                this.validateNodeGroups(workflow, result);
                 if (workflow.nodes.length > 0 && (0, ai_node_validator_1.hasAINodes)(workflow)) {
                     const aiIssues = (0, ai_node_validator_1.validateAISpecificNodes)(workflow);
                     for (const issue of aiIssues) {
+                        if (issue.severity === 'info') {
+                            result.suggestions.push(issue.message);
+                            continue;
+                        }
                         const validationIssue = {
                             type: issue.severity === 'error' ? 'error' : 'warning',
                             nodeId: issue.nodeId,
@@ -96,7 +103,7 @@ class WorkflowValidator {
                         }
                     }
                 }
-                this.generateSuggestions(workflow, result);
+                this.generateSuggestions(workflow, result, profile);
                 if (result.errors.length > 0) {
                     this.addErrorRecoverySuggestions(result);
                 }
@@ -111,6 +118,24 @@ class WorkflowValidator {
         }
         result.valid = result.errors.length === 0;
         return result;
+    }
+    validateNodeGroups(workflow, result) {
+        if (!Array.isArray(workflow.nodeGroups) || workflow.nodeGroups.length === 0)
+            return;
+        const issues = (0, node_groups_1.checkNodeGroups)({ nodes: workflow.nodes, nodeGroups: workflow.nodeGroups }, {
+            isTrigger: node => {
+                const nodeInfo = this.nodeRepository.getNode(node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type));
+                return nodeInfo ? Boolean(nodeInfo.isTrigger) : (0, node_type_utils_1.isTriggerNode)(node.type);
+            }
+        });
+        for (const issue of issues) {
+            result.warnings.push({
+                type: 'warning',
+                code: issue.code,
+                message: issue.message,
+                details: { group: issue.group }
+            });
+        }
     }
     validateWorkflowStructure(workflow, result) {
         if (!workflow.nodes) {
@@ -191,7 +216,7 @@ class WorkflowValidator {
                 });
             }
             nodeNames.add(node.name);
-            if (nodeIds.has(node.id)) {
+            if (node.id && nodeIds.has(node.id)) {
                 const firstNodeIndex = nodeIdToIndex.get(node.id);
                 const firstNode = firstNodeIndex !== undefined ? workflow.nodes[firstNodeIndex] : undefined;
                 result.errors.push({
@@ -200,7 +225,7 @@ class WorkflowValidator {
                     message: `Duplicate node ID: "${node.id}". Node at index ${i} (name: "${node.name}", type: "${node.type}") conflicts with node at index ${firstNodeIndex} (name: "${firstNode?.name || 'unknown'}", type: "${firstNode?.type || 'unknown'}"). Each node must have a unique ID. Generate a new UUID using crypto.randomUUID() - Example: {id: "${crypto_1.default.randomUUID()}", name: "${node.name}", type: "${node.type}", ...}`
                 });
             }
-            else {
+            else if (node.id) {
                 nodeIds.add(node.id);
                 nodeIdToIndex.set(node.id, i);
             }
@@ -254,14 +279,8 @@ class WorkflowValidator {
                     if (baseNodeType) {
                         const baseNodeInfo = this.nodeRepository.getNode(baseNodeType);
                         if (baseNodeInfo) {
-                            result.warnings.push({
-                                type: 'warning',
-                                nodeId: node.id,
-                                nodeName: node.name,
-                                message: `Node type "${node.type}" is inferred as a dynamic AI Tool variant of "${baseNodeType}". ` +
-                                    `This Tool variant is created by n8n at runtime when connecting "${baseNodeInfo.displayName}" to an AI Agent.`,
-                                code: 'INFERRED_TOOL_VARIANT'
-                            });
+                            result.suggestions.push(`Node type "${node.type}" is inferred as a dynamic AI Tool variant of "${baseNodeType}". ` +
+                                `This Tool variant is created by n8n at runtime when connecting "${baseNodeInfo.displayName}" to an AI Agent.`);
                             nodeInfo = {
                                 ...baseNodeInfo,
                                 nodeType: normalizedType,
@@ -275,7 +294,11 @@ class WorkflowValidator {
                 }
                 if (!nodeInfo) {
                     const suggestions = await this.similarityService.findSimilarNodes(node.type, 3);
+                    const isCommunityType = !this.isCorePackageType(normalizedType) && normalizedType.includes('.');
                     let message = `Unknown node type: "${node.type}".`;
+                    if (isCommunityType) {
+                        message += ' This looks like a community node that is not in this server\'s node database — the workflow can still run on an n8n instance where the package is installed.';
+                    }
                     if (suggestions.length > 0) {
                         message += '\n\nDid you mean one of these?';
                         for (const suggestion of suggestions) {
@@ -290,23 +313,28 @@ class WorkflowValidator {
                             }
                         }
                     }
-                    else {
+                    else if (!isCommunityType) {
                         message += ' No similar nodes found. Node types must include the package prefix (e.g., "n8n-nodes-base.webhook").';
                     }
-                    const error = {
-                        type: 'error',
+                    const issue = {
+                        type: isCommunityType ? 'warning' : 'error',
                         nodeId: node.id,
                         nodeName: node.name,
                         message
                     };
                     if (suggestions.length > 0) {
-                        error.suggestions = suggestions.map(s => ({
+                        issue.suggestions = suggestions.map(s => ({
                             nodeType: s.nodeType,
                             confidence: s.confidence,
                             reason: s.reason
                         }));
                     }
-                    result.errors.push(error);
+                    if (isCommunityType) {
+                        result.warnings.push(issue);
+                    }
+                    else {
+                        result.errors.push(issue);
+                    }
                     continue;
                 }
                 if (nodeInfo.isVersioned) {
@@ -336,20 +364,27 @@ class WorkflowValidator {
                         });
                     }
                     else if (maxVersion !== null && node.typeVersion < maxVersion) {
-                        result.warnings.push({
-                            type: 'warning',
-                            nodeId: node.id,
-                            nodeName: node.name,
-                            message: `Outdated typeVersion: ${node.typeVersion}. Latest is ${maxVersion}`
-                        });
+                        if (this.isAdvisoryProfile(profile)) {
+                            result.suggestions.push(`Outdated typeVersion for node "${node.name}": ${node.typeVersion}. Latest is ${maxVersion}.`);
+                        }
                     }
                     else if (maxVersion !== null && node.typeVersion > maxVersion) {
-                        result.errors.push({
-                            type: 'error',
-                            nodeId: node.id,
-                            nodeName: node.name,
-                            message: `typeVersion ${node.typeVersion} exceeds maximum supported version ${maxVersion}`
-                        });
+                        if (this.isCorePackageType(normalizedType)) {
+                            result.errors.push({
+                                type: 'error',
+                                nodeId: node.id,
+                                nodeName: node.name,
+                                message: `typeVersion ${node.typeVersion} exceeds maximum supported version ${maxVersion}`
+                            });
+                        }
+                        else {
+                            result.warnings.push({
+                                type: 'warning',
+                                nodeId: node.id,
+                                nodeName: node.name,
+                                message: `typeVersion ${node.typeVersion} exceeds maximum supported version ${maxVersion} known to this server. The community package may be newer than this server's data — verify the version exists in your installed package.`
+                            });
+                        }
                     }
                 }
                 if (normalizedType.startsWith('nodes-langchain.')) {
@@ -448,7 +483,7 @@ class WorkflowValidator {
                 if (outputKey === 'main') {
                     this.validateNotAISubNode(sourceNode, result);
                 }
-                this.validateConnectionOutputs(sourceName, outputConnections, nodeMap, nodeIdMap, result, outputKey);
+                this.validateConnectionOutputs(sourceName, outputConnections, nodeMap, nodeIdMap, result, outputKey, profile);
             }
         }
         if (profile !== 'minimal') {
@@ -458,16 +493,16 @@ class WorkflowValidator {
             this.flagOrphanedNodes(workflow, result);
         }
         if (profile !== 'minimal' && this.hasCycle(workflow)) {
-            result.errors.push({
-                type: 'error',
-                message: 'Workflow contains a cycle (infinite loop)'
+            result.warnings.push({
+                type: 'warning',
+                message: 'Workflow contains a cycle with no recognized exit. Verify the loop can terminate (e.g. via a conditional branch, an error output, or a node that can return zero items).'
             });
         }
     }
-    validateConnectionOutputs(sourceName, outputs, nodeMap, nodeIdMap, result, outputType) {
+    validateConnectionOutputs(sourceName, outputs, nodeMap, nodeIdMap, result, outputType, profile = 'runtime') {
         const sourceNode = nodeMap.get(sourceName);
         if (outputType === 'main' && sourceNode) {
-            this.validateErrorOutputConfiguration(sourceName, sourceNode, outputs, nodeMap, result);
+            this.validateErrorOutputConfiguration(sourceName, sourceNode, outputs, nodeMap, result, profile);
             this.validateOutputIndexBounds(sourceNode, outputs, result);
             this.validateConditionalBranchUsage(sourceNode, outputs, result);
         }
@@ -537,9 +572,6 @@ class WorkflowValidator {
                 }
                 else {
                     result.statistics.validConnections++;
-                    if (outputType === 'ai_tool') {
-                        this.validateAIToolConnection(sourceName, targetNode, result);
-                    }
                     if (outputType === 'main') {
                         this.validateInputIndexBounds(sourceName, targetNode, connection, result);
                     }
@@ -547,24 +579,29 @@ class WorkflowValidator {
             });
         });
     }
-    validateErrorOutputConfiguration(sourceName, sourceNode, outputs, nodeMap, result) {
+    validateErrorOutputConfiguration(sourceName, sourceNode, outputs, nodeMap, result, profile = 'runtime') {
         const hasErrorOutputSetting = sourceNode.onError === 'continueErrorOutput';
-        const hasErrorConnections = outputs.length > 1 && outputs[1] && outputs[1].length > 0;
-        if (hasErrorOutputSetting && !hasErrorConnections) {
-            result.errors.push({
-                type: 'error',
-                nodeId: sourceNode.id,
-                nodeName: sourceNode.name,
-                message: `Node has onError: 'continueErrorOutput' but no error output connections in main[1]. Add error handler connections to main[1] or change onError to 'continueRegularOutput' or 'stopWorkflow'.`
-            });
-        }
-        if (!hasErrorOutputSetting && hasErrorConnections) {
-            result.warnings.push({
-                type: 'warning',
-                nodeId: sourceNode.id,
-                nodeName: sourceNode.name,
-                message: `Node has error output connections in main[1] but missing onError: 'continueErrorOutput'. Add this property to properly handle errors.`
-            });
+        const errorOutputIndex = this.getMainOutputCount(sourceNode);
+        if (errorOutputIndex !== null) {
+            const hasErrorConnections = outputs.length > errorOutputIndex &&
+                outputs[errorOutputIndex] &&
+                outputs[errorOutputIndex].length > 0;
+            if (hasErrorOutputSetting && !hasErrorConnections && profile !== 'minimal') {
+                result.warnings.push({
+                    type: 'warning',
+                    nodeId: sourceNode.id,
+                    nodeName: sourceNode.name,
+                    message: `Node has onError: 'continueErrorOutput' but the error output (main[${errorOutputIndex}]) is not connected — failed items are silently dropped. Connect an error handler to main[${errorOutputIndex}] or change onError to 'continueRegularOutput' or 'stopWorkflow'.`
+                });
+            }
+            if (!hasErrorOutputSetting && hasErrorConnections) {
+                result.warnings.push({
+                    type: 'warning',
+                    nodeId: sourceNode.id,
+                    nodeName: sourceNode.name,
+                    message: `Node has error output connections in main[${errorOutputIndex}] but missing onError: 'continueErrorOutput'. Add this property to properly handle errors.`
+                });
+            }
         }
         if (outputs.length >= 1 && outputs[0] && outputs[0].length > 1) {
             const potentialErrorHandlers = outputs[0].filter(conn => {
@@ -611,33 +648,29 @@ class WorkflowValidator {
             }
         }
     }
-    validateAIToolConnection(sourceName, targetNode, result) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(targetNode.type);
-        let targetNodeInfo = this.nodeRepository.getNode(normalizedType);
-        if (!targetNodeInfo && normalizedType !== targetNode.type) {
-            targetNodeInfo = this.nodeRepository.getNode(targetNode.type);
-        }
-        if (targetNodeInfo && !targetNodeInfo.isAITool && targetNodeInfo.package !== 'n8n-nodes-base') {
-            result.warnings.push({
-                type: 'warning',
-                nodeId: targetNode.id,
-                nodeName: targetNode.name,
-                message: `Community node "${targetNode.name}" is being used as an AI tool. Ensure N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true is set.`
-            });
-        }
-    }
     validateAIToolSource(sourceNode, result) {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
         if ((0, ai_tool_validators_1.isAIToolSubNode)(normalizedType)) {
             return;
         }
         const nodeInfo = this.nodeRepository.getNode(normalizedType);
+        if (nodeInfo?.isCommunity) {
+            this.pushCommunityToolUsageWarning(sourceNode, result);
+        }
         if (tool_variant_generator_1.ToolVariantGenerator.isToolVariantNodeType(normalizedType)) {
             if (nodeInfo?.isToolVariant) {
                 return;
             }
         }
         if (!nodeInfo) {
+            if (!this.isCorePackageType(normalizedType) && normalizedType.includes('.')) {
+                this.pushCommunityToolUsageWarning(sourceNode, result);
+            }
+            return;
+        }
+        const aiToolOutputExpression = this.findConditionalAIToolExpression(nodeInfo.outputs);
+        if (aiToolOutputExpression) {
+            this.validateConditionalAIToolMode(sourceNode, aiToolOutputExpression, result);
             return;
         }
         if (nodeInfo.hasToolVariant) {
@@ -669,6 +702,43 @@ class WorkflowValidator {
             message: `Node "${sourceNode.name}" of type "${sourceNode.type}" cannot output ai_tool connections. ` +
                 `Only AI tool nodes (e.g., Calculator, HTTP Request Tool) or Tool variants (e.g., *Tool suffix nodes) can be connected to AI Agents as tools.`,
             code: 'INVALID_AI_TOOL_SOURCE'
+        });
+    }
+    pushCommunityToolUsageWarning(sourceNode, result) {
+        result.warnings.push({
+            type: 'warning',
+            nodeId: sourceNode.id,
+            nodeName: sourceNode.name,
+            message: `Community node "${sourceNode.name}" is being used as an AI tool. Ensure N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true is set on the n8n instance.`
+        });
+    }
+    findConditionalAIToolExpression(outputs) {
+        const candidates = Array.isArray(outputs) ? outputs :
+            typeof outputs === 'string' ? [outputs] :
+                [];
+        return candidates.find((output) => typeof output === 'string' && output.startsWith('={{') && output.includes('ai_tool')) ?? null;
+    }
+    validateConditionalAIToolMode(sourceNode, outputExpression, result) {
+        if (!outputExpression.includes('retrieve-as-tool'))
+            return;
+        const mode = sourceNode.parameters?.mode;
+        const isUnset = mode === undefined || mode === null;
+        const isStaticMode = isUnset || (typeof mode === 'string' && !mode.startsWith('='));
+        if (!isStaticMode || mode === 'retrieve-as-tool')
+            return;
+        if (isUnset) {
+            const defaultMode = outputExpression.match(/\?\?\s*'([^']+)'/)?.[1];
+            if (defaultMode === undefined || defaultMode === 'retrieve-as-tool')
+                return;
+        }
+        result.warnings.push({
+            type: 'warning',
+            nodeId: sourceNode.id,
+            nodeName: sourceNode.name,
+            message: `Node "${sourceNode.name}" connects to an AI Agent as a tool, but its ai_tool output only exists when mode is "retrieve-as-tool"` +
+                (isUnset ? ' (mode is not set, so the default applies)' : ` (current mode: "${mode}")`) +
+                `. Set mode to "retrieve-as-tool".`,
+            code: 'AI_TOOL_MODE_MISMATCH'
         });
     }
     getNodeOutputTypes(nodeType) {
@@ -708,6 +778,31 @@ class WorkflowValidator {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
         return normalizedType.replace(/^(n8n-)?nodes-base\./, '');
     }
+    isCorePackageType(normalizedType) {
+        return normalizedType.startsWith('nodes-base.') || normalizedType.startsWith('nodes-langchain.');
+    }
+    isAdvisoryProfile(profile) {
+        return profile === 'ai-friendly' || profile === 'strict';
+    }
+    getMainOutputCount(sourceNode) {
+        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
+        const nodeInfo = this.nodeRepository.getNode(normalizedType);
+        if (!nodeInfo || !nodeInfo.outputs)
+            return null;
+        if (!Array.isArray(nodeInfo.outputs))
+            return null;
+        const mainOutputCount = nodeInfo.outputs.filter((o) => typeof o === 'string' ? o === 'main' : (o.type === 'main' || !o.type)).length;
+        if (mainOutputCount === 0)
+            return null;
+        const conditionalInfo = this.getConditionalOutputInfo(sourceNode);
+        if (conditionalInfo) {
+            return conditionalInfo.expectedOutputs;
+        }
+        if (this.getShortNodeType(sourceNode) === 'switch') {
+            return null;
+        }
+        return mainOutputCount;
+    }
     getConditionalOutputInfo(sourceNode) {
         const shortType = this.getShortNodeType(sourceNode);
         if (shortType === 'if' || shortType === 'filter') {
@@ -723,26 +818,10 @@ class WorkflowValidator {
         return null;
     }
     validateOutputIndexBounds(sourceNode, outputs, result) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
-        const nodeInfo = this.nodeRepository.getNode(normalizedType);
-        if (!nodeInfo || !nodeInfo.outputs)
+        const naturalOutputCount = this.getMainOutputCount(sourceNode);
+        if (naturalOutputCount === null)
             return;
-        let mainOutputCount;
-        if (Array.isArray(nodeInfo.outputs)) {
-            mainOutputCount = nodeInfo.outputs.filter((o) => typeof o === 'string' ? o === 'main' : (o.type === 'main' || !o.type)).length;
-        }
-        else {
-            return;
-        }
-        if (mainOutputCount === 0)
-            return;
-        const conditionalInfo = this.getConditionalOutputInfo(sourceNode);
-        if (conditionalInfo) {
-            mainOutputCount = conditionalInfo.expectedOutputs;
-        }
-        else if (this.getShortNodeType(sourceNode) === 'switch') {
-            return;
-        }
+        let mainOutputCount = naturalOutputCount;
         if (sourceNode.onError === 'continueErrorOutput') {
             mainOutputCount += 1;
         }
@@ -822,17 +901,36 @@ class WorkflowValidator {
         }
         if (shortType === 'merge' || shortType === 'compareDatasets') {
             const rawInputs = targetNode.parameters?.numberInputs;
-            const parsed = rawInputs ? Number(rawInputs) : 2;
-            const mainInputCount = Number.isFinite(parsed) ? parsed : 2;
-            if (connection.index >= mainInputCount) {
-                result.errors.push({
-                    type: 'error',
+            if (rawInputs != null && rawInputs !== '') {
+                if (typeof rawInputs === 'string' && rawInputs.trim().startsWith('=')) {
+                    return;
+                }
+                const parsed = Number(rawInputs);
+                if (!Number.isFinite(parsed) || parsed <= 0) {
+                    return;
+                }
+                if (connection.index >= parsed) {
+                    result.errors.push({
+                        type: 'error',
+                        nodeName: targetNode.name,
+                        message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${parsed}). ` +
+                            `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${parsed} main input(s) (indices 0-${parsed - 1}).`,
+                        code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+                    });
+                    result.statistics.invalidConnections++;
+                }
+                return;
+            }
+            const defaultInputs = 2;
+            if (connection.index >= defaultInputs) {
+                result.warnings.push({
+                    type: 'warning',
                     nodeName: targetNode.name,
-                    message: `Input index ${connection.index} on node "${targetNode.name}" exceeds its input count (${mainInputCount}). ` +
-                        `Connection from "${sourceName}" targets input ${connection.index}, but this node has ${mainInputCount} main input(s) (indices 0-${mainInputCount - 1}).`,
-                    code: 'INPUT_INDEX_OUT_OF_BOUNDS'
+                    message: `Input index ${connection.index} on node "${targetNode.name}" exceeds the default input count (${defaultInputs}) — ` +
+                        `numberInputs is not set, so n8n will ignore this connection and drop items from "${sourceName}". ` +
+                        `Set numberInputs to at least ${connection.index + 1} to use this input.`,
+                    code: 'MERGE_EXTRA_INPUTS_IGNORED'
                 });
-                result.statistics.invalidConnections++;
             }
             return;
         }
@@ -874,7 +972,7 @@ class WorkflowValidator {
         for (const [sourceName, outputs] of Object.entries(workflow.connections)) {
             if (!adjacency.has(sourceName))
                 adjacency.set(sourceName, new Set());
-            for (const outputConns of Object.values(outputs)) {
+            for (const [connectionType, outputConns] of Object.entries(outputs)) {
                 if (Array.isArray(outputConns)) {
                     for (const conns of outputConns) {
                         if (!conns)
@@ -884,6 +982,9 @@ class WorkflowValidator {
                                 adjacency.get(sourceName).add(conn.node);
                                 if (!adjacency.has(conn.node))
                                     adjacency.set(conn.node, new Set());
+                                if (connectionType.startsWith('ai_')) {
+                                    adjacency.get(conn.node).add(sourceName);
+                                }
                             }
                         }
                     }
@@ -934,10 +1035,13 @@ class WorkflowValidator {
     hasCycle(workflow) {
         const visited = new Set();
         const recursionStack = new Set();
+        const path = [];
         const nodeTypeMap = new Map();
+        const nodeMap = new Map();
         workflow.nodes.forEach(node => {
             if (!(0, node_classification_1.isNonExecutableNode)(node.type)) {
                 nodeTypeMap.set(node.name, node.type);
+                nodeMap.set(node.name, node);
             }
         });
         const loopNodeTypes = [
@@ -955,10 +1059,32 @@ class WorkflowValidator {
             'nodes-base.switch',
             'n8n-nodes-base.filter',
             'nodes-base.filter',
+            '@n8n/n8n-nodes-langchain.textClassifier',
+            'n8n-nodes-langchain.textClassifier',
+            'nodes-langchain.textClassifier',
         ];
-        const hasCycleDFS = (nodeName, pathFromLoopNode = false, pathFromConditionalNode = false) => {
+        const isPotentialCycleExit = (nodeName) => {
+            const nodeType = nodeTypeMap.get(nodeName) || '';
+            if (loopNodeTypes.includes(nodeType) || conditionalNodeTypes.includes(nodeType)) {
+                return true;
+            }
+            const node = nodeMap.get(nodeName);
+            if (node?.onError === 'continueErrorOutput')
+                return true;
+            const connections = workflow.connections[nodeName];
+            const mainOutputs = connections?.main;
+            if (Array.isArray(mainOutputs)) {
+                const wiredOutputs = mainOutputs.filter(conns => Array.isArray(conns) && conns.length > 0).length;
+                if (wiredOutputs > 1)
+                    return true;
+            }
+            const outputCount = node ? this.getMainOutputCount(node) : null;
+            return outputCount !== null && outputCount > 1;
+        };
+        const hasCycleDFS = (nodeName) => {
             visited.add(nodeName);
             recursionStack.add(nodeName);
+            path.push(nodeName);
             const connections = workflow.connections[nodeName];
             if (connections) {
                 const allTargets = [];
@@ -970,25 +1096,21 @@ class WorkflowValidator {
                         });
                     }
                 }
-                const currentNodeType = nodeTypeMap.get(nodeName);
-                const isLoopNode = loopNodeTypes.includes(currentNodeType || '');
-                const isConditionalNode = conditionalNodeTypes.includes(currentNodeType || '');
                 for (const target of allTargets) {
                     if (!visited.has(target)) {
-                        if (hasCycleDFS(target, pathFromLoopNode || isLoopNode, pathFromConditionalNode || isConditionalNode))
+                        if (hasCycleDFS(target))
                             return true;
                     }
                     else if (recursionStack.has(target)) {
-                        const targetNodeType = nodeTypeMap.get(target);
-                        const isTargetLoopNode = loopNodeTypes.includes(targetNodeType || '');
-                        if (isTargetLoopNode || pathFromLoopNode || isLoopNode || pathFromConditionalNode || isConditionalNode) {
-                            continue;
+                        const cycleNodes = path.slice(path.indexOf(target));
+                        if (!cycleNodes.some(isPotentialCycleExit)) {
+                            return true;
                         }
-                        return true;
                     }
                 }
             }
             recursionStack.delete(nodeName);
+            path.pop();
             return false;
         };
         for (const node of workflow.nodes) {
@@ -1038,11 +1160,8 @@ class WorkflowValidator {
                 nodeName: node.name,
                 nodeId: node.id
             };
-            const formatIssues = expression_format_validator_1.ExpressionFormatValidator.validateNodeParameters(node.parameters, formatContext);
-            const filteredIssues = profile === 'minimal'
-                ? formatIssues.filter(i => i.issueType !== 'missing-cached-result-name')
-                : formatIssues;
-            filteredIssues.forEach(issue => {
+            const formatIssues = expression_format_validator_1.ExpressionFormatValidator.validateNodeParameters(node.parameters, formatContext, profile);
+            formatIssues.forEach(issue => {
                 const formattedMessage = expression_format_validator_1.ExpressionFormatValidator.formatErrorMessage(issue, formatContext);
                 if (issue.severity === 'error') {
                     result.errors.push({
@@ -1093,24 +1212,23 @@ class WorkflowValidator {
         return false;
     }
     checkWorkflowPatterns(workflow, result, profile = 'runtime') {
-        const hasErrorHandling = Object.values(workflow.connections).some(outputs => outputs.main && outputs.main.length > 1 && outputs.main[1] && outputs.main[1].length > 0);
-        if (!hasErrorHandling && workflow.nodes.length > 3 && profile !== 'minimal') {
+        const advisoryProfile = this.isAdvisoryProfile(profile);
+        if (advisoryProfile && workflow.nodes.length > 3 && !this.workflowHasErrorHandling(workflow)) {
             result.warnings.push({
                 type: 'warning',
-                message: 'Consider adding error handling to your workflow'
+                message: ADD_ERROR_HANDLING_ADVISORY
             });
         }
         for (const node of workflow.nodes) {
             if (!(0, node_classification_1.isNonExecutableNode)(node.type)) {
-                this.checkNodeErrorHandling(node, workflow, result);
+                this.checkNodeErrorHandling(node, workflow, result, profile);
             }
         }
-        const linearChainLength = this.getLongestLinearChain(workflow);
-        if (linearChainLength > 10) {
-            result.warnings.push({
-                type: 'warning',
-                message: `Long linear chain detected (${linearChainLength} nodes). Consider breaking into sub-workflows.`
-            });
+        if (advisoryProfile) {
+            const linearChainLength = this.getLongestLinearChain(workflow);
+            if (linearChainLength > 10) {
+                result.suggestions.push(`Long linear chain detected (${linearChainLength} nodes). Consider breaking into sub-workflows.`);
+            }
         }
         this.generateErrorHandlingSuggestions(workflow, result);
         for (const node of workflow.nodes) {
@@ -1127,30 +1245,43 @@ class WorkflowValidator {
                 }
             }
         }
-        const aiAgentNodes = workflow.nodes.filter(n => n.type.toLowerCase().includes('agent') ||
-            n.type.includes('langchain.agent'));
-        if (aiAgentNodes.length > 0) {
-            for (const agentNode of aiAgentNodes) {
-                const hasToolConnected = Object.values(workflow.connections).some(sourceOutputs => {
-                    const aiToolConnections = sourceOutputs.ai_tool;
-                    if (!aiToolConnections)
-                        return false;
-                    return aiToolConnections.flat().some(conn => conn && conn.node === agentNode.name);
-                });
-                if (!hasToolConnected) {
-                    result.warnings.push({
-                        type: 'warning',
-                        nodeId: agentNode.id,
-                        nodeName: agentNode.name,
-                        message: 'AI Agent has no tools connected. Consider adding tools to enhance agent capabilities.'
-                    });
-                }
+    }
+    workflowHasErrorHandling(workflow) {
+        return workflow.nodes.some(node => {
+            if (node.disabled)
+                return false;
+            if (node.type.toLowerCase().includes('errortrigger'))
+                return true;
+            if (node.continueOnFail === true || node.retryOnFail === true)
+                return true;
+            if (node.onError === undefined || node.onError === 'stopWorkflow')
+                return false;
+            if (node.onError !== 'continueErrorOutput')
+                return true;
+            const mainOutputs = workflow.connections[node.name]?.main;
+            if (!Array.isArray(mainOutputs))
+                return false;
+            const errorOutputIndex = this.getMainOutputCount(node);
+            if (errorOutputIndex === null) {
+                return mainOutputs.some(conns => Array.isArray(conns) && conns.length > 0);
             }
-            const hasAIToolConnections = Object.values(workflow.connections).some(outputs => outputs.ai_tool && outputs.ai_tool.length > 0);
-            if (hasAIToolConnections) {
-                result.suggestions.push('For community nodes used as AI tools, ensure N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true is set');
-            }
+            const errorConnections = mainOutputs[errorOutputIndex];
+            return Array.isArray(errorConnections) && errorConnections.length > 0;
+        });
+    }
+    nodeExecutesOnMainBranch(node) {
+        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type);
+        if ((0, ai_tool_validators_1.isAIToolSubNode)(normalizedType) || tool_variant_generator_1.ToolVariantGenerator.isToolVariantNodeType(normalizedType)) {
+            return false;
         }
+        const nodeInfo = this.nodeRepository.getNode(normalizedType);
+        if (nodeInfo?.isToolVariant)
+            return false;
+        if (!nodeInfo || nodeInfo.outputs == null)
+            return true;
+        if (!Array.isArray(nodeInfo.outputs))
+            return true;
+        return nodeInfo.outputs.some((o) => typeof o === 'string' ? o === 'main' : (o.type === 'main' || !o.type));
     }
     getLongestLinearChain(workflow) {
         const memo = new Map();
@@ -1186,7 +1317,7 @@ class WorkflowValidator {
         }
         return maxChain;
     }
-    generateSuggestions(workflow, result) {
+    generateSuggestions(workflow, result, profile = 'runtime') {
         if (result.statistics.triggerNodes === 0) {
             result.suggestions.push('Add a trigger node (e.g., Webhook, Schedule Trigger) to automate workflow execution');
         }
@@ -1197,7 +1328,10 @@ class WorkflowValidator {
             result.suggestions.push('Example connection structure: connections: { "Manual Trigger": { "main": [[{ "node": "Set", "type": "main", "index": 0 }]] } }');
             result.suggestions.push('Remember: Use node NAMES (not IDs) in connections. The name is what you see in the UI, not the node type.');
         }
-        if (!Object.values(workflow.connections).some(o => o.error)) {
+        const alreadyWarnedAboutErrorHandling = result.warnings.some(w => w.message === ADD_ERROR_HANDLING_ADVISORY);
+        if (profile !== 'minimal' &&
+            !alreadyWarnedAboutErrorHandling &&
+            !this.workflowHasErrorHandling(workflow)) {
             result.suggestions.push('Add error handling using the error output of nodes or an Error Trigger node');
         }
         if (workflow.nodes.length > 20) {
@@ -1215,7 +1349,7 @@ class WorkflowValidator {
             result.suggestions.push('A minimal workflow needs: 1) A trigger node (e.g., Manual Trigger), 2) An action node (e.g., Set, HTTP Request), 3) A connection between them');
         }
     }
-    checkNodeErrorHandling(node, workflow, result) {
+    checkNodeErrorHandling(node, workflow, result, profile = 'runtime') {
         if (node.disabled === true)
             return;
         const errorProneNodeTypes = [
@@ -1348,14 +1482,6 @@ class WorkflowValidator {
                         });
                     }
                 }
-                else {
-                    result.warnings.push({
-                        type: 'warning',
-                        nodeId: node.id,
-                        nodeName: node.name,
-                        message: 'retryOnFail is enabled but maxTries is not specified. Default is 3 attempts.'
-                    });
-                }
                 if (node.waitBetweenTries !== undefined) {
                     if (typeof node.waitBetweenTries !== 'number' || node.waitBetweenTries < 0) {
                         result.errors.push({
@@ -1384,19 +1510,23 @@ class WorkflowValidator {
                 message: 'alwaysOutputData must be a boolean value'
             });
         }
-        const hasErrorHandling = node.onError || node.continueOnFail || node.retryOnFail;
-        if (isErrorProne && !hasErrorHandling) {
+        const hasErrorHandling = (node.onError && node.onError !== 'stopWorkflow') ||
+            node.continueOnFail || node.retryOnFail;
+        const advisoryProfile = this.isAdvisoryProfile(profile);
+        if (isErrorProne && !hasErrorHandling && advisoryProfile) {
             const nodeTypeSimple = normalizedType.split('.').pop() || normalizedType;
-            if (normalizedType.includes('httprequest')) {
+            if (normalizedType.includes('webhook')) {
+                this.checkWebhookErrorHandling(node, normalizedType, result);
+            }
+            else if (!this.nodeExecutesOnMainBranch(node) || (0, node_type_utils_1.isTriggerNode)(node.type)) {
+            }
+            else if (normalizedType.includes('httprequest')) {
                 result.warnings.push({
                     type: 'warning',
                     nodeId: node.id,
                     nodeName: node.name,
                     message: 'HTTP Request node without error handling. Consider adding "onError: \'continueRegularOutput\'" for non-critical requests or "retryOnFail: true" for transient failures.'
                 });
-            }
-            else if (normalizedType.includes('webhook')) {
-                this.checkWebhookErrorHandling(node, normalizedType, result);
             }
             else if (errorProneNodeTypes.some(db => normalizedType.includes(db) && ['postgres', 'mysql', 'mongodb'].includes(db))) {
                 result.warnings.push({
@@ -1416,12 +1546,7 @@ class WorkflowValidator {
             }
         }
         if (node.continueOnFail && node.retryOnFail) {
-            result.warnings.push({
-                type: 'warning',
-                nodeId: node.id,
-                nodeName: node.name,
-                message: 'Both continueOnFail and retryOnFail are enabled. The node will retry first, then continue on failure.'
-            });
+            result.suggestions.push(`Node "${node.name}": both continueOnFail and retryOnFail are enabled. The node will retry first, then continue on failure.`);
         }
         if (node.executeOnce !== undefined && typeof node.executeOnce !== 'boolean') {
             result.errors.push({
@@ -1474,14 +1599,6 @@ class WorkflowValidator {
             return;
         }
         if (node.parameters?.responseMode === 'responseNode') {
-            if (!node.onError && !node.continueOnFail) {
-                result.errors.push({
-                    type: 'error',
-                    nodeId: node.id,
-                    nodeName: node.name,
-                    message: 'responseNode mode requires onError: "continueRegularOutput"'
-                });
-            }
             return;
         }
         result.warnings.push({
@@ -1610,13 +1727,13 @@ class WorkflowValidator {
             result.suggestions.unshift('🔧 RECOVERY: Workflow structure errors. Fix with:', '   • Ensure "nodes" is an array: "nodes": [...]', '   • Ensure "connections" is an object: "connections": {...}', '   • Add at least one node to create a valid workflow');
         }
         if (errorTypes.configuration.length > 0) {
-            result.suggestions.unshift('🔧 RECOVERY: Node configuration errors. Fix with:', '   • Check required fields using validate_node_minimal first', '   • Use get_node_essentials to see what fields are needed', '   • Ensure operation-specific fields match the node\'s requirements');
+            result.suggestions.unshift('🔧 RECOVERY: Node configuration errors. Fix with:', "   • Check required fields using validate_node with mode='minimal' first", '   • Use get_node to see what fields are needed', '   • Ensure operation-specific fields match the node\'s requirements');
         }
         if (errorTypes.typeVersion.length > 0) {
-            result.suggestions.unshift('🔧 RECOVERY: TypeVersion errors. Fix with:', '   • Add "typeVersion": 1 (or latest version) to each node', '   • Use get_node_info to check the correct version for each node type');
+            result.suggestions.unshift('🔧 RECOVERY: TypeVersion errors. Fix with:', '   • Add "typeVersion": 1 (or latest version) to each node', '   • Use get_node to check the correct version for each node type');
         }
         if (result.errors.length > 3) {
-            result.suggestions.push('📋 SUGGESTED WORKFLOW: Too many errors detected. Try this approach:', '   1. Fix structural issues first (nodes array, connections object)', '   2. Validate node types and fix invalid ones', '   3. Add required typeVersion to all nodes', '   4. Test connections step by step', '   5. Use validate_node_minimal on individual nodes to verify configuration');
+            result.suggestions.push('📋 SUGGESTED WORKFLOW: Too many errors detected. Try this approach:', '   1. Fix structural issues first (nodes array, connections object)', '   2. Validate node types and fix invalid ones', '   3. Add required typeVersion to all nodes', '   4. Test connections step by step', "   5. Use validate_node with mode='minimal' on individual nodes to verify configuration");
         }
     }
 }

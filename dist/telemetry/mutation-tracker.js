@@ -125,6 +125,11 @@ class MutationTracker {
                         metrics.propertiesChanged += Object.keys(op.settings).length;
                     }
                     break;
+                case 'setNodeGroups':
+                    metrics.propertiesChanged += Array.isArray(op.nodeGroups)
+                        ? Math.max(op.nodeGroups.length, 1)
+                        : 1;
+                    break;
                 case 'moveNode':
                 case 'enableNode':
                 case 'disableNode':

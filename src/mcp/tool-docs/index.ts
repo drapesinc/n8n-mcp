@@ -23,10 +23,10 @@ import {
   n8nAutofixWorkflowDoc,
   n8nTestWorkflowDoc,
   n8nExecutionsDoc,
+  n8nEvaluationsDoc,
   n8nWorkflowVersionsDoc,
   n8nDeployTemplateDoc,
   n8nManageDatatableDoc,
-  n8nGenerateWorkflowDoc,
   n8nManageCredentialsDoc
 } from './workflow_management';
 
@@ -66,10 +66,10 @@ export const toolsDocumentation: Record<string, ToolDocumentation> = {
   n8n_autofix_workflow: n8nAutofixWorkflowDoc,
   n8n_test_workflow: n8nTestWorkflowDoc,
   n8n_executions: n8nExecutionsDoc,
+  n8n_evaluations: n8nEvaluationsDoc,
   n8n_workflow_versions: n8nWorkflowVersionsDoc,
   n8n_deploy_template: n8nDeployTemplateDoc,
   n8n_manage_datatable: n8nManageDatatableDoc,
-  n8n_generate_workflow: n8nGenerateWorkflowDoc,
   n8n_manage_credentials: n8nManageCredentialsDoc
 };
 

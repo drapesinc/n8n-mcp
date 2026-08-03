@@ -2,6 +2,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 const database_adapter_1 = require("../database/database-adapter");
+const core_node_check_1 = require("./core-node-check");
 async function validate() {
     const db = await (0, database_adapter_1.createDatabaseAdapter)('./data/nodes.db');
     console.log('🔍 Validating critical nodes...\n');
@@ -88,6 +89,18 @@ async function validate() {
             failed++;
         }
     }
+    console.log('\n🧩 Checking core node completeness...');
+    const missingCoreNodes = (0, core_node_check_1.findMissingCoreNodes)({
+        getNode: (nodeType) => db.prepare('SELECT node_type FROM nodes WHERE node_type = ?').get(nodeType)
+    });
+    if (missingCoreNodes.length > 0) {
+        console.log(`❌ Missing core nodes: ${missingCoreNodes.join(', ')}`);
+        failed += missingCoreNodes.length;
+    }
+    else {
+        console.log(`✅ All ${core_node_check_1.CANONICAL_CORE_NODES.length} canonical core nodes present`);
+        passed++;
+    }
     console.log(`\n📊 Results: ${passed} passed, ${failed} failed`);
     const stats = db.prepare(`
     SELECT 
@@ -116,6 +129,9 @@ async function validate() {
     process.exit(failed > 0 ? 1 : 0);
 }
 if (require.main === module) {
-    validate().catch(console.error);
+    validate().catch(error => {
+        console.error(error);
+        process.exit(1);
+    });
 }
 //# sourceMappingURL=validate.js.map

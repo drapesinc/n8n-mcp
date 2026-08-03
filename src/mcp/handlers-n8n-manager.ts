@@ -13,6 +13,7 @@ import {
   ExecutionFilterOptions,
   ExecutionMode,
   Credential,
+  TestRunStatus,
 } from '../types/n8n-api';
 import type { TriggerType, TestWorkflowInput } from '../triggers/types';
 import {
@@ -20,6 +21,8 @@ import {
   hasWebhookTrigger,
   getWebhookUrl
 } from '../services/n8n-validation';
+import { nodeGroupsField, parseNodeGroupsInput } from '../services/node-groups';
+import { versionAtLeast } from '../services/n8n-version';
 import {
   N8nApiError,
   N8nNotFoundError,
@@ -460,6 +463,8 @@ const createWorkflowSchema = z.object({
     executionTimeout: z.number().optional(),
     errorWorkflow: z.string().optional(),
   })).optional(),
+  // Validated by parseNodeGroupsInput() — see services/node-groups.ts
+  nodeGroups: z.any().optional(),
   projectId: z.string().optional(),
 });
 
@@ -469,6 +474,8 @@ const updateWorkflowSchema = z.object({
   nodes: z.preprocess(normalizeMcpWorkflowNodes, z.array(z.any())).optional(),
   connections: z.preprocess(normalizeMcpWorkflowConnections, z.record(z.string(), z.any())).optional(),
   settings: z.preprocess(normalizeMcpJsonValue, z.any()).optional(),
+  // Validated by parseNodeGroupsInput() — see services/node-groups.ts
+  nodeGroups: z.any().optional(),
   createBackup: z.boolean().optional(),
   intent: z.string().optional(),
 });
@@ -537,6 +544,39 @@ const listExecutionsSchema = z.object({
   includeData: z.boolean().optional(),
 });
 
+// Evaluation ids become API path segments; trim and require content so a blank
+// or whitespace-only value fails here as "Invalid input" rather than surfacing
+// later as a transport-layer error.
+const testRunPathId = z.string().trim().min(1);
+
+const listTestRunsSchema = z.object({
+  workflowId: testRunPathId,
+  status: optionalEmptyAware(z.enum(['new', 'running', 'completed', 'error', 'cancelled'])),
+  limit: z.number().min(1).max(250).optional(),
+  cursor: optionalEmptyAware(z.string()),
+});
+
+const getTestRunSchema = z.object({
+  workflowId: testRunPathId,
+  runId: testRunPathId,
+});
+
+const listTestCasesSchema = z.object({
+  workflowId: testRunPathId,
+  runId: testRunPathId,
+  limit: z.number().min(1).max(250).optional(),
+  cursor: optionalEmptyAware(z.string()),
+});
+
+const triggerTestRunSchema = z.object({
+  workflowId: testRunPathId,
+});
+
+const cancelTestRunSchema = z.object({
+  workflowId: testRunPathId,
+  runId: testRunPathId,
+});
+
 const workflowVersionsSchema = z.object({
   mode: z.enum(['list', 'get', 'rollback', 'delete', 'prune']),
   workflowId: z.string().optional(),
@@ -593,8 +633,20 @@ export async function handleCreateWorkflow(args: unknown, context?: InstanceCont
       };
     }
 
+    // Canvas groups are kept out of the spread so an ungrouped create sends no `nodeGroups` key
+    // at all: Zod emits an own `nodeGroups: undefined` for a caller that sent null.
+    const { nodeGroups: rawNodeGroups, ...createPayload } = input;
+    const nodeGroups = parseNodeGroupsInput(rawNodeGroups);
+    const groupWarnings: string[] = [];
+
     // Create workflow (n8n API expects node types in FULL form)
-    const workflow = await client.createWorkflow(input);
+    const workflow = await client.createWorkflow(
+      nodeGroups !== undefined ? { ...createPayload, nodeGroups } : createPayload,
+      {
+        authoredGroups: new Set((nodeGroups ?? []).map(group => group.name)),
+        onWarning: message => groupWarnings.push(message),
+      }
+    );
 
     // Defensive check: ensure the API returned a valid workflow with an ID
     if (!workflow || !workflow.id) {
@@ -618,7 +670,8 @@ export async function handleCreateWorkflow(args: unknown, context?: InstanceCont
         active: workflow.active,
         nodeCount: workflow.nodes?.length || 0
       },
-      message: `Workflow "${workflow.name}" created successfully with ID: ${workflow.id}. Use n8n_get_workflow with mode 'structure' to verify current state.`
+      message: `Workflow "${workflow.name}" created successfully with ID: ${workflow.id}. Use n8n_get_workflow with mode 'structure' to verify current state.`,
+      ...(groupWarnings.length > 0 ? { details: { warnings: groupWarnings } } : {})
     };
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -759,6 +812,8 @@ export async function handleGetWorkflowStructure(args: unknown, context?: Instan
         isArchived: workflow.isArchived,
         nodes: simplifiedNodes,
         connections: workflow.connections,
+        // Canvas groups are part of the topology an editor sees, so structure mode reports them.
+        ...nodeGroupsField(workflow.nodeGroups),
         nodeCount: workflow.nodes.length,
         connectionCount: Object.keys(workflow.connections).length
       }
@@ -831,6 +886,79 @@ export async function handleGetWorkflowMinimal(args: unknown, context?: Instance
 }
 
 /**
+ * Returns the full config of only the requested nodes, identified by node name or node ID.
+ * Large workflows with long Code-node source can exceed client-side response limits when
+ * fetched whole (issue #101); this mode lets a caller pull one heavy node's `parameters`
+ * without the rest of the graph. Discover node names cheaply with mode='structure' first.
+ *
+ * `nodeNames` accepts both node names and node IDs; any entries that match nothing are
+ * reported back in `notFound` so the caller knows the lookup was partial.
+ */
+export async function handleGetWorkflowFiltered(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const { id, nodeNames } = z.object({
+      id: z.string(),
+      nodeNames: z.array(z.string()).min(1)
+    }).parse(args);
+
+    const workflow = await client.getWorkflow(id);
+
+    const requested = new Set(nodeNames);
+    const matchedNodes = workflow.nodes.filter(
+      node => requested.has(node.name) || requested.has(node.id)
+    );
+
+    // Report any requested keys that resolved to no node so partial requests are transparent.
+    const matchedKeys = new Set(matchedNodes.flatMap(node => [node.name, node.id]));
+    const notFound = nodeNames.filter(key => !matchedKeys.has(key));
+
+    // Only groups touching the requested nodes. Their nodeIds may reference nodes outside this
+    // response — filtered mode returns a slice of the workflow, not a valid whole.
+    const matchedIds = new Set(matchedNodes.map(node => node.id));
+    const touchedGroups = (workflow.nodeGroups ?? []).filter(group =>
+      Array.isArray(group?.nodeIds) && group.nodeIds.some(nodeId => matchedIds.has(nodeId))
+    );
+
+    return {
+      success: true,
+      data: {
+        id: workflow.id,
+        name: workflow.name,
+        active: workflow.active,
+        isArchived: workflow.isArchived,
+        nodes: matchedNodes,
+        ...nodeGroupsField(touchedGroups),
+        nodeCount: workflow.nodes.length,
+        returnedCount: matchedNodes.length,
+        ...(notFound.length > 0 ? { notFound } : {})
+      }
+    };
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        success: false,
+        error: 'Invalid input',
+        details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError) {
+      return {
+        success: false,
+        error: getUserFriendlyErrorMessage(error),
+        code: error.code
+      };
+    }
+
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred'
+    };
+  }
+}
+
+/**
  * Returns the workflow's published (active) graph. n8n's draft/publish model exposes
  * the live version under `activeVersion`; this handler surfaces that as a single-shaped
  * response with `nodes`/`connections` populated from the published version. Use this when
@@ -871,6 +999,9 @@ export async function handleGetWorkflowActive(args: unknown, context?: InstanceC
           versionName: activeVersion.name ?? null,
           nodes: activeVersion.nodes,
           connections: activeVersion.connections,
+          // The published version's own groups — NOT workflow.nodeGroups, which is the draft's
+          // and would describe frames around nodes that may not exist in this graph.
+          ...nodeGroupsField(activeVersion.nodeGroups),
         }
       };
     }
@@ -890,6 +1021,8 @@ export async function handleGetWorkflowActive(args: unknown, context?: InstanceC
           versionName: null,
           nodes: workflow.nodes,
           connections: workflow.connections,
+          // No draft/publish split here: the workflow body IS the running graph, so its groups apply.
+          ...nodeGroupsField(workflow.nodeGroups),
         }
       };
     }
@@ -983,7 +1116,12 @@ export async function handleUpdateWorkflow(
     // so a partial payload (e.g. { executionOrder: 'v0' }) doesn't drop untouched keys like
     // timezone/errorWorkflow. A missing/null/non-object settings value leaves current settings
     // untouched.
-    const { settings: settingsUpdate, ...nonSettingsUpdate } = updateData;
+    // Canvas groups are kept out of the spread for the same reason: Zod emits an own
+    // `nodeGroups: undefined` key when the caller sends null, and spreading that would wipe the
+    // stored groups. The contract is: key absent (or null) => keep the stored groups,
+    // `nodeGroups: []` => ungroup everything, a non-empty array => replace.
+    const { settings: settingsUpdate, nodeGroups: rawNodeGroups, ...nonSettingsUpdate } = updateData;
+    const nodeGroupsUpdate = parseNodeGroupsInput(rawNodeGroups);
     const fullWorkflow = {
       ...current,
       ...nonSettingsUpdate
@@ -996,8 +1134,12 @@ export async function handleUpdateWorkflow(
       };
     }
 
-    // Backup + structure validation only when the graph changed (nodes/connections).
-    if (updateData.nodes || updateData.connections) {
+    if (nodeGroupsUpdate !== undefined) {
+      fullWorkflow.nodeGroups = nodeGroupsUpdate;
+    }
+
+    // Backup + structure validation when the graph or its grouping changed.
+    if (updateData.nodes || updateData.connections || nodeGroupsUpdate !== undefined) {
       // Create backup before modifying workflow (default: true)
       if (createBackup !== false) {
         try {
@@ -1032,12 +1174,18 @@ export async function handleUpdateWorkflow(
       }
     }
 
-    // Update workflow with the merged full payload
-    const workflow = await client.updateWorkflow(id, fullWorkflow as Partial<Workflow>);
+    // Update workflow with the merged full payload. Groups the caller supplied here are
+    // "authored": if n8n rejects one, that surfaces as an error rather than being ungrouped
+    // silently. Groups carried in from the GET degrade with a warning instead.
+    const groupWarnings: string[] = [];
+    const workflow = await client.updateWorkflow(id, fullWorkflow as Partial<Workflow>, {
+      authoredGroups: new Set((nodeGroupsUpdate ?? []).map(group => group.name)),
+      onWarning: message => groupWarnings.push(message),
+    });
 
     // Track successful mutation
     if (workflowBefore) {
-      trackWorkflowMutationForFullUpdate({
+      void trackWorkflowMutationForFullUpdate({
         sessionId,
         toolName: 'n8n_update_full_workflow',
         userIntent,
@@ -1059,12 +1207,13 @@ export async function handleUpdateWorkflow(
         active: workflow.active,
         nodeCount: workflow.nodes?.length || 0
       },
-      message: `Workflow "${workflow.name}" updated successfully. Use n8n_get_workflow with mode 'structure' to verify current state.`
+      message: `Workflow "${workflow.name}" updated successfully. Use n8n_get_workflow with mode 'structure' to verify current state.`,
+      ...(groupWarnings.length > 0 ? { details: { warnings: groupWarnings } } : {})
     };
   } catch (error) {
     // Track failed mutation
     if (workflowBefore) {
-      trackWorkflowMutationForFullUpdate({
+      void trackWorkflowMutationForFullUpdate({
         sessionId,
         toolName: 'n8n_update_full_workflow',
         userIntent,
@@ -1904,6 +2053,277 @@ export async function handleDeleteExecution(args: unknown, context?: InstanceCon
   }
 }
 
+// Evaluation Test Run Handlers (reads n8n >= 2.30, run/cancel n8n >= 2.32)
+
+const TEST_RUN_QUOTA_HINT =
+  'n8n rejected the request (402): the plan\'s evaluation quota is used up. It caps how many workflows may have test runs, and this workflow does not hold one of the slots. Re-run a workflow that already has runs, or raise the limit on your n8n plan.';
+
+/**
+ * 403 guidance for the write actions. All three causes - a key without the
+ * scope, an unlicensed instance, and a key owner without workflow:execute -
+ * surface identically, so name them all.
+ */
+function testRunWriteScopeHint(scope: 'testRun:create' | 'testRun:cancel'): string {
+  return `n8n rejected the request (403). The API key lacks the ${scope} scope - that scope only exists on keys created on n8n 2.32+, so re-create the key there. Other causes: evaluations not licensed on this plan, or the key's owner lacks workflow:execute on this workflow.`;
+}
+
+const TEST_RUN_IDS_HINT =
+  'Workflow or test run not found. A runId must belong to the given workflowId; check both ids.';
+
+/** For the actions that take no runId, where TEST_RUN_IDS_HINT would misdirect. */
+const TEST_RUN_WORKFLOW_HINT =
+  "Workflow not found. Check the workflowId, and that the API key's owner has access to that workflow.";
+
+/** Per-action tuning for handleTestRunError. */
+interface TestRunErrorOptions {
+  /** Minimum n8n 2.x minor whose Public API serves the route. */
+  minMinor: number;
+  /** Completes "Upgrade the instance to ..." in the version-gate message. */
+  capability: string;
+  /** 403 guidance; each action names the scope it needs. */
+  scopeHint: string;
+  /** 404 guidance once the instance version is ruled out. */
+  notFoundHint: string;
+  /** 409 guidance; only the write actions can produce one. */
+  conflictHint?: string;
+  /**
+   * True for the actions whose route is POST. Only they can read a 405 as "the
+   * instance does not document this method"; the read routes are GET, so a 405
+   * on one of those comes from something in front of n8n, not from its version.
+   */
+  postRoute?: boolean;
+}
+
+/** Common to the read actions; they differ only in their 404 guidance. */
+const READ_TEST_RUN_BASE = {
+  minMinor: 30,
+  capability: 'read test runs',
+  scopeHint:
+    'n8n rejected the request (403). The API key lacks testRun scopes - keys created before n8n 2.30 do not have them; re-create the API key on n8n 2.30+. Other causes: evaluations not licensed on this plan, or the key\'s owner lacks access to this workflow.',
+};
+
+const LIST_TEST_RUNS_ERRORS: TestRunErrorOptions = {
+  ...READ_TEST_RUN_BASE,
+  notFoundHint: TEST_RUN_WORKFLOW_HINT,
+};
+
+/** get_run and list_cases both address a run within a workflow. */
+const READ_TEST_RUN_ERRORS: TestRunErrorOptions = {
+  ...READ_TEST_RUN_BASE,
+  notFoundHint: TEST_RUN_IDS_HINT,
+};
+
+const TRIGGER_TEST_RUN_ERRORS: TestRunErrorOptions = {
+  minMinor: 32,
+  capability: 'trigger runs from the API',
+  scopeHint: testRunWriteScopeHint('testRun:create'),
+  notFoundHint: TEST_RUN_WORKFLOW_HINT,
+  conflictHint:
+    'The workflow has no evaluation trigger node. Add an evaluation trigger (n8n-nodes-base.evaluationTrigger) pointing at a dataset, save the workflow, then trigger the run.',
+  postRoute: true,
+};
+
+const CANCEL_TEST_RUN_ERRORS: TestRunErrorOptions = {
+  minMinor: 32,
+  capability: 'cancel runs from the API',
+  scopeHint: testRunWriteScopeHint('testRun:cancel'),
+  notFoundHint: TEST_RUN_IDS_HINT,
+  conflictHint:
+    "The test run already finished (status completed, error, or cancelled), so there is nothing to cancel. Use action='get_run' to see its final state.",
+  postRoute: true,
+};
+
+/**
+ * Guidance for the two statuses an instance without the route produces: 404 when
+ * the path is undocumented, 405 when the path exists for another method (a
+ * pre-2.32 instance serves GET /test-runs but not POST). Returns null when the
+ * instance is new enough, leaving the status to the caller's normal mapping.
+ */
+async function testRunRouteGate(
+  statusCode: number,
+  context: InstanceContext | undefined,
+  options: TestRunErrorOptions
+): Promise<string | null> {
+  // Re-read the version rather than trusting the cache: it lives as long as the
+  // client, so an instance upgraded mid-session would still be blamed for a
+  // genuine bad-id 404. One extra request, only on these two statuses.
+  const client = getN8nApiClient(context);
+  const version = client ? await client.refreshVersion().catch(() => null) : null;
+
+  if (version) {
+    return versionAtLeast(version, 2, options.minMinor)
+      ? null
+      : `The evaluation API requires n8n 2.${options.minMinor}.0 or later; this instance runs ${version.version}. Upgrade the instance to ${options.capability}.`;
+  }
+
+  // Version unreadable, so the gate cannot be asserted. On a POST route a 405
+  // still has one cause - the instance does not document the method - while a
+  // 404 is equally consistent with wrong ids, so offer both.
+  const requirement = `This endpoint requires n8n 2.${options.minMinor}.0 or later, and this instance's n8n version could not be read.`;
+  return statusCode === 405 && options.postRoute
+    ? `${requirement} It rejected POST on the route, which is what an instance predating 2.${options.minMinor}.0 does. Upgrade the instance to ${options.capability}.`
+    : `${requirement} Either the instance predates it, or the request simply did not match. ${options.notFoundHint}`;
+}
+
+/**
+ * Builds the error response for the evaluation handlers. Mirrors handleCrudError
+ * but adds evaluation-specific guidance for the failure modes that are easy to
+ * confuse from raw HTTP statuses alone: an instance too old for the route, an
+ * API key without testRun scopes, an exhausted evaluation quota, a workflow
+ * without an evaluation trigger, and a runId that does not belong to the given
+ * workflow.
+ */
+async function handleTestRunError(
+  error: unknown,
+  context: InstanceContext | undefined,
+  options: TestRunErrorOptions
+): Promise<McpToolResponse> {
+  if (error instanceof z.ZodError) {
+    return { success: false, error: 'Invalid input', details: { errors: error.errors } };
+  }
+  if (error instanceof N8nApiError) {
+    if (error.statusCode === 402) {
+      return { success: false, error: TEST_RUN_QUOTA_HINT, code: error.code };
+    }
+    if (error.statusCode === 403) {
+      return { success: false, error: options.scopeHint, code: error.code };
+    }
+    if (error.statusCode === 409 && options.conflictHint) {
+      return { success: false, error: options.conflictHint, code: error.code };
+    }
+    if (error.statusCode === 404 || error.statusCode === 405) {
+      const gate = await testRunRouteGate(error.statusCode, context, options);
+      if (gate) {
+        return { success: false, error: gate, code: error.code };
+      }
+    }
+    // On a current instance only the 404 form is about the request; a 405 falls through.
+    if (error.statusCode === 404) {
+      return { success: false, error: options.notFoundHint, code: error.code };
+    }
+    return { success: false, error: getUserFriendlyErrorMessage(error), code: error.code };
+  }
+  return { success: false, error: error instanceof Error ? error.message : 'Unknown error occurred' };
+}
+
+export async function handleListTestRuns(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = listTestRunsSchema.parse(args || {});
+
+    // Send limit only when the caller sets one: n8n's server default is the
+    // same 100, and pre-2.30 instances (no test-runs routes) reject unknown
+    // query params before returning the 404 our error mapping explains.
+    const response = await client.listTestRuns(input.workflowId, {
+      status: input.status as TestRunStatus | undefined,
+      limit: input.limit,
+      cursor: input.cursor,
+    });
+
+    const note = response.data.length === 0
+      ? (input.status
+          ? `No test runs with status '${input.status}' for this workflow.`
+          : 'No test runs. Runs exist only for workflows with an evaluation trigger that have been executed at least once.')
+      : response.nextCursor
+        ? 'More test runs available. Use cursor to get next page.'
+        : undefined;
+
+    return {
+      success: true,
+      data: {
+        testRuns: response.data,
+        returned: response.data.length,
+        nextCursor: response.nextCursor,
+        hasMore: !!response.nextCursor,
+        ...(note ? { _note: note } : {})
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context, LIST_TEST_RUNS_ERRORS);
+  }
+}
+
+export async function handleGetTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = getTestRunSchema.parse(args || {});
+
+    const response = await client.getTestRun(input.workflowId, input.runId);
+
+    return {
+      success: true,
+      data: response
+    };
+  } catch (error) {
+    return handleTestRunError(error, context, READ_TEST_RUN_ERRORS);
+  }
+}
+
+export async function handleListTestCases(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = listTestCasesSchema.parse(args || {});
+
+    const response = await client.listTestCases(input.workflowId, input.runId, {
+      limit: input.limit || 20,
+      cursor: input.cursor,
+    });
+
+    return {
+      success: true,
+      data: {
+        testCases: response.data,
+        returned: response.data.length,
+        nextCursor: response.nextCursor,
+        hasMore: !!response.nextCursor,
+        ...(response.nextCursor ? {
+          _note: 'More test cases available. Paginate rather than raising limit - per-case inputs/outputs can be large.'
+        } : {})
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context, READ_TEST_RUN_ERRORS);
+  }
+}
+
+export async function handleTriggerTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = triggerTestRunSchema.parse(args || {});
+
+    const response = await client.triggerTestRun(input.workflowId);
+
+    return {
+      success: true,
+      data: {
+        ...response,
+        _note: `Run started. Cases execute asynchronously - poll with action='get_run', runId='${response.id}' until status is completed, error, or cancelled.`
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context, TRIGGER_TEST_RUN_ERRORS);
+  }
+}
+
+export async function handleCancelTestRun(args: unknown, context?: InstanceContext): Promise<McpToolResponse> {
+  try {
+    const client = ensureApiConfigured(context);
+    const input = cancelTestRunSchema.parse(args || {});
+
+    const response = await client.cancelTestRun(input.workflowId, input.runId);
+
+    return {
+      success: true,
+      data: {
+        ...response,
+        _note: "Cancellation accepted. In-flight cases stop asynchronously - use action='get_run' to confirm the run reached status 'cancelled'."
+      }
+    };
+  } catch (error) {
+    return handleTestRunError(error, context, CANCEL_TEST_RUN_ERRORS);
+  }
+}
+
 // System Tools Handlers
 
 export async function handleHealthCheck(context?: InstanceContext): Promise<McpToolResponse> {
@@ -2493,7 +2913,12 @@ export async function handleWorkflowVersions(
       };
     }
 
-    const client = context ? getN8nApiClient(context) : null;
+    // Resolve the client the same way every other tool does. Gating on `context` skipped
+    // getN8nApiClient's environment-variable fallback, so on a plain N8N_API_URL setup — no
+    // instance context — `rollback` always answered "n8n API not configured" while `list`/`get`
+    // worked, because they read the local version store instead. Multi-tenant isolation is
+    // enforced inside getN8nApiClient and by the scope check above, not by this ternary.
+    const client = getN8nApiClient(context);
     const versioningService = new WorkflowVersioningService(repository, client || undefined, getInstanceScopeId(context));
 
     switch (input.mode) {
@@ -2792,11 +3217,17 @@ export async function handleDeployTemplate(
 
     // Create workflow via API (always creates inactive)
     // Deploy first, then fix - this ensures the workflow exists before we modify it
+    const templateGroupWarnings: string[] = [];
     const createdWorkflow = await client.createWorkflow({
       name: workflowName,
       nodes: workflow.nodes,
       connections: workflow.connections,
+      // Templates keep their node IDs through deployment (only typeVersion and credentials are
+      // touched), so any canvas groups they carry still address the right nodes.
+      ...nodeGroupsField(workflow.nodeGroups),
       settings: workflow.settings || { executionOrder: 'v1' }
+    }, {
+      onWarning: message => templateGroupWarnings.push(message)
     });
 
     // Get base URL for workflow link
@@ -2854,7 +3285,10 @@ export async function handleDeployTemplate(
         templateId: input.templateId,
         templateUrl: template.url || `https://n8n.io/workflows/${input.templateId}`,
         autoFixStatus,
-        fixesApplied: fixesApplied.length > 0 ? fixesApplied : undefined
+        fixesApplied: fixesApplied.length > 0 ? fixesApplied : undefined,
+        // Canvas groups a template carried that this n8n could not store. Without this the tool
+        // would report an unqualified success while the template's frames were dropped.
+        warnings: templateGroupWarnings.length > 0 ? templateGroupWarnings : undefined
       },
       message: `Workflow "${createdWorkflow.name}" deployed successfully from template ${input.templateId}.${fixSummary} ${
         requiredCredentials.length > 0

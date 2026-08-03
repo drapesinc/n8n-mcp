@@ -11,6 +11,7 @@ import {
   N8nServerError,
 } from '../../../src/utils/n8n-errors';
 import * as n8nValidation from '../../../src/services/n8n-validation';
+import { clearVersionCache } from '../../../src/services/n8n-version';
 import { logger } from '../../../src/utils/logger';
 import * as dns from 'dns/promises';
 
@@ -184,9 +185,204 @@ describe('N8nApiClient', () => {
 
     it('should setup request and response interceptors', () => {
       client = new N8nApiClient(defaultConfig);
-      
+
       expect(mockAxiosInstance.interceptors.request.use).toHaveBeenCalled();
       expect(mockAxiosInstance.interceptors.response.use).toHaveBeenCalled();
+    });
+  });
+
+  describe('Cloudflare Access headers', () => {
+    const cfConfig: N8nApiClientConfig = {
+      ...defaultConfig,
+      cfClientId: 'cf-id',
+      cfClientSecret: 'cf-secret',
+    };
+
+    beforeEach(() => {
+      // fetchN8nVersion caches per baseUrl at module scope; clear between tests
+      // so each getVersion() actually issues a request we can assert on.
+      clearVersionCache();
+    });
+
+    it('injects CF headers into the authenticated API client when configured', () => {
+      client = new N8nApiClient(cfConfig);
+
+      expect(axios.create).toHaveBeenCalledWith(expect.objectContaining({
+        headers: {
+          'X-N8N-API-KEY': 'test-api-key',
+          'Content-Type': 'application/json',
+          'CF-Access-Client-Id': 'cf-id',
+          'CF-Access-Client-Secret': 'cf-secret',
+        },
+      }));
+    });
+
+    it('omits CF headers from the API client when not configured', () => {
+      client = new N8nApiClient(defaultConfig);
+
+      const createConfig = vi.mocked(axios.create).mock.calls[0][0] as any;
+      expect(createConfig.headers).not.toHaveProperty('CF-Access-Client-Id');
+      expect(createConfig.headers).not.toHaveProperty('CF-Access-Client-Secret');
+    });
+
+    it('injects only the CF client id when secret is absent', () => {
+      client = new N8nApiClient({ ...defaultConfig, cfClientId: 'cf-id' });
+
+      const createConfig = vi.mocked(axios.create).mock.calls[0][0] as any;
+      expect(createConfig.headers['CF-Access-Client-Id']).toBe('cf-id');
+      expect(createConfig.headers).not.toHaveProperty('CF-Access-Client-Secret');
+    });
+
+    it('forwards CF headers and pinned agents to the version probe', async () => {
+      client = new N8nApiClient(cfConfig);
+      vi.mocked(axios.get).mockResolvedValue({
+        status: 200,
+        data: { data: { n8nVersion: '1.119.0' } },
+      });
+
+      const version = await client.getVersion();
+
+      expect(version).toEqual({ version: '1.119.0', major: 1, minor: 119, patch: 0 });
+      expect(axios.get).toHaveBeenCalledWith(
+        'https://n8n.example.com/rest/settings',
+        expect.objectContaining({
+          headers: {
+            'CF-Access-Client-Id': 'cf-id',
+            'CF-Access-Client-Secret': 'cf-secret',
+          },
+          // SECURITY (GHSA-cmrh-wvq6-wm9r): version probe stays pinned.
+          httpAgent: expect.any(Object),
+          httpsAgent: expect.any(Object),
+          maxRedirects: 0,
+        })
+      );
+    });
+
+    it('sends no CF headers to the version probe when not configured', async () => {
+      client = new N8nApiClient(defaultConfig);
+      vi.mocked(axios.get).mockResolvedValue({
+        status: 200,
+        data: { data: { n8nVersion: '1.119.0' } },
+      });
+
+      await client.getVersion();
+
+      expect(axios.get).toHaveBeenCalledWith(
+        'https://n8n.example.com/rest/settings',
+        expect.objectContaining({ headers: undefined })
+      );
+    });
+
+    it('injects CF headers into webhook executions when configured', async () => {
+      client = new N8nApiClient(cfConfig);
+      const mockWebhookClient = {
+        request: vi.fn().mockResolvedValue({ status: 200, statusText: 'OK', data: {}, headers: {} }),
+      };
+      vi.mocked(axios.create).mockReturnValue(mockWebhookClient as any);
+
+      await client.triggerWebhook({
+        webhookUrl: 'https://n8n.example.com/webhook/abc-123',
+        httpMethod: 'POST',
+        data: { key: 'value' },
+        waitForResponse: false,
+      });
+
+      expect(mockWebhookClient.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            'CF-Access-Client-Id': 'cf-id',
+            'CF-Access-Client-Secret': 'cf-secret',
+            // API key is never forwarded to webhook endpoints.
+            'X-N8N-API-KEY': undefined,
+          }),
+        })
+      );
+    });
+
+    it('omits CF headers from webhook executions when not configured', async () => {
+      client = new N8nApiClient(defaultConfig);
+      const mockWebhookClient = {
+        request: vi.fn().mockResolvedValue({ status: 200, statusText: 'OK', data: {}, headers: {} }),
+      };
+      vi.mocked(axios.create).mockReturnValue(mockWebhookClient as any);
+
+      await client.triggerWebhook({
+        webhookUrl: 'https://n8n.example.com/webhook/abc-123',
+        httpMethod: 'POST',
+        data: { key: 'value' },
+        waitForResponse: false,
+      });
+
+      const requestConfig = mockWebhookClient.request.mock.calls[0][0] as any;
+      expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Id');
+      expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Secret');
+    });
+
+    it('never forwards CF headers to a webhook on a different origin', async () => {
+      // SECURITY: the CF service token must not leak to a host supplied via
+      // webhookUrl that differs from the configured n8n instance origin.
+      client = new N8nApiClient(cfConfig);
+      const mockWebhookClient = {
+        request: vi.fn().mockResolvedValue({ status: 200, statusText: 'OK', data: {}, headers: {} }),
+      };
+      vi.mocked(axios.create).mockReturnValue(mockWebhookClient as any);
+
+      await client.triggerWebhook({
+        webhookUrl: 'https://evil.example.com/webhook/abc-123',
+        httpMethod: 'POST',
+        data: { key: 'value' },
+        waitForResponse: false,
+      });
+
+      const requestConfig = mockWebhookClient.request.mock.calls[0][0] as any;
+      expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Id');
+      expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Secret');
+    });
+
+    it('forwards CF headers to the healthz probe when configured', async () => {
+      client = new N8nApiClient(cfConfig);
+      vi.mocked(axios.get).mockResolvedValue({ status: 200, data: { status: 'ok' } });
+
+      await client.healthCheck();
+
+      expect(axios.get).toHaveBeenCalledWith(
+        'https://n8n.example.com/healthz',
+        expect.objectContaining({
+          headers: {
+            'CF-Access-Client-Id': 'cf-id',
+            'CF-Access-Client-Secret': 'cf-secret',
+          },
+        })
+      );
+    });
+
+    // Instance origin is https://n8n.example.com. The gate must fail closed on a
+    // divergent port/scheme and normalize host case.
+    it.each([
+      ['https://n8n.example.com:8443/webhook/abc', false], // different port -> withheld
+      ['https://N8N.EXAMPLE.COM/webhook/abc', true],       // uppercase host -> origin-normalized, forwarded
+    ])('origin gate for %s forwards CF headers = %s', async (webhookUrl, shouldForward) => {
+      client = new N8nApiClient(cfConfig);
+      const mockWebhookClient = {
+        request: vi.fn().mockResolvedValue({ status: 200, statusText: 'OK', data: {}, headers: {} }),
+      };
+      vi.mocked(axios.create).mockReturnValue(mockWebhookClient as any);
+
+      await client.triggerWebhook({
+        webhookUrl,
+        httpMethod: 'POST',
+        data: { key: 'value' },
+        waitForResponse: false,
+      });
+
+      const requestConfig = mockWebhookClient.request.mock.calls[0][0] as any;
+      if (shouldForward) {
+        expect(requestConfig.headers['CF-Access-Client-Id']).toBe('cf-id');
+        expect(requestConfig.headers['CF-Access-Client-Secret']).toBe('cf-secret');
+      } else {
+        expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Id');
+        expect(requestConfig.headers).not.toHaveProperty('CF-Access-Client-Secret');
+      }
     });
   });
 
@@ -359,6 +555,336 @@ describe('N8nApiClient', () => {
         expect((err as N8nValidationError).message).toBe('Invalid update');
         expect((err as N8nValidationError).statusCode).toBe(400);
       }
+    });
+  });
+
+  describe('canvas groups (nodeGroups)', () => {
+    // n8n validates canvas groups on every write, including writes unrelated to grouping, and
+    // names the group it rejects. These cover the degradation ladder that keeps an unrelated edit
+    // from failing because of a frame — and the guarantee that a group the caller just asked for
+    // is never silently thrown away.
+    const groupedWorkflow = (nodeGroups: any[]) => ({
+      name: 'Grouped',
+      nodes: [
+        { id: 'a', name: 'Set A', type: 'n8n-nodes-base.set', typeVersion: 1, position: [0, 0] as [number, number], parameters: {} },
+        { id: 'b', name: 'Set B', type: 'n8n-nodes-base.set', typeVersion: 1, position: [1, 0] as [number, number], parameters: {} },
+      ],
+      connections: {},
+      nodeGroups,
+    });
+
+    const badRequest = (message: string, data?: unknown) =>
+      createAxiosError({ message, response: { status: 400, data: data ?? { message } } });
+
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('forwards groups on update', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a', 'b'] }]);
+      mockAxiosInstance.put.mockResolvedValue({ data: { ...workflow, id: '123' } });
+
+      await client.updateWorkflow('123', workflow);
+
+      expect(mockAxiosInstance.put.mock.calls[0][1].nodeGroups).toEqual([
+        { id: 'g1', name: 'Transform', nodeIds: ['a', 'b'] },
+      ]);
+    });
+
+    it('prunes members that no longer exist before writing, and says so', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a', 'b', 'deleted'] }]);
+      mockAxiosInstance.put.mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.put.mock.calls[0][1].nodeGroups[0].nodeIds).toEqual(['a', 'b']);
+      expect(warnings.join(' ')).toContain('Transform');
+    });
+
+    it('omits the field and warns when the instance predates canvas groups (n8n < 2.28)', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.put.mock.calls[1][1]).not.toHaveProperty('nodeGroups');
+      expect(warnings.join(' ')).toContain('does not support canvas groups');
+    });
+
+    it('remembers that an instance rejects the field, so the next write skips it', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', workflow);
+      await client.updateWorkflow('123', workflow);
+
+      // 2 for the first call (reject + retry), 1 for the second: no repeat probe.
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(3);
+      expect(mockAxiosInstance.put.mock.calls[2][1]).not.toHaveProperty('nodeGroups');
+    });
+
+    it('keeps warning on later writes once the instance is known not to support groups', async () => {
+      // The client outlives a request. Warning only on the write that discovered the limit would
+      // let a caller author a brand-new grouping later in the session, get plain success, and no
+      // group — silently losing what they explicitly asked for.
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', workflow);
+
+      const laterWarnings: string[] = [];
+      await client.updateWorkflow('123', groupedWorkflow([{ id: 'g2', name: 'Authored now', nodeIds: ['b'] }]), {
+        authoredGroups: new Set(['Authored now']),
+        onWarning: w => laterWarnings.push(w),
+      });
+
+      expect(laterWarnings.join(' ')).toContain('does not support canvas groups');
+    });
+
+    it('keeps warning about dropped descriptions on later writes, but only when one was sent', async () => {
+      const withDescription = groupedWorkflow([
+        { id: 'g1', name: 'Transform', nodeIds: ['a'], description: 'cleans records' },
+      ]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(
+badRequest('request/body/nodeGroups/0 must NOT have additional properties')
+        )
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', withDescription);
+
+      const second: string[] = [];
+      await client.updateWorkflow('123', withDescription, { onWarning: w => second.push(w) });
+      expect(second.join(' ')).toContain('descriptions');
+
+      const third: string[] = [];
+      await client.updateWorkflow('123', groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]), {
+        onWarning: w => third.push(w),
+      });
+      expect(third).toEqual([]);
+    });
+
+    it('strips descriptions but keeps the groups when the instance predates them (n8n < 2.32)', async () => {
+      const workflow = groupedWorkflow([
+        { id: 'g1', name: 'Transform', nodeIds: ['a'], description: 'cleans records' },
+      ]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(
+badRequest('request/body/nodeGroups/0 must NOT have additional properties')
+        )
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      const retried = mockAxiosInstance.put.mock.calls[1][1];
+      expect(retried.nodeGroups).toEqual([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      expect(warnings.join(' ')).toContain('descriptions');
+    });
+
+    it('ungroups only the group n8n named, and keeps the others', async () => {
+      const workflow = groupedWorkflow([
+        { id: 'g1', name: 'Broken', nodeIds: ['a'] },
+        { id: 'g2', name: 'Fine', nodeIds: ['b'] },
+      ]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(
+          badRequest('Node group "Broken" (g1) must form a single connected subgraph with a single entry and exit.')
+        )
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.put.mock.calls[1][1].nodeGroups).toEqual([
+        { id: 'g2', name: 'Fine', nodeIds: ['b'] },
+      ]);
+      expect(warnings.join(' ')).toContain('Broken');
+    });
+
+    it('does not remember a semantic rejection as "unsupported"', async () => {
+      // One invalid group must not disable canvas groups for the whole instance.
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Broken', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('Group "Broken" references node ID "x" that does not exist in the workflow.'))
+        .mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', workflow);
+      await client.updateWorkflow('123', groupedWorkflow([{ id: 'g2', name: 'Fine', nodeIds: ['b'] }]));
+
+      expect(mockAxiosInstance.put.mock.calls[2][1].nodeGroups).toEqual([
+        { id: 'g2', name: 'Fine', nodeIds: ['b'] },
+      ]);
+    });
+
+    it('surfaces the rejection instead of ungrouping when the caller authored that group', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Mine', nodeIds: ['a'] }]);
+      mockAxiosInstance.put.mockRejectedValue(
+        badRequest('Node group "Mine" (g1) must form a single connected subgraph with a single entry and exit.')
+      );
+
+      await expect(
+        client.updateWorkflow('123', workflow, { authoredGroups: new Set(['Mine']) })
+      ).rejects.toThrow(/single connected subgraph/);
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+
+    it('removes all groups as a last resort when n8n names none of them', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('Invalid nodeGroups payload'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.put.mock.calls[1][1].nodeGroups).toEqual([]);
+      expect(warnings.join(' ')).toContain('all of them were removed');
+    });
+
+    it('keeps an authored group when n8n rejects the set without naming one', async () => {
+      // Last resort used to be all-or-nothing. Dropping only the inherited groups saves the write
+      // without destroying what the caller explicitly asked for.
+      const workflow = groupedWorkflow([
+        { id: 'g1', name: 'Inherited', nodeIds: ['a'] },
+        { id: 'g2', name: 'Mine', nodeIds: ['b'] },
+      ]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('Invalid nodeGroups payload'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, {
+        authoredGroups: new Set(['Mine']),
+        onWarning: w => warnings.push(w),
+      });
+
+      expect(mockAxiosInstance.put.mock.calls[1][1].nodeGroups).toEqual([
+        { id: 'g2', name: 'Mine', nodeIds: ['b'] },
+      ]);
+      expect(warnings.join(' ')).toContain('the ones it did not ask about were');
+    });
+
+    it('surfaces the error rather than guessing when n8n names a group it does not hold', async () => {
+      // A group name containing a quote truncates n8n's name capture. Destroying every other group
+      // to recover from an unmatched name would be worse than failing.
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Keep me', nodeIds: ['a'] }]);
+      mockAxiosInstance.put.mockRejectedValue(
+        badRequest('Group "Say "hi"" references node ID "x" that does not exist in the workflow.')
+      );
+
+      await expect(client.updateWorkflow('123', workflow)).rejects.toThrow(/does not exist/);
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects an authored group whose member is not in the workflow', async () => {
+      // Repair prunes stale members for inherited groups, but for one the caller just authored the
+      // missing node is a mistake in the request — n8n would have said the same.
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Mine', nodeIds: ['a', 'typo'] }]);
+      mockAxiosInstance.put.mockResolvedValue({ data: { id: '123' } });
+
+      await expect(
+        client.updateWorkflow('123', workflow, { authoredGroups: new Set(['Mine']) })
+      ).rejects.toThrow(/"typo"/);
+
+      expect(mockAxiosInstance.put).not.toHaveBeenCalled();
+    });
+
+    it('does not record the field as unsupported when dropping it does not help', async () => {
+      // n8n cannot say WHICH unknown property it rejected, so the retry is the experiment: if the
+      // write still fails without nodeGroups, something else in the body was wrong and groups must
+      // not be blamed — otherwise one unrelated 400 would disable them for the whole instance.
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put.mockRejectedValue(badRequest('request/body must NOT have additional properties'));
+      const warnings: string[] = [];
+
+      await expect(
+        client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) })
+      ).rejects.toThrow(/additional properties/);
+
+      expect(warnings).toEqual([]);
+
+      // The next write must still send groups: nothing was learned.
+      mockAxiosInstance.put.mockReset();
+      mockAxiosInstance.put.mockResolvedValue({ data: { id: '123' } });
+      await client.updateWorkflow('123', workflow);
+      expect(mockAxiosInstance.put.mock.calls[0][1]).toHaveProperty('nodeGroups');
+    });
+
+    it('records the field as unsupported only once dropping it succeeds', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow('123', workflow, { onWarning: w => warnings.push(w) });
+
+      expect(warnings.join(' ')).toContain('does not support canvas groups');
+      // Learned: the following write skips the field without probing again.
+      await client.updateWorkflow('123', workflow);
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(3);
+      expect(mockAxiosInstance.put.mock.calls[2][1]).not.toHaveProperty('nodeGroups');
+    });
+
+    it('leaves errors that have nothing to do with groups alone', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.put.mockRejectedValue(badRequest("request/body must have required property 'name'"));
+
+      await expect(client.updateWorkflow('123', workflow)).rejects.toThrow(/required property/);
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+    });
+
+    it('degrades the same way on create', async () => {
+      const workflow = groupedWorkflow([{ id: 'g1', name: 'Transform', nodeIds: ['a'] }]);
+      mockAxiosInstance.post
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.createWorkflow(workflow, { onWarning: w => warnings.push(w) });
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.post.mock.calls[1][1]).not.toHaveProperty('nodeGroups');
+      expect(warnings.join(' ')).toContain('does not support canvas groups');
+    });
+
+    it('sends nothing extra for a workflow without groups', async () => {
+      mockAxiosInstance.put.mockResolvedValue({ data: { id: '123' } });
+
+      await client.updateWorkflow('123', { name: 'Plain', nodes: [], connections: {} });
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(1);
+      expect(mockAxiosInstance.put.mock.calls[0][1]).not.toHaveProperty('nodeGroups');
+    });
+
+    it('degrades an explicit ungroup-all on an instance that has no such field', async () => {
+      // `nodeGroups: []` is a sent field, so a pre-2.28 rejection of it must omit the field and
+      // warn — not fail the write.
+      mockAxiosInstance.put
+        .mockRejectedValueOnce(badRequest('request/body must NOT have additional properties'))
+        .mockResolvedValue({ data: { id: '123' } });
+      const warnings: string[] = [];
+
+      await client.updateWorkflow(
+        '123',
+        { ...groupedWorkflow([]), nodeGroups: [] },
+        { onWarning: w => warnings.push(w) }
+      );
+
+      expect(mockAxiosInstance.put).toHaveBeenCalledTimes(2);
+      expect(mockAxiosInstance.put.mock.calls[1][1]).not.toHaveProperty('nodeGroups');
+      expect(warnings.join(' ')).toContain('does not support canvas groups');
     });
   });
 
@@ -886,6 +1412,112 @@ describe('N8nApiClient', () => {
       await client.deleteExecution('123');
       
       expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/executions/123');
+    });
+  });
+
+  describe('evaluation test runs', () => {
+    beforeEach(() => {
+      client = new N8nApiClient(defaultConfig);
+    });
+
+    it('should list test runs with params', async () => {
+      const response = { data: [{ id: 'run1', status: 'completed' }], nextCursor: null };
+      mockAxiosInstance.get.mockResolvedValue({ data: response });
+
+      const result = await client.listTestRuns('wf1', { status: 'completed', limit: 50, cursor: 'abc' });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/workflows/wf1/test-runs', {
+        params: { status: 'completed', limit: 50, cursor: 'abc' },
+      });
+      expect(result).toEqual(response);
+    });
+
+    it('should reject hostile workflow ids before making a request', async () => {
+      await expect(client.listTestRuns('a/../b')).rejects.toThrow();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('should get a single test run', async () => {
+      const run = { id: 'run1', status: 'completed', finalResult: 'success' };
+      mockAxiosInstance.get.mockResolvedValue({ data: run });
+
+      const result = await client.getTestRun('wf1', 'run1');
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/workflows/wf1/test-runs/run1');
+      expect(result).toEqual(run);
+    });
+
+    it('should reject hostile run ids before making a request', async () => {
+      await expect(client.getTestRun('wf1', '../../executions')).rejects.toThrow();
+      expect(mockAxiosInstance.get).not.toHaveBeenCalled();
+    });
+
+    it('should list test cases with pagination params', async () => {
+      const response = { data: [{ id: 'case1', executionId: 'exec1' }], nextCursor: 'next' };
+      mockAxiosInstance.get.mockResolvedValue({ data: response });
+
+      const result = await client.listTestCases('wf1', 'run1', { limit: 20 });
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/workflows/wf1/test-runs/run1/test-cases', {
+        params: { limit: 20 },
+      });
+      expect(result.nextCursor).toBe('next');
+    });
+
+    it('should wrap legacy array responses when listing test runs', async () => {
+      mockAxiosInstance.get.mockResolvedValue({ data: [{ id: 'run1' }] });
+
+      const result = await client.listTestRuns('wf1');
+
+      expect(result).toEqual({ data: [{ id: 'run1' }], nextCursor: null });
+    });
+
+    it('should throw N8nApiError on HTTP failure', async () => {
+      await mockAxiosInstance.simulateError('get', {
+        message: 'Forbidden',
+        response: { status: 403, data: { message: 'forbidden' } },
+      });
+
+      await expect(client.listTestRuns('wf1')).rejects.toThrow(N8nApiError);
+    });
+
+    it('should trigger a test run', async () => {
+      const triggered = { id: 'run1', status: 'new', createdAt: '2026-07-27T10:00:00.000Z' };
+      mockAxiosInstance.post.mockResolvedValue({ data: triggered });
+
+      const result = await client.triggerTestRun('wf1');
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/workflows/wf1/test-runs', {});
+      expect(result).toEqual(triggered);
+    });
+
+    it('should reject hostile workflow ids before triggering a run', async () => {
+      await expect(client.triggerTestRun('a/../b')).rejects.toThrow();
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+    });
+
+    it('should cancel a test run', async () => {
+      const cancelled = { id: 'run1', status: 'cancelled' };
+      mockAxiosInstance.post.mockResolvedValue({ data: cancelled });
+
+      const result = await client.cancelTestRun('wf1', 'run1');
+
+      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/workflows/wf1/test-runs/run1/cancel', {});
+      expect(result).toEqual(cancelled);
+    });
+
+    it('should reject hostile run ids before cancelling', async () => {
+      await expect(client.cancelTestRun('wf1', '../../executions')).rejects.toThrow();
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+    });
+
+    it('should throw N8nApiError when triggering a run fails', async () => {
+      await mockAxiosInstance.simulateError('post', {
+        message: 'Payment Required',
+        response: { status: 402, data: { message: 'Evaluation quota exceeded' } },
+      });
+
+      await expect(client.triggerTestRun('wf1')).rejects.toThrow(N8nApiError);
     });
   });
 

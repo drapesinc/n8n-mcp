@@ -27,7 +27,6 @@ import {
 } from './utils/protocol-version';
 import { InstanceContext, validateInstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
-import { GenerateWorkflowHandler } from './types/generate-workflow';
 import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
 
@@ -92,7 +91,6 @@ function logSecurityEvent(
 }
 
 export interface SingleSessionHTTPServerOptions {
-  generateWorkflowHandler?: GenerateWorkflowHandler;
   additionalTools?: AdditionalTool[];
 }
 
@@ -119,11 +117,9 @@ export class SingleSessionHTTPServer {
   ) * 60 * 1000;
   private authToken: string | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
-  private generateWorkflowHandler?: GenerateWorkflowHandler;
   private additionalTools?: AdditionalTool[];
 
   constructor(options?: SingleSessionHTTPServerOptions) {
-    this.generateWorkflowHandler = options?.generateWorkflowHandler;
     this.additionalTools = options?.additionalTools;
     // Validate environment on construction
     this.validateEnvironment();
@@ -604,11 +600,21 @@ export class SingleSessionHTTPServer {
 
           const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
           const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
+          // Opt-in: let multiple MCP clients (e.g. an automation agent + an IDE +
+          // a web client) hold concurrent sessions for the SAME instance. The
+          // eager cleanup below assumes one session per instance and evicts the
+          // rest on every initialize — with several concurrent clients that means
+          // each one's initialize destroys the others' live sessions, surfacing as
+          // "Session not found or expired" drops. When enabled, sessions are
+          // reclaimed only by their natural lifecycle (transport close, idle
+          // timeout, MAX_SESSIONS cap) instead of by this eager pass.
+          const allowConcurrentSessions = process.env.MULTI_TENANT_ALLOW_CONCURRENT_SESSIONS === 'true';
 
           // EAGER CLEANUP: Remove existing sessions for the same instance only
-          // when instance-scoped sessions are requested. Shared strategy allows
-          // multiple MCP clients to use the same tenant/instance concurrently.
-          if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
+          // when instance-scoped sessions are requested. Shared strategy, and the
+          // concurrent-sessions opt-in, both allow multiple MCP clients to use the
+          // same tenant/instance concurrently.
+          if (isMultiTenantEnabled && sessionStrategy === 'instance' && !allowConcurrentSessions && instanceContext?.instanceId) {
             const sessionsToRemove: string[] = [];
             for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
               if (context?.instanceId === instanceContext.instanceId) {
@@ -653,7 +659,6 @@ export class SingleSessionHTTPServer {
           }
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
-            generateWorkflowHandler: this.generateWorkflowHandler,
             additionalTools: this.additionalTools,
           });
 
@@ -866,7 +871,6 @@ export class SingleSessionHTTPServer {
     // Note: SSE sessions do not support multi-tenant context.
     // The SaaS backend uses StreamableHTTP exclusively.
     const server = new N8NDocumentationMCPServer(undefined, undefined, {
-      generateWorkflowHandler: this.generateWorkflowHandler,
       additionalTools: this.additionalTools,
     });
 
@@ -1664,8 +1668,10 @@ export class SingleSessionHTTPServer {
    * point the transport and server will be initialized normally.
    *
    * @security Restored contexts are validated synchronously via
-   * validateInstanceContext. Embedders are responsible for not persisting
-   * hostnames they do not trust. See GHSA-4ggg-h7ph-26qr.
+   * validateInstanceContext, and must additionally carry BOTH n8nApiUrl and
+   * n8nApiKey — partial tenant contexts are rejected (GHSA-2cf7-hpwf-47h9
+   * hardening, #844). Embedders are responsible for not persisting hostnames
+   * they do not trust. See GHSA-4ggg-h7ph-26qr.
    *
    * @param sessions - Array of session state objects from exportSessionState()
    * @returns Number of sessions successfully restored
@@ -1734,6 +1740,25 @@ export class SingleSessionHTTPServer {
           const reason = validation.errors?.join(', ') || 'invalid context';
           logger.warn(
             `Skipping session ${sessionState.sessionId} - invalid context: ${reason}`
+          );
+          logSecurityEvent('session_restore_failed', {
+            sessionId: sessionState.sessionId,
+            reason
+          });
+          continue;
+        }
+
+        // SECURITY (GHSA-2cf7-hpwf-47h9 hardening, #844): require BOTH tenant
+        // credentials, mirroring the export-side guard. validateInstanceContext
+        // checks each field only when it is !== undefined, so a partial context
+        // carrying only one of n8nApiUrl/n8nApiKey passes validation and would
+        // restore as a partial tenant identity. The earlier no-context check
+        // above already skips sessions that carry no context at all, so this
+        // guard only applies to sessions whose context is present but incomplete.
+        if (!sessionState.context.n8nApiUrl || !sessionState.context.n8nApiKey) {
+          const reason = 'restored context missing required tenant credentials (both n8nApiUrl and n8nApiKey are required)';
+          logger.warn(
+            `Skipping session ${sessionState.sessionId} - ${reason}`
           );
           logSecurityEvent('session_restore_failed', {
             sessionId: sessionState.sessionId,

@@ -119,7 +119,10 @@ class WorkflowVersioningService {
             };
         }
         try {
-            await this.apiClient.updateWorkflow(workflowId, versionToRestore.workflowSnapshot);
+            const warnings = [];
+            await this.apiClient.updateWorkflow(workflowId, versionToRestore.workflowSnapshot, {
+                onWarning: message => warnings.push(message)
+            });
             return {
                 success: true,
                 message: `Successfully restored workflow to version ${versionToRestore.versionNumber}`,
@@ -127,7 +130,8 @@ class WorkflowVersioningService {
                 fromVersion: backupResult.versionNumber,
                 toVersionId: versionToRestore.id,
                 backupCreated: true,
-                backupVersionId: backupResult.versionId
+                backupVersionId: backupResult.versionId,
+                ...(warnings.length > 0 ? { warnings } : {})
             };
         }
         catch (error) {
@@ -215,6 +219,9 @@ class WorkflowVersioningService {
         const settings1 = v1.workflowSnapshot.settings || {};
         const settings2 = v2.workflowSnapshot.settings || {};
         const settingChanges = this.diffObjects(settings1, settings2);
+        const groups1Str = JSON.stringify(v1.workflowSnapshot.nodeGroups || []);
+        const groups2Str = JSON.stringify(v2.workflowSnapshot.nodeGroups || []);
+        const nodeGroupChanges = groups1Str !== groups2Str ? 1 : 0;
         return {
             versionId1,
             versionId2,
@@ -224,7 +231,8 @@ class WorkflowVersioningService {
             removedNodes,
             modifiedNodes,
             connectionChanges,
-            settingChanges
+            settingChanges,
+            nodeGroupChanges
         };
     }
     formatBytes(bytes) {

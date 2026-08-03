@@ -17,6 +17,7 @@ vi.mock('../../../src/utils/logger', () => ({
 }));
 
 describe('TelemetryBatchProcessor', () => {
+  const TEST_OPERATION_TIMEOUT = 100;
   let batchProcessor: TelemetryBatchProcessor;
   let mockSupabase: SupabaseClient;
   let mockIsEnabled: ReturnType<typeof vi.fn>;
@@ -29,6 +30,43 @@ describe('TelemetryBatchProcessor', () => {
     statusText: error ? 'Bad Request' : 'OK',
     count: null,
     success: !error,
+  });
+
+  const createWorkflowTelemetry = (index: number): WorkflowTelemetry => ({
+    user_id: `workflow-user-${index}`,
+    workflow_hash: `workflow-hash-${index}`,
+    node_count: 1,
+    node_types: ['n8n-nodes-base.set'],
+    has_trigger: false,
+    has_webhook: false,
+    complexity: 'simple',
+    sanitized_workflow: { nodes: [], connections: {} },
+  });
+
+  const createMutationRecord = (index: number): WorkflowMutationRecord => ({
+    userId: `mutation-user-${index}`,
+    sessionId: `mutation-session-${index}`,
+    workflowBefore: { nodes: [], connections: {} },
+    workflowAfter: { nodes: [], connections: {} },
+    workflowHashBefore: `before-${index}`,
+    workflowHashAfter: `after-${index}`,
+    userIntent: 'Test multi-batch retention',
+    intentClassification: IntentClassification.ADD_FUNCTIONALITY,
+    toolName: MutationToolName.UPDATE_PARTIAL,
+    operations: [],
+    operationCount: 0,
+    operationTypes: [],
+    validationImproved: null,
+    errorsResolved: 0,
+    errorsIntroduced: 0,
+    nodesAdded: 0,
+    nodesRemoved: 0,
+    nodesModified: 0,
+    connectionsAdded: 0,
+    connectionsRemoved: 0,
+    propertiesChanged: 0,
+    mutationSuccess: true,
+    durationMs: 1,
   });
 
   beforeEach(() => {
@@ -48,7 +86,9 @@ describe('TelemetryBatchProcessor', () => {
 
     vi.clearAllMocks();
 
-    batchProcessor = new TelemetryBatchProcessor(mockSupabase, mockIsEnabled);
+    batchProcessor = new TelemetryBatchProcessor(mockSupabase, mockIsEnabled, {
+      operationTimeout: TEST_OPERATION_TIMEOUT,
+    });
   });
 
   afterEach(() => {
@@ -60,15 +100,18 @@ describe('TelemetryBatchProcessor', () => {
   });
 
   describe('start()', () => {
-    it('should start periodic flushing when enabled', () => {
+    it('should start periodic flushing when enabled', async () => {
       const setIntervalSpy = vi.spyOn(global, 'setInterval');
+      const flushSpy = vi.spyOn(batchProcessor, 'flush');
 
       batchProcessor.start();
+      await vi.advanceTimersByTimeAsync(TELEMETRY_CONFIG.BATCH_FLUSH_INTERVAL);
 
       expect(setIntervalSpy).toHaveBeenCalledWith(
         expect.any(Function),
         TELEMETRY_CONFIG.BATCH_FLUSH_INTERVAL
       );
+      expect(flushSpy).toHaveBeenCalled();
     });
 
     it('should not start when disabled', () => {
@@ -88,6 +131,17 @@ describe('TelemetryBatchProcessor', () => {
 
       expect(setIntervalSpy).not.toHaveBeenCalled();
       processor.stop();
+    });
+
+    it('should not register timers or listeners more than once', () => {
+      const setIntervalSpy = vi.spyOn(global, 'setInterval');
+      const onSpy = vi.spyOn(process, 'on');
+
+      batchProcessor.start();
+      batchProcessor.start();
+
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(onSpy).toHaveBeenCalledTimes(3);
     });
 
     it('should set up process exit handlers', () => {
@@ -220,6 +274,45 @@ describe('TelemetryBatchProcessor', () => {
   });
 
   describe('batch creation', () => {
+    async function expectAllUnsentBatchesRetried(
+      table: string,
+      itemCount: number,
+      flush: () => Promise<void>
+    ): Promise<void> {
+      const insert = vi.fn()
+        .mockResolvedValueOnce(createMockSupabaseResponse(new Error('First batch failed')))
+        .mockResolvedValue(createMockSupabaseResponse());
+      vi.mocked(mockSupabase.from).mockImplementation((requestedTable) => ({
+        insert: requestedTable === table
+          ? insert
+          : vi.fn().mockResolvedValue(createMockSupabaseResponse()),
+        url: { href: '' },
+        headers: {},
+        select: vi.fn(),
+        upsert: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn()
+      } as any));
+
+      await flush();
+
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(batchProcessor.getMetrics()).toMatchObject({
+        eventsFailed: itemCount,
+        batchesFailed: 2,
+        deadLetterQueueSize: itemCount,
+      });
+
+      await batchProcessor.flush([]);
+
+      const retriedItems = insert.mock.calls
+        .slice(1)
+        .flatMap(([batch]) => batch);
+      expect(insert).toHaveBeenCalledTimes(3);
+      expect(retriedItems).toHaveLength(itemCount);
+      expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(0);
+    }
+
     it('should create single batch for small datasets', async () => {
       const events: TelemetryEvent[] = Array.from({ length: 10 }, (_, i) => ({
         user_id: `user${i}`,
@@ -250,6 +343,44 @@ describe('TelemetryBatchProcessor', () => {
 
       expect(firstCall).toHaveLength(TELEMETRY_CONFIG.MAX_BATCH_SIZE);
       expect(secondCall).toHaveLength(25);
+    });
+
+    it('should retain every unattempted event batch after a failure', async () => {
+      const events: TelemetryEvent[] = Array.from({ length: 60 }, (_, index) => ({
+        user_id: `event-user-${index}`,
+        event: 'multi_batch_event',
+        properties: { index },
+      }));
+
+      await expectAllUnsentBatchesRetried(
+        'telemetry_events',
+        events.length,
+        () => batchProcessor.flush(events)
+      );
+    });
+
+    it('should retain every unattempted workflow batch after a failure', async () => {
+      const workflows = Array.from({ length: 60 }, (_, index) =>
+        createWorkflowTelemetry(index)
+      );
+
+      await expectAllUnsentBatchesRetried(
+        'telemetry_workflows',
+        workflows.length,
+        () => batchProcessor.flush(undefined, workflows)
+      );
+    });
+
+    it('should retain every unattempted mutation batch after a failure', async () => {
+      const mutations = Array.from({ length: 60 }, (_, index) =>
+        createMutationRecord(index)
+      );
+
+      await expectAllUnsentBatchesRetried(
+        'workflow_mutations',
+        mutations.length,
+        () => batchProcessor.flush(undefined, undefined, mutations)
+      );
     });
   });
 
@@ -298,16 +429,9 @@ describe('TelemetryBatchProcessor', () => {
     });
   });
 
-  describe('error handling and retries', () => {
-    it('should retry on failure with exponential backoff', async () => {
-      const error = new Error('Network timeout');
-      const errorResponse = createMockSupabaseResponse(error);
-
-      // Mock to fail first 2 times, then succeed
-      vi.mocked(mockSupabase.from('telemetry_events').insert)
-        .mockResolvedValueOnce(errorResponse)
-        .mockResolvedValueOnce(errorResponse)
-        .mockResolvedValueOnce(createMockSupabaseResponse());
+  describe('bounded operation execution', () => {
+    it('should succeed on a single attempt', async () => {
+      const insert = vi.mocked(mockSupabase.from('telemetry_events').insert);
 
       const events: TelemetryEvent[] = [{
         user_id: 'user1',
@@ -317,18 +441,18 @@ describe('TelemetryBatchProcessor', () => {
 
       await batchProcessor.flush(events);
 
-      // Should have been called 3 times (2 failures + 1 success)
-      expect(mockSupabase.from('telemetry_events').insert).toHaveBeenCalledTimes(3);
+      expect(insert).toHaveBeenCalledTimes(1);
 
       const metrics = batchProcessor.getMetrics();
-      expect(metrics.eventsTracked).toBe(1); // Should succeed on third try
+      expect(metrics.eventsTracked).toBe(1);
     });
 
-    it('should fail after max retries', async () => {
+    it('should fail after a single attempt', async () => {
       const error = new Error('Persistent network error');
       const errorResponse = createMockSupabaseResponse(error);
 
-      vi.mocked(mockSupabase.from('telemetry_events').insert).mockResolvedValue(errorResponse);
+      const insert = vi.mocked(mockSupabase.from('telemetry_events').insert);
+      insert.mockResolvedValue(errorResponse);
 
       const events: TelemetryEvent[] = [{
         user_id: 'user1',
@@ -338,9 +462,7 @@ describe('TelemetryBatchProcessor', () => {
 
       await batchProcessor.flush(events);
 
-      // Should have been called MAX_RETRIES times
-      expect(mockSupabase.from('telemetry_events').insert)
-        .toHaveBeenCalledTimes(TELEMETRY_CONFIG.MAX_RETRIES);
+      expect(insert).toHaveBeenCalledTimes(1);
 
       const metrics = batchProcessor.getMetrics();
       expect(metrics.eventsFailed).toBe(1);
@@ -348,11 +470,9 @@ describe('TelemetryBatchProcessor', () => {
       expect(metrics.deadLetterQueueSize).toBe(1);
     });
 
-    it('should handle operation timeout', async () => {
-      // Mock the operation to always fail with timeout error
-      vi.mocked(mockSupabase.from('telemetry_events').insert).mockRejectedValue(
-        new Error('Operation timed out')
-      );
+    it('should bound a truly never-settling operation with production timeout behavior', async () => {
+      const insert = vi.mocked(mockSupabase.from('telemetry_events').insert);
+      insert.mockImplementation(() => new Promise(() => {}) as any);
 
       const events: TelemetryEvent[] = [{
         user_id: 'user1',
@@ -360,11 +480,34 @@ describe('TelemetryBatchProcessor', () => {
         properties: {}
       }];
 
-      // The flush should fail after retries
-      await batchProcessor.flush(events);
+      let settled = false;
+      const flushPromise = batchProcessor.flush(events).then(() => {
+        settled = true;
+      });
+
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      await vi.runAllTimersAsync();
+      await flushPromise;
 
       const metrics = batchProcessor.getMetrics();
+      expect(settled).toBe(true);
+      expect(insert).toHaveBeenCalledTimes(1);
       expect(metrics.eventsFailed).toBe(1);
+      expect(metrics.batchesFailed).toBe(1);
+      expect(metrics.deadLetterQueueSize).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('should clear the operation timeout after a successful attempt', async () => {
+      await batchProcessor.flush([{
+        user_id: 'user1',
+        event: 'test_event',
+        properties: {}
+      }]);
+
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 
@@ -389,18 +532,15 @@ describe('TelemetryBatchProcessor', () => {
       const error = new Error('Temporary error');
       const errorResponse = createMockSupabaseResponse(error);
 
-      // First 3 calls fail (for all retries), then succeed
-      vi.mocked(mockSupabase.from('telemetry_events').insert)
-        .mockResolvedValueOnce(errorResponse)  // Retry 1
-        .mockResolvedValueOnce(errorResponse)  // Retry 2
-        .mockResolvedValueOnce(errorResponse)  // Retry 3
-        .mockResolvedValueOnce(createMockSupabaseResponse());  // Success on next flush
+      const insert = vi.mocked(mockSupabase.from('telemetry_events').insert);
+      insert.mockResolvedValueOnce(errorResponse);
+      insert.mockResolvedValueOnce(createMockSupabaseResponse());
 
       const events: TelemetryEvent[] = [
         { user_id: 'user1', event: 'event1', properties: {} }
       ];
 
-      // First flush - should fail after all retries and add to dead letter queue
+      // First flush - should fail and add to dead letter queue
       await batchProcessor.flush(events);
       expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(1);
 
@@ -412,13 +552,11 @@ describe('TelemetryBatchProcessor', () => {
     it('should maintain dead letter queue size limit', async () => {
       const error = new Error('Persistent error');
       const errorResponse = createMockSupabaseResponse(error);
-      // Always fail - each flush will retry 3 times then add to dead letter queue
+      // Always fail - each flush adds its batch to the dead letter queue
       vi.mocked(mockSupabase.from('telemetry_events').insert).mockResolvedValue(errorResponse);
 
-      // Circuit breaker opens after 5 failures, so only first 5 flushes will be processed
-      // 5 batches of 5 items = 25 total items in dead letter queue
-      for (let i = 0; i < 10; i++) {
-        const events: TelemetryEvent[] = Array.from({ length: 5 }, (_, j) => ({
+      for (let i = 0; i < 3; i++) {
+        const events: TelemetryEvent[] = Array.from({ length: 50 }, (_, j) => ({
           user_id: `user${i}_${j}`,
           event: 'test_event',
           properties: { batch: i, index: j }
@@ -428,9 +566,70 @@ describe('TelemetryBatchProcessor', () => {
       }
 
       const metrics = batchProcessor.getMetrics();
-      // Circuit breaker opens after 5 failures, so only 25 items are added
-      expect(metrics.deadLetterQueueSize).toBe(25); // 5 flushes * 5 items each
-      expect(metrics.eventsDropped).toBe(25); // 5 additional flushes dropped due to circuit breaker
+      expect(metrics.deadLetterQueueSize).toBe(100);
+      expect(metrics.eventsDropped).toBe(50);
+    });
+
+    it('should retry failed workflow mutations through the mutation table', async () => {
+      const errorResponse = createMockSupabaseResponse(new Error('Temporary mutation error'));
+      const mutationInsert = vi.fn()
+        .mockResolvedValueOnce(errorResponse)
+        .mockResolvedValueOnce(createMockSupabaseResponse());
+      const eventInsert = vi.fn().mockResolvedValue(createMockSupabaseResponse());
+
+      vi.mocked(mockSupabase.from).mockImplementation((table) => ({
+        insert: table === 'workflow_mutations' ? mutationInsert : eventInsert,
+        url: { href: '' },
+        headers: {},
+        select: vi.fn(),
+        upsert: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn()
+      } as any));
+
+      const mutation: WorkflowMutationRecord = {
+        userId: 'user1',
+        sessionId: 'session1',
+        workflowBefore: { nodes: [], connections: {} },
+        workflowAfter: { nodes: [], connections: {} },
+        workflowHashBefore: 'hash1',
+        workflowHashAfter: 'hash2',
+        userIntent: 'Test mutation DLQ retry',
+        intentClassification: IntentClassification.ADD_FUNCTIONALITY,
+        toolName: MutationToolName.UPDATE_PARTIAL,
+        operations: [],
+        operationCount: 0,
+        operationTypes: [],
+        validationImproved: null,
+        errorsResolved: 0,
+        errorsIntroduced: 0,
+        nodesAdded: 0,
+        nodesRemoved: 0,
+        nodesModified: 0,
+        connectionsAdded: 0,
+        connectionsRemoved: 0,
+        propertiesChanged: 0,
+        mutationSuccess: false,
+        durationMs: 10
+      };
+
+      await batchProcessor.flush(undefined, undefined, [mutation]);
+      expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(1);
+
+      await batchProcessor.flush([]);
+
+      expect(mutationInsert).toHaveBeenCalledTimes(2);
+      expect(eventInsert).not.toHaveBeenCalled();
+      expect(mockSupabase.from).toHaveBeenNthCalledWith(1, 'workflow_mutations');
+      expect(mockSupabase.from).toHaveBeenNthCalledWith(2, 'workflow_mutations');
+      expect(mutationInsert).toHaveBeenLastCalledWith([
+        expect.objectContaining({
+          user_id: 'user1',
+          workflow_hash_before: 'hash1',
+          workflow_hash_after: 'hash2'
+        })
+      ]);
+      expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(0);
     });
 
     it('should handle mixed events and workflows in dead letter queue', async () => {
@@ -626,27 +825,156 @@ describe('TelemetryBatchProcessor', () => {
       await expect(processor.flush(events)).resolves.not.toThrow();
     });
 
-    it('should handle concurrent flush operations', async () => {
-      const events: TelemetryEvent[] = [
-        { user_id: 'user1', event: 'test_event', properties: {} }
-      ];
+    it('should serialize concurrent event, workflow, and mutation flushes globally', async () => {
+      const operationOrder: string[] = [];
+      const pendingOperations: Array<() => void> = [];
+      let activeOperations = 0;
+      let maxActiveOperations = 0;
 
-      // Start multiple flush operations concurrently
+      vi.mocked(mockSupabase.from).mockImplementation((table) => ({
+        insert: vi.fn().mockImplementation(() => {
+          operationOrder.push(table);
+          activeOperations++;
+          maxActiveOperations = Math.max(maxActiveOperations, activeOperations);
+
+          return new Promise(resolve => {
+            pendingOperations.push(() => {
+              activeOperations--;
+              resolve(createMockSupabaseResponse());
+            });
+          });
+        }),
+        url: { href: '' },
+        headers: {},
+        select: vi.fn(),
+        upsert: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn()
+      } as any));
+
+      const event: TelemetryEvent = {
+        user_id: 'event-user',
+        event: 'test_event',
+        properties: {}
+      };
+      const workflow: WorkflowTelemetry = {
+        user_id: 'workflow-user',
+        workflow_hash: 'concurrent-hash',
+        node_count: 1,
+        node_types: ['n8n-nodes-base.set'],
+        has_trigger: false,
+        has_webhook: false,
+        complexity: 'simple',
+        sanitized_workflow: { nodes: [], connections: {} }
+      };
+      const mutation = {
+        userId: 'mutation-user',
+        sessionId: 'concurrent-session',
+        workflowBefore: { nodes: [], connections: {} },
+        workflowAfter: { nodes: [], connections: {} },
+        workflowHashBefore: 'before',
+        workflowHashAfter: 'after',
+        userIntent: 'Test concurrent serialization',
+        intentClassification: IntentClassification.ADD_FUNCTIONALITY,
+        toolName: MutationToolName.UPDATE_PARTIAL,
+        operations: [],
+        operationCount: 0,
+        operationTypes: [],
+        validationImproved: null,
+        errorsResolved: 0,
+        errorsIntroduced: 0,
+        nodesAdded: 0,
+        nodesRemoved: 0,
+        nodesModified: 0,
+        connectionsAdded: 0,
+        connectionsRemoved: 0,
+        propertiesChanged: 0,
+        mutationSuccess: true,
+        durationMs: 1
+      } as WorkflowMutationRecord;
+
       const flushPromises = [
-        batchProcessor.flush(events),
-        batchProcessor.flush(events),
-        batchProcessor.flush(events)
+        batchProcessor.flush([event]),
+        batchProcessor.flush(undefined, [workflow]),
+        batchProcessor.flush(undefined, undefined, [mutation])
       ];
 
+      for (let index = 0; index < 10; index++) await Promise.resolve();
+      expect(operationOrder).toEqual(['telemetry_events']);
+      expect(activeOperations).toBe(1);
+
+      pendingOperations.shift()!();
+      for (let index = 0; index < 10; index++) await Promise.resolve();
+      expect(operationOrder).toEqual(['telemetry_events', 'telemetry_workflows']);
+      expect(activeOperations).toBe(1);
+
+      pendingOperations.shift()!();
+      for (let index = 0; index < 10; index++) await Promise.resolve();
+      expect(operationOrder).toEqual([
+        'telemetry_events',
+        'telemetry_workflows',
+        'workflow_mutations'
+      ]);
+      expect(activeOperations).toBe(1);
+
+      pendingOperations.shift()!();
       await Promise.all(flushPromises);
 
-      // Should handle concurrent operations gracefully
-      const metrics = batchProcessor.getMetrics();
-      expect(metrics.eventsTracked).toBeGreaterThan(0);
+      expect(maxActiveOperations).toBe(1);
+      expect(batchProcessor.getMetrics()).toMatchObject({
+        eventsTracked: 3,
+        batchesSent: 3,
+        eventsFailed: 0,
+        batchesFailed: 0
+      });
+    });
+
+    it('should settle queued never-ending flushes without silently losing any batch', async () => {
+      const insert = vi.mocked(mockSupabase.from('telemetry_events').insert);
+      insert.mockImplementation(() => new Promise(() => {}) as any);
+
+      const events = ['queued-1', 'queued-2', 'queued-3'].map(user_id => [{
+        user_id,
+        event: 'never_settles',
+        properties: {}
+      }] as TelemetryEvent[]);
+
+      const flushPromises = events.map(batch => batchProcessor.flush(batch));
+
+      await vi.runAllTimersAsync();
+      await Promise.all(flushPromises);
+
+      const attemptedUsers = insert.mock.calls.map(([batch]) =>
+        (batch as TelemetryEvent[])[0].user_id
+      );
+      expect(attemptedUsers).toEqual(events.map(([event]) => event.user_id));
+      expect(batchProcessor.getMetrics()).toMatchObject({
+        eventsFailed: 3,
+        batchesFailed: 3,
+        eventsDropped: 0,
+        deadLetterQueueSize: 3
+      });
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 
   describe('process lifecycle integration', () => {
+    it('should route lifecycle flushes through the queue-aware callback', async () => {
+      const onFlushRequested = vi.fn().mockRejectedValue(new Error('Scheduled flush failed'));
+      const processor = new TelemetryBatchProcessor(mockSupabase, mockIsEnabled, {
+        operationTimeout: TEST_OPERATION_TIMEOUT,
+        onFlushRequested,
+      });
+
+      processor.start();
+      process.emit('beforeExit', 0);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(onFlushRequested).toHaveBeenCalledOnce();
+      processor.stop();
+    });
+
     it('should flush on process beforeExit', async () => {
       const flushSpy = vi.spyOn(batchProcessor, 'flush');
 
@@ -665,6 +993,7 @@ describe('TelemetryBatchProcessor', () => {
 
       // Trigger SIGINT event
       process.emit('SIGINT', 'SIGINT');
+      for (let index = 0; index < 10; index++) await Promise.resolve();
 
       expect(flushSpy).toHaveBeenCalled();
       expect(mockProcessExit).toHaveBeenCalledWith(0);
@@ -677,10 +1006,39 @@ describe('TelemetryBatchProcessor', () => {
 
       // Trigger SIGTERM event
       process.emit('SIGTERM', 'SIGTERM');
+      for (let index = 0; index < 10; index++) await Promise.resolve();
 
       expect(flushSpy).toHaveBeenCalled();
       expect(mockProcessExit).toHaveBeenCalledWith(0);
     });
+
+    it.each(['SIGINT', 'SIGTERM'] as const)(
+      'should wait for the scheduled flush before exiting on %s',
+      async signal => {
+        let resolveFlush!: () => void;
+        const onFlushRequested = vi.fn(() => new Promise<void>(resolve => {
+          resolveFlush = resolve;
+        }));
+        const processor = new TelemetryBatchProcessor(mockSupabase, mockIsEnabled, {
+          operationTimeout: TEST_OPERATION_TIMEOUT,
+          onFlushRequested,
+        });
+
+        processor.start();
+        process.emit(signal, signal);
+        await Promise.resolve();
+
+        expect(onFlushRequested).toHaveBeenCalledOnce();
+        expect(mockProcessExit).not.toHaveBeenCalled();
+
+        resolveFlush();
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockProcessExit).toHaveBeenCalledWith(0);
+        processor.stop();
+      }
+    );
   });
 
   describe('Issue #517: workflow data preservation', () => {

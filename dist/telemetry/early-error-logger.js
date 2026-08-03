@@ -6,17 +6,25 @@ const config_manager_1 = require("./config-manager");
 const telemetry_types_1 = require("./telemetry-types");
 const startup_checkpoints_1 = require("./startup-checkpoints");
 const error_sanitization_utils_1 = require("./error-sanitization-utils");
+const telemetry_fetch_1 = require("./telemetry-fetch");
 const logger_1 = require("../utils/logger");
 async function withTimeout(promise, timeoutMs, operation) {
+    let timer;
     try {
         const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
+            timer = setTimeout(() => reject(new Error(`${operation} timeout after ${timeoutMs}ms`)), timeoutMs);
+            timer.unref?.();
         });
         return await Promise.race([promise, timeoutPromise]);
     }
     catch (error) {
         logger_1.logger.debug(`${operation} failed or timed out:`, error);
         return null;
+    }
+    finally {
+        if (timer) {
+            clearTimeout(timer);
+        }
     }
 }
 class EarlyErrorLogger {
@@ -52,6 +60,9 @@ class EarlyErrorLogger {
                 auth: {
                     persistSession: false,
                     autoRefreshToken: false,
+                },
+                global: {
+                    fetch: telemetry_fetch_1.telemetryFetch,
                 },
             });
             this.userId = configManager.getUserId();

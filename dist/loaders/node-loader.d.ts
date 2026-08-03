@@ -8,6 +8,8 @@ export declare class N8nNodeLoader {
     loadAllNodes(): Promise<LoadedNode[]>;
     private resolvePackageDir;
     private loadNodeModule;
+    private loadNodeModuleWithStubbedDependencies;
+    private resolveNodeClass;
     private loadPackageNodes;
 }
 //# sourceMappingURL=node-loader.d.ts.map

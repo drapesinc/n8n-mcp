@@ -67,9 +67,25 @@ export interface WorkflowSettings {
 export interface ActiveWorkflowVersion {
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
+  nodeGroups?: WorkflowNodeGroup[]; // Canvas groups as they were in this published version
   name?: string | null;
   createdAt?: string;
   [key: string]: unknown;
+}
+
+/**
+ * A canvas group ("Group nodes", n8n 2.28+): a named frame drawn around a connected run of
+ * non-trigger nodes. Purely presentational, but n8n validates group membership on every write —
+ * see src/services/node-groups.ts.
+ *
+ * `description` only exists on n8n 2.32+; older instances reject it (the group schema is
+ * `additionalProperties: false`).
+ */
+export interface WorkflowNodeGroup {
+  id: string;
+  name: string;
+  nodeIds: string[]; // node IDs, not names — connections are keyed by name
+  description?: string;
 }
 
 export interface Workflow {
@@ -78,6 +94,7 @@ export interface Workflow {
   description?: string; // Returned by GET but must be excluded from PUT/PATCH (n8n API limitation, Issue #431)
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
+  nodeGroups?: WorkflowNodeGroup[]; // Canvas groups (n8n 2.28+); absent on older instances
   active?: boolean; // Optional for creation as it's read-only
   isArchived?: boolean; // Optional, available in newer n8n versions
   settings?: WorkflowSettings;
@@ -170,6 +187,7 @@ export interface WorkflowExport {
   updatedAt: string;
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
+  nodeGroups?: WorkflowNodeGroup[];
   settings?: WorkflowSettings;
   staticData?: Record<string, unknown>;
   tags?: string[];
@@ -183,6 +201,7 @@ export interface WorkflowImport {
   name: string;
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
+  nodeGroups?: WorkflowNodeGroup[];
   settings?: WorkflowSettings;
   staticData?: Record<string, unknown>;
   tags?: string[];
@@ -294,6 +313,79 @@ export interface ExecutionListParams {
 
 export interface ExecutionListResponse {
   data: Execution[];
+  nextCursor?: string | null;
+}
+
+// Evaluation test runs (n8n Public API >= 2.30)
+export type TestRunStatus = 'new' | 'running' | 'completed' | 'error' | 'cancelled';
+export type TestRunFinalResult = 'success' | 'error' | 'warning';
+export type TestCaseExecutionStatus =
+  | 'new'
+  | 'running'
+  | 'evaluation_running'
+  | 'success'
+  | 'error'
+  | 'warning'
+  | 'cancelled';
+
+export interface TestRunSummary {
+  id: string;
+  status: TestRunStatus;
+  runAt: string | null;
+  completedAt: string | null;
+  metrics: Record<string, number | boolean> | null;
+  errorCode: string | null;
+  errorDetails: Record<string, unknown> | null;
+  finalResult: TestRunFinalResult | null;
+  testCaseCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TestCaseExecution {
+  id: string;
+  status: TestCaseExecutionStatus;
+  runAt: string | null;
+  completedAt: string | null;
+  metrics: Record<string, number | boolean> | null;
+  errorCode: string | null;
+  errorDetails: Record<string, unknown> | null;
+  inputs: Record<string, unknown> | null;
+  outputs: Record<string, unknown> | null;
+  executionId: string | null;
+}
+
+// Returned by the trigger/cancel routes (n8n Public API >= 2.32), which answer
+// with the run identity only - poll the get route for metrics.
+export interface TestRunTriggerResult {
+  id: string;
+  status: TestRunStatus;
+  createdAt: string;
+}
+
+export interface TestRunCancelResult {
+  id: string;
+  status: 'cancelled';
+}
+
+export interface TestRunListParams {
+  status?: TestRunStatus;
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TestCaseListParams {
+  limit?: number;
+  cursor?: string;
+}
+
+export interface TestRunListResponse {
+  data: TestRunSummary[];
+  nextCursor?: string | null;
+}
+
+export interface TestCaseListResponse {
+  data: TestCaseExecution[];
   nextCursor?: string | null;
 }
 

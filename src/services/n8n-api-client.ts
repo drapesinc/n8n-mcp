@@ -7,6 +7,14 @@ import {
   Execution,
   ExecutionListParams,
   ExecutionListResponse,
+  TestRunSummary,
+  TestCaseExecution,
+  TestRunListParams,
+  TestCaseListParams,
+  TestRunListResponse,
+  TestCaseListResponse,
+  TestRunTriggerResult,
+  TestRunCancelResult,
   Credential,
   CredentialListParams,
   CredentialListResponse,
@@ -31,10 +39,18 @@ import {
   DataTableUpdateRowsParams,
   DataTableUpsertRowParams,
   DataTableDeleteRowsParams,
+  WorkflowNodeGroup,
 } from '../types/n8n-api';
-import { handleN8nApiError, logN8nError } from '../utils/n8n-errors';
+import { handleN8nApiError, logN8nError, N8nValidationError } from '../utils/n8n-errors';
 import { encodeApiPathSegment } from '../utils/validation-schemas';
 import { cleanWorkflowForCreate, cleanWorkflowForUpdate } from './n8n-validation';
+import {
+  classifyGroupError,
+  dropRejectedGroup,
+  repairNodeGroups,
+  sanitizeGroupsForApi,
+  type GroupErrorClassification,
+} from './node-groups';
 import {
   fetchN8nVersion,
   cleanSettingsForVersion,
@@ -47,6 +63,35 @@ export interface N8nApiClientConfig {
   apiKey: string;
   timeout?: number;
   maxRetries?: number;
+  cfClientId?: string;
+  cfClientSecret?: string;
+}
+
+/**
+ * Warnings for the two capability limits. Shared constants because they are emitted from two
+ * places each — the write that discovers the limit, and every later write that already knows it.
+ */
+const GROUPS_UNSUPPORTED_WARNING =
+  'This n8n version does not support canvas groups (added in 2.28); the workflow was saved without them.';
+const GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING =
+  'This n8n version does not support canvas group descriptions (added in 2.32); the descriptions were not saved.';
+
+/** The same write payload without `nodeGroups`, for instances whose schema has no such field. */
+function withoutNodeGroups(payload: Record<string, unknown>): Record<string, unknown> {
+  const { nodeGroups, ...rest } = payload;
+  return rest;
+}
+
+/** Options for workflow writes that carry canvas groups. */
+export interface WorkflowWriteOptions {
+  /**
+   * Names of groups the caller authored in THIS request. These are never silently dropped: if
+   * n8n rejects one, the error is surfaced instead. Groups that merely came back from a GET are
+   * dropped with a warning so an unrelated edit still lands.
+   */
+  authoredGroups?: Set<string>;
+  /** Called for each non-fatal adjustment (a pruned member, a dropped group, an unsupported field). */
+  onWarning?: (message: string) => void;
 }
 
 export class N8nApiClient {
@@ -57,11 +102,21 @@ export class N8nApiClient {
   private versionPromise: Promise<N8nVersionInfo | null> | null = null;
   // SECURITY (GHSA-cmrh-wvq6-wm9r): cached pinned transport agents.
   private pinnedAgentsPromise: Promise<PinnedAgents> | null = null;
+  private cfClientId?: string;
+  private cfClientSecret?: string;
+  /**
+   * What this instance's write schema accepts for canvas groups. Optimistic until a SCHEMA error
+   * proves otherwise — semantic rejections of particular groups never touch this, or one invalid
+   * group would permanently disable groups for the instance. Per-client, which is per-instance.
+   */
+  private groupSupport = { groups: true, descriptions: true };
 
   constructor(config: N8nApiClientConfig) {
-    const { baseUrl, apiKey, timeout = 30000, maxRetries = 3 } = config;
+    const { baseUrl, apiKey, timeout = 30000, maxRetries = 3, cfClientId, cfClientSecret } = config;
 
     this.maxRetries = maxRetries;
+    this.cfClientId = cfClientId;
+    this.cfClientSecret = cfClientSecret;
 
     // SECURITY (GHSA-4ggg-h7ph-26qr): defense-in-depth baseUrl normalization.
     let normalizedBase: string;
@@ -85,13 +140,16 @@ export class N8nApiClient {
       ? normalizedBase
       : `${normalizedBase}/api/v1`;
 
+    const headers: Record<string, string> = {
+      'X-N8N-API-KEY': apiKey,
+      'Content-Type': 'application/json',
+      ...this.cfAccessHeaders(),
+    };
+
     this.client = axios.create({
       baseURL: apiUrl,
       timeout,
-      headers: {
-        'X-N8N-API-KEY': apiKey,
-        'Content-Type': 'application/json',
-      },
+      headers,
       // SECURITY (GHSA-cmrh-wvq6-wm9r): no redirect-following on the
       // authenticated client; pinned agent neutralizes cross-host hops anyway.
       maxRedirects: 0,
@@ -188,14 +246,50 @@ export class N8nApiClient {
   }
 
   /**
+   * Cloudflare Access service-token headers when configured, empty object otherwise.
+   */
+  private cfAccessHeaders(): Record<string, string> {
+    const headers: Record<string, string> = {};
+    if (this.cfClientId) headers['CF-Access-Client-Id'] = this.cfClientId;
+    if (this.cfClientSecret) headers['CF-Access-Client-Secret'] = this.cfClientSecret;
+    return headers;
+  }
+
+  /**
+   * Cloudflare Access headers for axios `headers` slots that should be omitted
+   * entirely when unset: the configured headers, or undefined when none apply.
+   */
+  private cfAccessHeadersOrUndefined(): Record<string, string> | undefined {
+    const headers = this.cfAccessHeaders();
+    return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
+  /**
+   * Whether targetUrl shares the configured n8n instance origin. Used to confine
+   * instance credentials (e.g. Cloudflare Access headers) to the instance host.
+   */
+  private isSameOrigin(targetUrl: string): boolean {
+    try {
+      return new URL(targetUrl).origin === new URL(this.baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Internal method to fetch version once
    */
   private async fetchVersionOnce(): Promise<N8nVersionInfo | null> {
     const cached = getCachedVersion(this.baseUrl);
     if (cached) return cached;
-    // SECURITY (GHSA-cmrh-wvq6-wm9r): reuse the validated transport agents.
+
+    // SECURITY (GHSA-cmrh-wvq6-wm9r): reuse the validated transport agents,
+    // and forward any Cloudflare Access headers so the probe clears the edge.
     const agents = await this.getPinnedAgents();
-    return await fetchN8nVersion(this.baseUrl, agents);
+    return await fetchN8nVersion(this.baseUrl, {
+      headers: this.cfAccessHeadersOrUndefined(),
+      pinnedAgents: agents,
+    });
   }
 
   /**
@@ -203,6 +297,26 @@ export class N8nApiClient {
    */
   getCachedVersionInfo(): N8nVersionInfo | null {
     return this.versionInfo;
+  }
+
+  /**
+   * Re-read the instance version, bypassing both the per-client and the shared
+   * TTL cache. `versionInfo` lives as long as the client, so an instance
+   * upgraded mid-session keeps reporting its old version - callers that are
+   * about to blame the version for a failure need a current reading. Returns
+   * null when the version cannot be read, leaving any cached value in place.
+   */
+  async refreshVersion(): Promise<N8nVersionInfo | null> {
+    const agents = await this.getPinnedAgents();
+    const version = await fetchN8nVersion(this.baseUrl, {
+      headers: this.cfAccessHeadersOrUndefined(),
+      pinnedAgents: agents,
+      forceRefresh: true,
+    });
+    if (version) {
+      this.versionInfo = version;
+    }
+    return version;
   }
 
   // Health check to verify API connectivity
@@ -216,6 +330,9 @@ export class N8nApiClient {
       const agents = await this.getPinnedAgents();
       const response = await axios.get(healthzUrl, {
         timeout: 5000,
+        // Forward Cloudflare Access headers so the probe clears the edge when the
+        // instance sits behind Cloudflare Access (healthzUrl is always the instance origin).
+        headers: this.cfAccessHeadersOrUndefined(),
         validateStatus: (status) => status < 500,
         maxRedirects: 0,
         httpAgent: agents.httpAgent,
@@ -255,12 +372,209 @@ export class N8nApiClient {
     }
   }
 
-  // Workflow Management
-  async createWorkflow(workflow: Partial<Workflow>): Promise<Workflow> {
+  /**
+   * Send a workflow write, degrading `nodeGroups` only as far as the instance forces.
+   *
+   * n8n validates canvas groups on every write and names the offending group when it rejects one,
+   * so the server — not a local copy of its rules — decides what is valid. The ladder is:
+   *
+   *   1. group schema has no `description` (n8n 2.28–2.31)  -> strip descriptions, retry
+   *   2. workflow schema has no `nodeGroups` (before 2.28)  -> omit the field, retry
+   *   3. a named group is invalid and was NOT authored here -> drop that group, retry
+   *   4. a named group is invalid and WAS authored here     -> surface n8n's message
+   *   5. groups rejected without naming one                 -> send [] (ungroup all), retry
+   *
+   * Omitting the field is not a fix for case 3: n8n backfills the stored groups when the field is
+   * absent, so the same rejection returns. Each attempt must make progress or the loop stops.
+   */
+  private async sendWorkflowWrite(
+    payload: Record<string, unknown>,
+    send: (body: Record<string, unknown>) => Promise<Workflow>,
+    options: WorkflowWriteOptions
+  ): Promise<Workflow> {
+    if (!Array.isArray(payload.nodeGroups)) {
+      return await send(payload);
+    }
+
+    // Known-unsupported from an earlier write against this instance. Warn EVERY time, not just on
+    // the write that discovered it: this client outlives a single request, so a caller authoring a
+    // brand-new grouping later in the session would otherwise get plain success and no group.
+    if (!this.groupSupport.groups) {
+      options.onWarning?.(GROUPS_UNSUPPORTED_WARNING);
+      return await send(withoutNodeGroups(payload));
+    }
+
+    let groups = sanitizeGroupsForApi(payload.nodeGroups, {
+      includeDescription: this.groupSupport.descriptions,
+    });
+
+    // Same reasoning for descriptions, but only worth saying when one was actually supplied.
+    if (
+      !this.groupSupport.descriptions &&
+      (payload.nodeGroups as WorkflowNodeGroup[]).some(group => group?.description !== undefined)
+    ) {
+      options.onWarning?.(GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING);
+    }
+
+    // Bounded: each iteration must remove a group, strip descriptions, or drop the field.
+    const maxAttempts = groups.length + 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        return await send({ ...payload, nodeGroups: groups });
+      } catch (error) {
+        const apiError = handleN8nApiError(error);
+        const next = this.degradeGroupsAfterRejection(
+          classifyGroupError(apiError),
+          groups,
+          options
+        );
+
+        if (next === 'give-up') throw apiError;
+
+        if (next === 'omit-field') {
+          // n8n could not say WHICH unknown property it rejected, so find out: send the same body
+          // without nodeGroups. Success means the field was the culprit and this instance predates
+          // it — worth remembering. Failure means something else in the body was wrong, so the
+          // original complaint is the honest answer and the capability memo stays untouched.
+          let result: Workflow;
+          try {
+            result = await send(withoutNodeGroups(payload));
+          } catch {
+            throw apiError;
+          }
+          this.groupSupport.groups = false;
+          options.onWarning?.(GROUPS_UNSUPPORTED_WARNING);
+          return result;
+        }
+
+        groups = next;
+      }
+    }
+
+    // Unreachable in practice: every branch above either returns, throws, or shrinks the payload.
+    throw new Error('Could not save workflow: n8n kept rejecting its canvas groups');
+  }
+
+  /**
+   * Decide how to retry after n8n rejected a write, per the ladder in sendWorkflowWrite: the groups
+   * to send next, `omit-field` to send no groups at all, or `give-up` to surface n8n's error.
+   */
+  private degradeGroupsAfterRejection(
+    classification: GroupErrorClassification,
+    groups: WorkflowNodeGroup[],
+    options: WorkflowWriteOptions
+  ): WorkflowNodeGroup[] | 'omit-field' | 'give-up' {
+    const warn = (message: string) => options.onWarning?.(message);
+    const authored = options.authoredGroups ?? new Set<string>();
+
+    if (classification.kind === 'schema-description' && this.groupSupport.descriptions) {
+      this.groupSupport.descriptions = false;
+      warn(GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING);
+      return sanitizeGroupsForApi(groups, { includeDescription: false });
+    }
+
+    // Deliberately does not latch groupSupport or warn: whether the field really is the problem is
+    // only known once the retry without it succeeds. sendWorkflowWrite records it there.
+    if (classification.kind === 'schema-field') return 'omit-field';
+
+    if (classification.kind !== 'semantic') return 'give-up';
+
+    const { groupName, groupId } = classification;
+
+    if (groupName || groupId) {
+      const { groups: remaining, dropped } = dropRejectedGroup(groups, { groupId, groupName });
+
+      // Never silently discard a group the caller asked for in this request.
+      if (dropped && authored.has(dropped.name)) return 'give-up';
+
+      if (dropped) {
+        warn(
+          `n8n rejected node group "${dropped.name}", so it was ungrouped to save the workflow (nodes and connections are unchanged). n8n said: ${classification.message}`
+        );
+        return remaining;
+      }
+
+      // n8n identified a group we do not hold — most likely its message did not survive matching
+      // (a quote in the name). Surface its error rather than guess which group to destroy.
+      return 'give-up';
+    }
+
+    // n8n complained about groups without naming any. Drop the inherited ones and keep whatever the
+    // caller authored: if that is still rejected, the next pass surfaces the error instead of
+    // destroying content the caller explicitly asked for.
+    const keepAuthored = groups.filter(group => authored.has(group.name));
+    if (keepAuthored.length < groups.length) {
+      warn(
+        `n8n rejected the canvas groups on this workflow, so ${keepAuthored.length > 0 ? 'the ones it did not ask about were' : 'all of them were'} removed to save it (nodes and connections are unchanged). n8n said: ${classification.message}`
+      );
+      return keepAuthored;
+    }
+
+    return 'give-up';
+  }
+
+  /** Save a workflow with PUT, falling back to PATCH on n8n versions that answer PUT with 405. */
+  private async putOrPatchWorkflow(
+    safeId: string,
+    body: Record<string, unknown>
+  ): Promise<Workflow> {
     try {
-      const cleanedWorkflow = cleanWorkflowForCreate(workflow);
-      const response = await this.client.post('/workflows', cleanedWorkflow);
+      const response = await this.client.put(`/workflows/${safeId}`, body);
       return response.data;
+    } catch (putError: any) {
+      if (putError.response?.status !== 405) throw putError;
+      logger.debug('PUT method not supported, falling back to PATCH');
+      const response = await this.client.patch(`/workflows/${safeId}`, body);
+      return response.data;
+    }
+  }
+
+  /**
+   * Prune canvas-group members that no longer exist and report what changed. Runs on every write
+   * so it also covers rollbacks and version restores, whose snapshots can predate a node deletion.
+   */
+  private repairGroupsForWrite(
+    payload: Record<string, unknown>,
+    options: WorkflowWriteOptions
+  ): Record<string, unknown> {
+    // A payload without `nodes` says nothing about which nodes exist — treating that as "none" would
+    // prune every group. Callers always merge over a GET today; this keeps that assumption explicit.
+    if (!Array.isArray(payload.nodeGroups) || !Array.isArray(payload.nodes)) return payload;
+
+    const { nodeGroups, issues, errors } = repairNodeGroups(
+      {
+        nodes: payload.nodes as Workflow['nodes'],
+        nodeGroups: payload.nodeGroups as Workflow['nodeGroups'],
+      },
+      { authoredGroups: options.authoredGroups }
+    );
+
+    // A group the caller authored in this request referencing a node that does not exist is a
+    // mistake in the request, not something to repair silently — n8n would have said the same.
+    if (errors && errors.length > 0) {
+      throw new N8nValidationError(errors.join(' '), { nodeGroups: errors });
+    }
+
+    for (const issue of issues) {
+      options.onWarning?.(issue.message);
+    }
+
+    return nodeGroups === payload.nodeGroups ? payload : { ...payload, nodeGroups };
+  }
+
+  // Workflow Management
+  async createWorkflow(
+    workflow: Partial<Workflow>,
+    options: WorkflowWriteOptions = {}
+  ): Promise<Workflow> {
+    try {
+      const cleanedWorkflow = cleanWorkflowForCreate(workflow) as Record<string, unknown>;
+      const payload = this.repairGroupsForWrite(cleanedWorkflow, options);
+      return await this.sendWorkflowWrite(
+        payload,
+        async body => (await this.client.post('/workflows', body)).data,
+        options
+      );
     } catch (error) {
       throw handleN8nApiError(error);
     }
@@ -275,7 +589,11 @@ export class N8nApiClient {
     }
   }
 
-  async updateWorkflow(id: string, workflow: Partial<Workflow>): Promise<Workflow> {
+  async updateWorkflow(
+    id: string,
+    workflow: Partial<Workflow>,
+    options: WorkflowWriteOptions = {}
+  ): Promise<Workflow> {
     try {
       // Step 1: Basic cleaning (remove read-only fields, filter to known settings)
       const cleanedWorkflow = cleanWorkflowForUpdate(workflow as Workflow);
@@ -296,19 +614,18 @@ export class N8nApiClient {
       }
 
       const safeId = encodeApiPathSegment(id, 'workflowId');
-      // First, try PUT method (newer n8n versions)
-      try {
-        const response = await this.client.put(`/workflows/${safeId}`, cleanedWorkflow);
-        return response.data;
-      } catch (putError: any) {
-        // If PUT fails with 405 (Method Not Allowed), try PATCH
-        if (putError.response?.status === 405) {
-          logger.debug('PUT method not supported, falling back to PATCH');
-          const response = await this.client.patch(`/workflows/${safeId}`, cleanedWorkflow);
-          return response.data;
-        }
-        throw putError;
-      }
+      const payload = this.repairGroupsForWrite(
+        cleanedWorkflow as Record<string, unknown>,
+        options
+      );
+
+      // Canvas-group degradation is independent of the method fallback: it inspects only
+      // 400 responses, while the fallback reacts to 405.
+      return await this.sendWorkflowWrite(
+        payload,
+        body => this.putOrPatchWorkflow(safeId, body),
+        options
+      );
     } catch (error) {
       throw handleN8nApiError(error);
     }
@@ -447,6 +764,71 @@ export class N8nApiClient {
     }
   }
 
+  // Evaluation test runs (reads n8n >= 2.30, trigger/cancel n8n >= 2.32)
+
+  async listTestRuns(workflowId: string, params: TestRunListParams = {}): Promise<TestRunListResponse> {
+    try {
+      const response = await this.client.get(
+        `/workflows/${encodeApiPathSegment(workflowId, 'workflowId')}/test-runs`,
+        { params }
+      );
+      return this.validateListResponse<TestRunSummary>(response.data, 'test runs');
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async getTestRun(workflowId: string, runId: string): Promise<TestRunSummary> {
+    try {
+      const response = await this.client.get(
+        `/workflows/${encodeApiPathSegment(workflowId, 'workflowId')}/test-runs/${encodeApiPathSegment(runId, 'runId')}`
+      );
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async listTestCases(
+    workflowId: string,
+    runId: string,
+    params: TestCaseListParams = {}
+  ): Promise<TestCaseListResponse> {
+    try {
+      const response = await this.client.get(
+        `/workflows/${encodeApiPathSegment(workflowId, 'workflowId')}/test-runs/${encodeApiPathSegment(runId, 'runId')}/test-cases`,
+        { params }
+      );
+      return this.validateListResponse<TestCaseExecution>(response.data, 'test cases');
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async triggerTestRun(workflowId: string): Promise<TestRunTriggerResult> {
+    try {
+      const response = await this.client.post(
+        `/workflows/${encodeApiPathSegment(workflowId, 'workflowId')}/test-runs`,
+        {}
+      );
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
+  async cancelTestRun(workflowId: string, runId: string): Promise<TestRunCancelResult> {
+    try {
+      const response = await this.client.post(
+        `/workflows/${encodeApiPathSegment(workflowId, 'workflowId')}/test-runs/${encodeApiPathSegment(runId, 'runId')}/cancel`,
+        {}
+      );
+      return response.data;
+    } catch (error) {
+      throw handleN8nApiError(error);
+    }
+  }
+
   // Webhook Execution
   async triggerWebhook(request: WebhookRequest): Promise<any> {
     try {
@@ -465,12 +847,23 @@ export class N8nApiClient {
       const url = new URL(webhookUrl);
       const webhookPath = url.pathname;
 
+      // SECURITY: only forward Cloudflare Access service-token headers when the
+      // webhook targets the configured n8n instance origin, so the token is never
+      // leaked to an unrelated host supplied via webhookUrl.
+      const forwardCfHeaders = this.isSameOrigin(webhookUrl);
+      if (!forwardCfHeaders && Object.keys(this.cfAccessHeaders()).length > 0) {
+        // Withheld by design; log so a resulting Cloudflare Access 403 on a
+        // split webhook host (WEBHOOK_URL origin != N8N_API_URL origin) is diagnosable.
+        logger.debug('Withholding Cloudflare Access headers: webhook host differs from the configured n8n instance origin');
+      }
+
       // Make request directly to webhook endpoint
       const config: AxiosRequestConfig = {
         method: httpMethod,
         url: webhookPath,
         headers: {
           ...headers,
+          ...(forwardCfHeaders ? this.cfAccessHeaders() : {}),
           // Don't override API key header for webhook endpoints
           'X-N8N-API-KEY': undefined,
         },

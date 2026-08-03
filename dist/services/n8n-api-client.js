@@ -42,14 +42,24 @@ const logger_1 = require("../utils/logger");
 const n8n_errors_1 = require("../utils/n8n-errors");
 const validation_schemas_1 = require("../utils/validation-schemas");
 const n8n_validation_1 = require("./n8n-validation");
+const node_groups_1 = require("./node-groups");
 const n8n_version_1 = require("./n8n-version");
+const GROUPS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas groups (added in 2.28); the workflow was saved without them.';
+const GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas group descriptions (added in 2.32); the descriptions were not saved.';
+function withoutNodeGroups(payload) {
+    const { nodeGroups, ...rest } = payload;
+    return rest;
+}
 class N8nApiClient {
     constructor(config) {
         this.versionInfo = null;
         this.versionPromise = null;
         this.pinnedAgentsPromise = null;
-        const { baseUrl, apiKey, timeout = 30000, maxRetries = 3 } = config;
+        this.groupSupport = { groups: true, descriptions: true };
+        const { baseUrl, apiKey, timeout = 30000, maxRetries = 3, cfClientId, cfClientSecret } = config;
         this.maxRetries = maxRetries;
+        this.cfClientId = cfClientId;
+        this.cfClientSecret = cfClientSecret;
         let normalizedBase;
         try {
             const parsed = new URL(baseUrl);
@@ -65,13 +75,15 @@ class N8nApiClient {
         const apiUrl = normalizedBase.endsWith('/api/v1')
             ? normalizedBase
             : `${normalizedBase}/api/v1`;
+        const headers = {
+            'X-N8N-API-KEY': apiKey,
+            'Content-Type': 'application/json',
+            ...this.cfAccessHeaders(),
+        };
         this.client = axios_1.default.create({
             baseURL: apiUrl,
             timeout,
-            headers: {
-                'X-N8N-API-KEY': apiKey,
-                'Content-Type': 'application/json',
-            },
+            headers,
             maxRedirects: 0,
         });
         this.client.interceptors.request.use(async (config) => {
@@ -132,15 +144,50 @@ class N8nApiClient {
             this.versionPromise = null;
         }
     }
+    cfAccessHeaders() {
+        const headers = {};
+        if (this.cfClientId)
+            headers['CF-Access-Client-Id'] = this.cfClientId;
+        if (this.cfClientSecret)
+            headers['CF-Access-Client-Secret'] = this.cfClientSecret;
+        return headers;
+    }
+    cfAccessHeadersOrUndefined() {
+        const headers = this.cfAccessHeaders();
+        return Object.keys(headers).length > 0 ? headers : undefined;
+    }
+    isSameOrigin(targetUrl) {
+        try {
+            return new URL(targetUrl).origin === new URL(this.baseUrl).origin;
+        }
+        catch {
+            return false;
+        }
+    }
     async fetchVersionOnce() {
         const cached = (0, n8n_version_1.getCachedVersion)(this.baseUrl);
         if (cached)
             return cached;
         const agents = await this.getPinnedAgents();
-        return await (0, n8n_version_1.fetchN8nVersion)(this.baseUrl, agents);
+        return await (0, n8n_version_1.fetchN8nVersion)(this.baseUrl, {
+            headers: this.cfAccessHeadersOrUndefined(),
+            pinnedAgents: agents,
+        });
     }
     getCachedVersionInfo() {
         return this.versionInfo;
+    }
+    async refreshVersion() {
+        const agents = await this.getPinnedAgents();
+        const version = await (0, n8n_version_1.fetchN8nVersion)(this.baseUrl, {
+            headers: this.cfAccessHeadersOrUndefined(),
+            pinnedAgents: agents,
+            forceRefresh: true,
+        });
+        if (version) {
+            this.versionInfo = version;
+        }
+        return version;
     }
     async healthCheck() {
         try {
@@ -149,6 +196,7 @@ class N8nApiClient {
             const agents = await this.getPinnedAgents();
             const response = await axios_1.default.get(healthzUrl, {
                 timeout: 5000,
+                headers: this.cfAccessHeadersOrUndefined(),
                 validateStatus: (status) => status < 500,
                 maxRedirects: 0,
                 httpAgent: agents.httpAgent,
@@ -179,11 +227,111 @@ class N8nApiClient {
             }
         }
     }
-    async createWorkflow(workflow) {
+    async sendWorkflowWrite(payload, send, options) {
+        if (!Array.isArray(payload.nodeGroups)) {
+            return await send(payload);
+        }
+        if (!this.groupSupport.groups) {
+            options.onWarning?.(GROUPS_UNSUPPORTED_WARNING);
+            return await send(withoutNodeGroups(payload));
+        }
+        let groups = (0, node_groups_1.sanitizeGroupsForApi)(payload.nodeGroups, {
+            includeDescription: this.groupSupport.descriptions,
+        });
+        if (!this.groupSupport.descriptions &&
+            payload.nodeGroups.some(group => group?.description !== undefined)) {
+            options.onWarning?.(GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING);
+        }
+        const maxAttempts = groups.length + 3;
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                return await send({ ...payload, nodeGroups: groups });
+            }
+            catch (error) {
+                const apiError = (0, n8n_errors_1.handleN8nApiError)(error);
+                const next = this.degradeGroupsAfterRejection((0, node_groups_1.classifyGroupError)(apiError), groups, options);
+                if (next === 'give-up')
+                    throw apiError;
+                if (next === 'omit-field') {
+                    let result;
+                    try {
+                        result = await send(withoutNodeGroups(payload));
+                    }
+                    catch {
+                        throw apiError;
+                    }
+                    this.groupSupport.groups = false;
+                    options.onWarning?.(GROUPS_UNSUPPORTED_WARNING);
+                    return result;
+                }
+                groups = next;
+            }
+        }
+        throw new Error('Could not save workflow: n8n kept rejecting its canvas groups');
+    }
+    degradeGroupsAfterRejection(classification, groups, options) {
+        const warn = (message) => options.onWarning?.(message);
+        const authored = options.authoredGroups ?? new Set();
+        if (classification.kind === 'schema-description' && this.groupSupport.descriptions) {
+            this.groupSupport.descriptions = false;
+            warn(GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING);
+            return (0, node_groups_1.sanitizeGroupsForApi)(groups, { includeDescription: false });
+        }
+        if (classification.kind === 'schema-field')
+            return 'omit-field';
+        if (classification.kind !== 'semantic')
+            return 'give-up';
+        const { groupName, groupId } = classification;
+        if (groupName || groupId) {
+            const { groups: remaining, dropped } = (0, node_groups_1.dropRejectedGroup)(groups, { groupId, groupName });
+            if (dropped && authored.has(dropped.name))
+                return 'give-up';
+            if (dropped) {
+                warn(`n8n rejected node group "${dropped.name}", so it was ungrouped to save the workflow (nodes and connections are unchanged). n8n said: ${classification.message}`);
+                return remaining;
+            }
+            return 'give-up';
+        }
+        const keepAuthored = groups.filter(group => authored.has(group.name));
+        if (keepAuthored.length < groups.length) {
+            warn(`n8n rejected the canvas groups on this workflow, so ${keepAuthored.length > 0 ? 'the ones it did not ask about were' : 'all of them were'} removed to save it (nodes and connections are unchanged). n8n said: ${classification.message}`);
+            return keepAuthored;
+        }
+        return 'give-up';
+    }
+    async putOrPatchWorkflow(safeId, body) {
+        try {
+            const response = await this.client.put(`/workflows/${safeId}`, body);
+            return response.data;
+        }
+        catch (putError) {
+            if (putError.response?.status !== 405)
+                throw putError;
+            logger_1.logger.debug('PUT method not supported, falling back to PATCH');
+            const response = await this.client.patch(`/workflows/${safeId}`, body);
+            return response.data;
+        }
+    }
+    repairGroupsForWrite(payload, options) {
+        if (!Array.isArray(payload.nodeGroups) || !Array.isArray(payload.nodes))
+            return payload;
+        const { nodeGroups, issues, errors } = (0, node_groups_1.repairNodeGroups)({
+            nodes: payload.nodes,
+            nodeGroups: payload.nodeGroups,
+        }, { authoredGroups: options.authoredGroups });
+        if (errors && errors.length > 0) {
+            throw new n8n_errors_1.N8nValidationError(errors.join(' '), { nodeGroups: errors });
+        }
+        for (const issue of issues) {
+            options.onWarning?.(issue.message);
+        }
+        return nodeGroups === payload.nodeGroups ? payload : { ...payload, nodeGroups };
+    }
+    async createWorkflow(workflow, options = {}) {
         try {
             const cleanedWorkflow = (0, n8n_validation_1.cleanWorkflowForCreate)(workflow);
-            const response = await this.client.post('/workflows', cleanedWorkflow);
-            return response.data;
+            const payload = this.repairGroupsForWrite(cleanedWorkflow, options);
+            return await this.sendWorkflowWrite(payload, async (body) => (await this.client.post('/workflows', body)).data, options);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -198,7 +346,7 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
-    async updateWorkflow(id, workflow) {
+    async updateWorkflow(id, workflow, options = {}) {
         try {
             const cleanedWorkflow = (0, n8n_validation_1.cleanWorkflowForUpdate)(workflow);
             const versionInfo = await this.getVersion();
@@ -210,18 +358,8 @@ class N8nApiClient {
                 logger_1.logger.warn('Could not determine n8n version, sending all known settings properties');
             }
             const safeId = (0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId');
-            try {
-                const response = await this.client.put(`/workflows/${safeId}`, cleanedWorkflow);
-                return response.data;
-            }
-            catch (putError) {
-                if (putError.response?.status === 405) {
-                    logger_1.logger.debug('PUT method not supported, falling back to PATCH');
-                    const response = await this.client.patch(`/workflows/${safeId}`, cleanedWorkflow);
-                    return response.data;
-                }
-                throw putError;
-            }
+            const payload = this.repairGroupsForWrite(cleanedWorkflow, options);
+            return await this.sendWorkflowWrite(payload, body => this.putOrPatchWorkflow(safeId, body), options);
         }
         catch (error) {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
@@ -331,6 +469,51 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
+    async listTestRuns(workflowId, params = {}) {
+        try {
+            const response = await this.client.get(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/test-runs`, { params });
+            return this.validateListResponse(response.data, 'test runs');
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async getTestRun(workflowId, runId) {
+        try {
+            const response = await this.client.get(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/test-runs/${(0, validation_schemas_1.encodeApiPathSegment)(runId, 'runId')}`);
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async listTestCases(workflowId, runId, params = {}) {
+        try {
+            const response = await this.client.get(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/test-runs/${(0, validation_schemas_1.encodeApiPathSegment)(runId, 'runId')}/test-cases`, { params });
+            return this.validateListResponse(response.data, 'test cases');
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async triggerTestRun(workflowId) {
+        try {
+            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/test-runs`, {});
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async cancelTestRun(workflowId, runId) {
+        try {
+            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/test-runs/${(0, validation_schemas_1.encodeApiPathSegment)(runId, 'runId')}/cancel`, {});
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
     async triggerWebhook(request) {
         try {
             const { webhookUrl, httpMethod, data, headers, waitForResponse = true } = request;
@@ -341,11 +524,16 @@ class N8nApiClient {
             }
             const url = new URL(webhookUrl);
             const webhookPath = url.pathname;
+            const forwardCfHeaders = this.isSameOrigin(webhookUrl);
+            if (!forwardCfHeaders && Object.keys(this.cfAccessHeaders()).length > 0) {
+                logger_1.logger.debug('Withholding Cloudflare Access headers: webhook host differs from the configured n8n instance origin');
+            }
             const config = {
                 method: httpMethod,
                 url: webhookPath,
                 headers: {
                     ...headers,
+                    ...(forwardCfHeaders ? this.cfAccessHeaders() : {}),
                     'X-N8N-API-KEY': undefined,
                 },
                 data: httpMethod !== 'GET' ? data : undefined,

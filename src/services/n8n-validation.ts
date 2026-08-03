@@ -113,7 +113,13 @@ function ensureWebhookIds(nodes?: WorkflowNode[]): void {
   }
 }
 
-// Clean workflow data for API operations
+/**
+ * Clean workflow data for create operations.
+ *
+ * This is a DENYLIST (unlike cleanWorkflowForUpdate): anything not named here is forwarded, so
+ * fields such as `nodeGroups` reach POST /workflows unchanged. Keep it that way — the create
+ * schema accepts the same writable fields as update.
+ */
 export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Workflow> {
   const {
     // Remove read-only fields
@@ -145,10 +151,10 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
  *
  * n8n's Public API write schema (workflow.yml, used for PUT /workflows/{id}) declares
  * `additionalProperties: false` and accepts only a small set of writable top-level fields:
- * name, nodes, connections and settings. The GET response, however, echoes back many
- * server-managed / read-only fields (id, versionId, triggerCount, activeVersion, ...) and —
- * on newer n8n versions — fields that aren't even in the OpenAPI spec (e.g. activeVersionId,
- * versionCounter, nodeGroups, and a top-level `availableInMCP` column added for the MCP feature).
+ * name, nodes, connections, settings and — since n8n 2.28 — nodeGroups. The GET response,
+ * however, echoes back many server-managed / read-only fields (id, versionId, triggerCount,
+ * activeVersion, ...) and fields that aren't in the OpenAPI spec at all (e.g. activeVersionId,
+ * versionCounter, and a top-level `availableInMCP` column added for the MCP feature).
  *
  * When n8n_update_partial_workflow reads a workflow, applies a diff and writes it back, any
  * such echoed field that a denylist doesn't explicitly drop leaks into the payload and
@@ -170,14 +176,19 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
 export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   const source = workflow as any;
 
-  // Allowlist of top-level fields we send on update. These are exactly the fields the
-  // previous denylist effectively forwarded, so behavior is unchanged — only the mechanism
-  // (keep-known vs drop-known) differs. `description` is omitted because some n8n versions
-  // reject it on update (Issue #431), and `staticData`/`pinData` are server-managed.
+  // Allowlist of top-level fields we send on update. `description` is omitted because some n8n
+  // versions reject it on update (Issue #431), and `staticData`/`pinData` are server-managed.
+  //
+  // `nodeGroups` is forwarded when present: omitting it does NOT leave canvas groups alone —
+  // n8n backfills the stored groups and validates them against the nodes we submit, so a diff
+  // that removes a grouped node fails with 400 unless we send the corrected groups.
+  // Per-group keys are filtered and version incompatibilities handled by
+  // N8nApiClient.updateWorkflow(), which can degrade and retry; see services/node-groups.ts.
   const cleanedWorkflow: Record<string, unknown> = {};
   if (source.name !== undefined) cleanedWorkflow.name = source.name;
   if (source.nodes !== undefined) cleanedWorkflow.nodes = source.nodes;
   if (source.connections !== undefined) cleanedWorkflow.connections = source.connections;
+  if (Array.isArray(source.nodeGroups)) cleanedWorkflow.nodeGroups = source.nodeGroups;
   if (source.settings !== undefined) cleanedWorkflow.settings = source.settings;
 
   // ALL known settings properties accepted by n8n Public API (as of n8n 1.119.0+)
@@ -504,53 +515,24 @@ export function validateConditionNodeStructure(node: WorkflowNode): string[] {
   const errors: string[] = [];
   const typeVersion = node.typeVersion || 1;
 
+  // conditions.options and all its sub-fields (version, leftValue,
+  // caseSensitive, typeValidation) are optional in n8n — the runtime applies
+  // defaults — so only the operator structure is validated here.
   if (node.type === 'n8n-nodes-base.if') {
-    if (typeVersion >= 2.2) {
-      errors.push(...validateFilterOptionsRequired(node.parameters?.conditions, 'conditions'));
+    if (typeVersion >= 2) {
       errors.push(...validateFilterConditionOperators(node.parameters?.conditions, 'conditions'));
-    } else if (typeVersion >= 2) {
-      // v2 has conditions but no options requirement; just validate operators
-      errors.push(...validateFilterConditionOperators(node.parameters?.conditions as any, 'conditions'));
     }
   } else if (node.type === 'n8n-nodes-base.switch') {
     if (typeVersion >= 3.2) {
       const rules = node.parameters?.rules as any;
       if (rules?.rules && Array.isArray(rules.rules)) {
         rules.rules.forEach((rule: any, i: number) => {
-          errors.push(...validateFilterOptionsRequired(rule.conditions, `rules.rules[${i}].conditions`));
           errors.push(...validateFilterConditionOperators(rule.conditions, `rules.rules[${i}].conditions`));
         });
       }
     }
   }
 
-  return errors;
-}
-
-function validateFilterOptionsRequired(conditions: any, path: string): string[] {
-  const errors: string[] = [];
-  if (!conditions || typeof conditions !== 'object') return errors;
-
-  if (!conditions.options) {
-    errors.push(
-      `Missing required "${path}.options". ` +
-      'Filter-based nodes require: {version: 2, leftValue: "", caseSensitive: true, typeValidation: "strict"}'
-    );
-  } else {
-    const requiredFields: [string, string][] = [
-      ['version', '2'],
-      ['leftValue', '""'],
-      ['caseSensitive', 'true'],
-      ['typeValidation', '"strict"'],
-    ];
-    for (const [field, display] of requiredFields) {
-      if (!(field in conditions.options)) {
-        errors.push(
-          `Missing required field "${path}.options.${field}". Expected value: ${display}`
-        );
-      }
-    }
-  }
   return errors;
 }
 
@@ -609,29 +591,9 @@ export function validateOperatorStructure(operator: any, path: string): string[]
     );
   }
 
-  // Check singleValue based on operator type
-  if (operator.operation) {
-    const unaryOperators = ['empty', 'notEmpty', 'true', 'false', 'isNumeric', 'exists', 'notExists'];
-    const isUnary = unaryOperators.includes(operator.operation);
-
-    if (isUnary) {
-      // Unary operators MUST have singleValue: true
-      if (operator.singleValue !== true) {
-        errors.push(
-          `${path}: unary operator "${operator.operation}" requires "singleValue: true". ` +
-          'Unary operators do not use rightValue.'
-        );
-      }
-    } else {
-      // Binary operators should NOT have singleValue: true
-      if (operator.singleValue === true) {
-        errors.push(
-          `${path}: binary operator "${operator.operation}" should not have "singleValue: true". ` +
-          'Only unary operators (empty, notEmpty, true, false, isNumeric, exists, notExists) need this property.'
-        );
-      }
-    }
-  }
+  // "singleValue" is deliberately not validated: n8n derives unary-ness from
+  // the operation name and ignores the flag at runtime (it is UI metadata that
+  // the write-path sanitizer normalizes on save).
 
   return errors;
 }
