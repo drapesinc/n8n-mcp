@@ -85,7 +85,7 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
                 return this.errorResponse(input, `SSRF protection: ${validation.reason}`, startTime);
             }
             const pinned = validation.address && validation.family
-                ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+                ? SSRFProtection.createPinnedAgents(validation.addresses ?? [{ address: validation.address, family: validation.family }])
                 : undefined;
             const sessionId = input.sessionId || generateSessionId();
             const chatPayload = {
@@ -121,7 +121,13 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
             });
         }
         catch (error) {
-            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            let errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            if (!errorMessage) {
+                const members = error?.errors ?? error?.cause?.errors;
+                errorMessage = (Array.isArray(members)
+                    ? members.map((m) => m?.code || m?.message).filter(Boolean).join(', ')
+                    : '') || 'Connection failed';
+            }
             const errorDetails = error?.response?.data;
             const executionId = errorDetails?.executionId || errorDetails?.id;
             return this.errorResponse(input, errorMessage, startTime, {

@@ -120,6 +120,10 @@ export interface TransferWorkflowOperation extends DiffOperation {
     type: 'transferWorkflow';
     destinationProjectId: string;
 }
+export interface MoveToFolderOperation extends DiffOperation {
+    type: 'moveToFolder';
+    parentFolderId: string | null;
+}
 export interface CleanStaleConnectionsOperation extends DiffOperation {
     type: 'cleanStaleConnections';
     dryRun?: boolean;
@@ -136,7 +140,7 @@ export interface ReplaceConnectionsOperation extends DiffOperation {
         };
     };
 }
-export type WorkflowDiffOperation = AddNodeOperation | RemoveNodeOperation | UpdateNodeOperation | PatchNodeFieldOperation | MoveNodeOperation | EnableNodeOperation | DisableNodeOperation | AddConnectionOperation | RemoveConnectionOperation | RewireConnectionOperation | UpdateSettingsOperation | UpdateNameOperation | SetNodeGroupsOperation | AddTagOperation | RemoveTagOperation | ActivateWorkflowOperation | DeactivateWorkflowOperation | CleanStaleConnectionsOperation | ReplaceConnectionsOperation | TransferWorkflowOperation;
+export type WorkflowDiffOperation = AddNodeOperation | RemoveNodeOperation | UpdateNodeOperation | PatchNodeFieldOperation | MoveNodeOperation | EnableNodeOperation | DisableNodeOperation | AddConnectionOperation | RemoveConnectionOperation | RewireConnectionOperation | UpdateSettingsOperation | UpdateNameOperation | SetNodeGroupsOperation | AddTagOperation | RemoveTagOperation | ActivateWorkflowOperation | DeactivateWorkflowOperation | CleanStaleConnectionsOperation | ReplaceConnectionsOperation | TransferWorkflowOperation | MoveToFolderOperation;
 export interface WorkflowDiffRequest {
     id: string;
     operations: WorkflowDiffOperation[];

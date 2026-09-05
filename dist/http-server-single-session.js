@@ -38,6 +38,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SingleSessionHTTPServer = void 0;
+exports.isImplementedMcpMethod = isImplementedMcpMethod;
 const express_1 = __importDefault(require("express"));
 const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/server/streamableHttp.js");
@@ -57,14 +58,34 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const protocol_version_1 = require("./utils/protocol-version");
 const instance_context_1 = require("./types/instance-context");
 const shared_database_1 = require("./database/shared-database");
+const official_mcp_access_1 = require("./mcp/official-mcp-access");
 dotenv_1.default.config();
 const DEFAULT_PROTOCOL_VERSION = protocol_version_1.STANDARD_PROTOCOL_VERSION;
 const MAX_SESSIONS = Math.max(1, parseInt(process.env.N8N_MCP_MAX_SESSIONS || '100', 10));
 const SESSION_CLEANUP_INTERVAL = 5 * 60 * 1000;
+const STREAMABLE_HTTP_KEEP_ALIVE_MS = 15000;
+const IMPLEMENTED_MCP_METHODS = new Set(['initialize', 'ping']);
+const IMPLEMENTED_MCP_METHOD_PREFIXES = [
+    'tools/',
+    'resources/',
+    'prompts/',
+    'completion/',
+    'logging/',
+    'notifications/',
+    'sampling/',
+    'roots/',
+    'elicitation/',
+    'tasks/',
+];
+function isImplementedMcpMethod(method) {
+    return (IMPLEMENTED_MCP_METHODS.has(method) ||
+        IMPLEMENTED_MCP_METHOD_PREFIXES.some(prefix => method.startsWith(prefix)));
+}
 function extractMultiTenantHeaders(req) {
     return {
         'x-n8n-url': req.headers['x-n8n-url'],
         'x-n8n-key': req.headers['x-n8n-key'],
+        'x-n8n-mcp-token': req.headers['x-n8n-mcp-token'],
         'x-instance-id': req.headers['x-instance-id'],
         'x-session-id': req.headers['x-session-id'],
     };
@@ -176,6 +197,38 @@ class SingleSessionHTTPServer {
         }
         return isSingleNotification(body);
     }
+    handleUnimplementedMethod(req, res) {
+        const body = req.body;
+        if (!body || typeof body !== 'object' || Array.isArray(body))
+            return false;
+        const { jsonrpc, method, id } = body;
+        if (jsonrpc !== undefined && jsonrpc !== '2.0')
+            return false;
+        if (typeof method !== 'string' || isImplementedMcpMethod(method))
+            return false;
+        if (res.headersSent)
+            return true;
+        const safeMethod = method.length > 128 ? `${method.slice(0, 128)}…` : method;
+        if (this.isJsonRpcNotification(body)) {
+            logger_1.logger.info('Unimplemented JSON-RPC notification ignored', { method: safeMethod });
+            res.status(202).end();
+            return true;
+        }
+        const sessionId = req.headers['mcp-session-id'];
+        logger_1.logger.info('Unimplemented JSON-RPC method', { method: safeMethod, hasSessionId: !!sessionId });
+        if (!sessionId && res.locals) {
+            res.locals.mcpMethodNotFound = true;
+        }
+        res.status(sessionId ? 200 : 404).json({
+            jsonrpc: '2.0',
+            error: {
+                code: -32601,
+                message: `Method not found: ${safeMethod}`
+            },
+            id: id ?? null
+        });
+        return true;
+    }
     sanitizeErrorForClient(error) {
         const isProduction = process.env.NODE_ENV === 'production';
         if (error instanceof Error) {
@@ -256,7 +309,7 @@ class SingleSessionHTTPServer {
     async performContextSwitch(sessionId, newContext) {
         const existingContext = this.sessionContexts[sessionId];
         if (JSON.stringify(existingContext) !== JSON.stringify(newContext)) {
-            logger_1.logger.info('Multi-tenant shared mode: Updating instance context for session', {
+            logger_1.logger.info('Multi-tenant mode: Updating instance context for session', {
                 sessionId,
                 oldInstanceId: existingContext?.instanceId,
                 newInstanceId: newContext.instanceId
@@ -339,6 +392,9 @@ class SingleSessionHTTPServer {
         const startTime = Date.now();
         return this.consoleManager.wrapOperation(async () => {
             try {
+                if (this.handleUnimplementedMethod(req, res)) {
+                    return;
+                }
                 if (instanceContext?.n8nApiUrl) {
                     const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('./utils/ssrf-protection')));
                     const ssrfResult = await SSRFProtection.validateWebhookUrl(instanceContext.n8nApiUrl);
@@ -384,7 +440,7 @@ class SingleSessionHTTPServer {
                                 code: -32000,
                                 message: `Session limit reached (${MAX_SESSIONS}). Please wait for existing sessions to expire.`
                             },
-                            id: req.body?.id || null
+                            id: req.body?.id ?? null
                         });
                         return;
                     }
@@ -413,10 +469,12 @@ class SingleSessionHTTPServer {
                         }
                     }
                     if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext?.instanceId) {
-                        const configHash = (0, crypto_1.createHash)('sha256')
+                        const configHash = (0, crypto_1.createHmac)('sha256', this.authToken ?? '')
                             .update(JSON.stringify({
                             url: instanceContext.n8nApiUrl,
-                            instanceId: instanceContext.instanceId
+                            instanceId: instanceContext.instanceId,
+                            n8nApiKey: instanceContext.n8nApiKey,
+                            n8nMcpAccessToken: instanceContext.n8nMcpAccessToken
                         }))
                             .digest('hex')
                             .substring(0, 8);
@@ -435,6 +493,7 @@ class SingleSessionHTTPServer {
                     });
                     transport = new streamableHttp_js_1.StreamableHTTPServerTransport({
                         sessionIdGenerator: () => sessionIdToUse,
+                        keepAliveMs: STREAMABLE_HTTP_KEEP_ALIVE_MS,
                         onsessioninitialized: (initializedSessionId) => {
                             logger_1.logger.info('handleRequest: Session initialized, storing transport and server', {
                                 sessionId: initializedSessionId
@@ -476,7 +535,7 @@ class SingleSessionHTTPServer {
                                 code: -32602,
                                 message: 'Invalid session ID format'
                             },
-                            id: req.body?.id || null
+                            id: req.body?.id ?? null
                         });
                         return;
                     }
@@ -489,7 +548,7 @@ class SingleSessionHTTPServer {
                                 code: -32000,
                                 message: 'Session uses SSE transport. Send messages to POST /messages?sessionId=<id> instead.'
                             },
-                            id: req.body?.id || null
+                            id: req.body?.id ?? null
                         });
                         return;
                     }
@@ -504,7 +563,7 @@ class SingleSessionHTTPServer {
                         res.status(404).json({
                             jsonrpc: '2.0',
                             error: { code: -32000, message: 'Session not found or expired' },
-                            id: req.body?.id || null,
+                            id: req.body?.id ?? null,
                         });
                         return;
                     }
@@ -512,6 +571,19 @@ class SingleSessionHTTPServer {
                     const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
                     if (isMultiTenantEnabled && sessionStrategy === 'shared' && instanceContext) {
                         await this.switchSessionContext(sessionId, instanceContext);
+                    }
+                    else if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext) {
+                        const storedContext = this.sessionContexts[sessionId];
+                        if (instanceContext.n8nApiUrl &&
+                            instanceContext.n8nApiKey &&
+                            instanceContext.instanceId &&
+                            storedContext?.instanceId === instanceContext.instanceId &&
+                            storedContext?.n8nApiUrl === instanceContext.n8nApiUrl) {
+                            await this.switchSessionContext(sessionId, {
+                                ...storedContext,
+                                ...(0, instance_context_1.pickInstanceContextFields)(instanceContext)
+                            });
+                        }
                     }
                     this.updateSessionAccess(sessionId);
                 }
@@ -546,7 +618,7 @@ class SingleSessionHTTPServer {
                             code: -32000,
                             message: errorMessage
                         },
-                        id: req.body?.id || null
+                        id: req.body?.id ?? null
                     });
                     return;
                 }
@@ -583,7 +655,7 @@ class SingleSessionHTTPServer {
                                 code: sanitizedError.code
                             }
                         },
-                        id: req.body?.id || null
+                        id: req.body?.id ?? null
                     });
                 }
             }
@@ -673,6 +745,7 @@ class SingleSessionHTTPServer {
             standardHeaders: true,
             legacyHeaders: false,
             skipSuccessfulRequests: true,
+            requestWasSuccessful: (_req, res) => res.statusCode < 400 || res.locals?.mcpMethodNotFound === true,
             handler: (req, res) => {
                 logger_1.logger.warn('Rate limit exceeded', {
                     ip: req.ip,
@@ -839,7 +912,7 @@ class SingleSessionHTTPServer {
                 res.status(400).json({
                     jsonrpc: '2.0',
                     error: { code: -32602, message: 'Missing sessionId query parameter' },
-                    id: req.body?.id || null
+                    id: req.body?.id ?? null
                 });
                 return;
             }
@@ -848,7 +921,7 @@ class SingleSessionHTTPServer {
                 res.status(400).json({
                     jsonrpc: '2.0',
                     error: { code: -32000, message: 'SSE session not found or expired' },
-                    id: req.body?.id || null
+                    id: req.body?.id ?? null
                 });
                 return;
             }
@@ -862,7 +935,7 @@ class SingleSessionHTTPServer {
                     res.status(500).json({
                         jsonrpc: '2.0',
                         error: { code: -32603, message: 'Internal error processing SSE message' },
-                        id: req.body?.id || null
+                        id: req.body?.id ?? null
                     });
                 }
             }
@@ -957,30 +1030,40 @@ class SingleSessionHTTPServer {
                 body: (0, redaction_1.summarizeMcpBody)(req.body),
                 activeSessions: this.getActiveSessionCount()
             });
+            if (this.handleUnimplementedMethod(req, res))
+                return;
             let instanceContext;
             {
                 const headers = extractMultiTenantHeaders(req);
                 const hasUrl = headers['x-n8n-url'];
                 const hasKey = headers['x-n8n-key'];
-                if (process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey)) {
-                    logger_1.logger.warn('Multi-tenant request missing tenant headers', {
+                const hasMcpToken = headers['x-n8n-mcp-token'];
+                const multiTenantIncomplete = process.env.ENABLE_MULTI_TENANT === 'true' && (!hasUrl || !hasKey);
+                const mcpTokenWithoutUrl = !!hasMcpToken && !hasUrl;
+                if (multiTenantIncomplete || mcpTokenWithoutUrl) {
+                    logger_1.logger.warn('Request with an incomplete instance header set', {
                         hasUrl: !!hasUrl,
-                        hasKey: !!hasKey
+                        hasKey: !!hasKey,
+                        hasMcpToken: !!hasMcpToken,
+                        multiTenant: process.env.ENABLE_MULTI_TENANT === 'true'
                     });
                     res.status(400).json({
                         jsonrpc: '2.0',
                         error: {
                             code: -32602,
-                            message: 'Multi-tenant headers required'
+                            message: multiTenantIncomplete
+                                ? 'Multi-tenant headers required'
+                                : 'x-n8n-mcp-token requires x-n8n-url'
                         },
                         id: req.body?.id ?? null
                     });
                     return;
                 }
-                if (hasUrl || hasKey) {
+                if (hasUrl || hasKey || hasMcpToken) {
                     const candidate = {
                         n8nApiUrl: hasUrl || undefined,
                         n8nApiKey: hasKey || undefined,
+                        n8nMcpAccessToken: hasMcpToken || undefined,
                         instanceId: headers['x-instance-id'] || undefined,
                         sessionId: headers['x-session-id'] || undefined
                     };
@@ -1023,7 +1106,7 @@ class SingleSessionHTTPServer {
             logger_1.logger.info('POST /mcp request completed - checking response status', {
                 responseHeadersSent: res.headersSent,
                 responseStatusCode: res.statusCode,
-                responseFinished: res.finished
+                responseFinished: res.writableEnded
             });
         });
         app.use((req, res) => {
@@ -1130,6 +1213,19 @@ class SingleSessionHTTPServer {
             });
         }
         try {
+            const { telemetry } = require('./telemetry');
+            await telemetry.flushBeforeExit();
+        }
+        catch (error) {
+            logger_1.logger.debug('Telemetry flush during shutdown failed:', error);
+        }
+        try {
+            await (0, official_mcp_access_1.clearOfficialMcpClientCache)();
+        }
+        catch (error) {
+            logger_1.logger.warn('Error closing n8n MCP clients:', error);
+        }
+        try {
             await (0, shared_database_1.closeSharedDatabase)();
             logger_1.logger.info('Shared database closed');
         }
@@ -1164,7 +1260,7 @@ class SingleSessionHTTPServer {
             }
             const metadata = this.sessionMetadata[sessionId];
             const context = this.sessionContexts[sessionId];
-            if (!context || !context.n8nApiUrl || !context.n8nApiKey) {
+            if (!context?.n8nApiUrl || !context?.n8nApiKey) {
                 logger_1.logger.debug(`Skipping session ${sessionId} - missing required context`);
                 continue;
             }
@@ -1176,11 +1272,10 @@ class SingleSessionHTTPServer {
                     lastAccess: metadata.lastAccess.toISOString()
                 },
                 context: {
+                    ...(0, instance_context_1.pickInstanceContextFields)(context),
                     n8nApiUrl: context.n8nApiUrl,
                     n8nApiKey: context.n8nApiKey,
-                    instanceId: context.instanceId || sessionId,
-                    sessionId: context.sessionId,
-                    metadata: context.metadata
+                    instanceId: context.instanceId || sessionId
                 }
             });
         }
@@ -1243,13 +1338,7 @@ class SingleSessionHTTPServer {
                     createdAt,
                     lastAccess
                 };
-                this.sessionContexts[sessionState.sessionId] = {
-                    n8nApiUrl: sessionState.context.n8nApiUrl,
-                    n8nApiKey: sessionState.context.n8nApiKey,
-                    instanceId: sessionState.context.instanceId,
-                    sessionId: sessionState.context.sessionId,
-                    metadata: sessionState.context.metadata
-                };
+                this.sessionContexts[sessionState.sessionId] = (0, instance_context_1.pickInstanceContextFields)(sessionState.context);
                 logger_1.logger.debug(`Restored session ${sessionState.sessionId}`);
                 logSecurityEvent('session_restore', {
                     sessionId: sessionState.sessionId,

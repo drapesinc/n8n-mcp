@@ -18,20 +18,20 @@ export declare class ChatHandler extends BaseTriggerHandler<ChatTriggerInput> {
         message: string;
         workflowId: string;
         triggerType: "chat";
+        sessionId?: string | undefined;
         data?: Record<string, unknown> | undefined;
         headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
         waitForResponse?: boolean | undefined;
-        sessionId?: string | undefined;
     }, {
         message: string;
         workflowId: string;
         triggerType: "chat";
+        sessionId?: string | undefined;
         data?: Record<string, unknown> | undefined;
         headers?: Record<string, string> | undefined;
         timeout?: number | undefined;
         waitForResponse?: boolean | undefined;
-        sessionId?: string | undefined;
     }>;
     execute(input: ChatTriggerInput, workflow: Workflow, triggerInfo?: DetectedTrigger): Promise<TriggerResponse>;
 }

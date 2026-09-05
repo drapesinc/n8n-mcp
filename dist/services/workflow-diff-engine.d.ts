@@ -46,6 +46,8 @@ export declare class WorkflowDiffEngine {
     private validateDeactivateWorkflow;
     private applyActivateWorkflow;
     private applyDeactivateWorkflow;
+    private validateMoveToFolder;
+    private applyMoveToFolder;
     private validateTransferWorkflow;
     private applyTransferWorkflow;
     private validateCleanStaleConnections;

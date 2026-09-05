@@ -12,63 +12,113 @@ export declare const workflowNodeSchema: z.ZodEffects<z.ZodObject<{
     notes: z.ZodOptional<z.ZodString>;
     notesInFlow: z.ZodOptional<z.ZodBoolean>;
     continueOnFail: z.ZodOptional<z.ZodBoolean>;
+    onError: z.ZodOptional<z.ZodEnum<["continueRegularOutput", "continueErrorOutput", "stopWorkflow"]>>;
     retryOnFail: z.ZodOptional<z.ZodBoolean>;
     maxTries: z.ZodOptional<z.ZodNumber>;
     waitBetweenTries: z.ZodOptional<z.ZodNumber>;
     alwaysOutputData: z.ZodOptional<z.ZodBoolean>;
     executeOnce: z.ZodOptional<z.ZodBoolean>;
+    webhookId: z.ZodOptional<z.ZodString>;
+    customTelemetryTags: z.ZodOptional<z.ZodObject<{
+        tag: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            key: z.ZodString;
+            value: z.ZodString;
+        }, "strip", z.ZodTypeAny, {
+            value: string;
+            key: string;
+        }, {
+            value: string;
+            key: string;
+        }>, "many">>;
+    }, "strip", z.ZodTypeAny, {
+        tag?: {
+            value: string;
+            key: string;
+        }[] | undefined;
+    }, {
+        tag?: {
+            value: string;
+            key: string;
+        }[] | undefined;
+    }>>;
 }, "strip", z.ZodTypeAny, {
     type: string;
-    id: string;
     name: string;
+    id: string;
     typeVersion: number;
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
+    customTelemetryTags?: {
+        tag?: {
+            value: string;
+            key: string;
+        }[] | undefined;
+    } | undefined;
     disabled?: boolean | undefined;
     notes?: string | undefined;
     notesInFlow?: boolean | undefined;
     continueOnFail?: boolean | undefined;
+    onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
     retryOnFail?: boolean | undefined;
     maxTries?: number | undefined;
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
     executeOnce?: boolean | undefined;
+    webhookId?: string | undefined;
 }, {
     type: string;
-    id: string;
     name: string;
+    id: string;
     typeVersion: number;
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
+    customTelemetryTags?: {
+        tag?: {
+            value: string;
+            key: string;
+        }[] | undefined;
+    } | undefined;
     disabled?: boolean | undefined;
     notes?: string | undefined;
     notesInFlow?: boolean | undefined;
     continueOnFail?: boolean | undefined;
+    onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
     retryOnFail?: boolean | undefined;
     maxTries?: number | undefined;
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
     executeOnce?: boolean | undefined;
+    webhookId?: string | undefined;
 }>, {
     type: string;
-    id: string;
     name: string;
+    id: string;
     typeVersion: number;
     position: [number, number];
     parameters: Record<string, unknown>;
     credentials?: Record<string, unknown> | undefined;
+    customTelemetryTags?: {
+        tag?: {
+            value: string;
+            key: string;
+        }[] | undefined;
+    } | undefined;
     disabled?: boolean | undefined;
     notes?: string | undefined;
     notesInFlow?: boolean | undefined;
     continueOnFail?: boolean | undefined;
+    onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
     retryOnFail?: boolean | undefined;
     maxTries?: number | undefined;
     waitBetweenTries?: number | undefined;
     alwaysOutputData?: boolean | undefined;
     executeOnce?: boolean | undefined;
+    webhookId?: string | undefined;
 }, unknown>;
+export declare const WRITABLE_NODE_PROPERTIES: ReadonlySet<string>;
+export declare function cleanNodeForApi(node: WorkflowNode): WorkflowNode;
 export declare const workflowConnectionSchema: z.ZodEffects<z.ZodRecord<z.ZodString, z.ZodObject<{
     main: z.ZodOptional<z.ZodArray<z.ZodArray<z.ZodObject<{
         node: z.ZodString;
@@ -495,30 +545,60 @@ export declare const workflowSettingsSchema: z.ZodObject<{
     saveExecutionProgress: z.ZodDefault<z.ZodBoolean>;
     executionTimeout: z.ZodOptional<z.ZodNumber>;
     errorWorkflow: z.ZodOptional<z.ZodString>;
-    callerPolicy: z.ZodOptional<z.ZodEnum<["any", "workflowsFromSameOwner", "workflowsFromAList"]>>;
+    callerPolicy: z.ZodOptional<z.ZodEnum<["any", "none", "workflowsFromSameOwner", "workflowsFromAList"]>>;
+    callerIds: z.ZodOptional<z.ZodString>;
+    timeSavedMode: z.ZodOptional<z.ZodEnum<["fixed", "dynamic"]>>;
+    timeSavedPerExecution: z.ZodOptional<z.ZodNumber>;
+    redactionPolicy: z.ZodOptional<z.ZodEnum<["none", "non-manual", "manual-only", "all"]>>;
     availableInMCP: z.ZodOptional<z.ZodBoolean>;
+    customTelemetryTags: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        key: z.ZodString;
+        value: z.ZodString;
+    }, "strip", z.ZodTypeAny, {
+        value: string;
+        key: string;
+    }, {
+        value: string;
+        key: string;
+    }>, "many">>;
 }, "strip", z.ZodTypeAny, {
-    executionOrder: "v0" | "v1";
+    saveExecutionProgress: boolean;
+    saveManualExecutions: boolean;
     saveDataErrorExecution: "all" | "none";
     saveDataSuccessExecution: "all" | "none";
-    saveManualExecutions: boolean;
-    saveExecutionProgress: boolean;
-    timezone?: string | undefined;
+    executionOrder: "v0" | "v1";
     executionTimeout?: number | undefined;
     errorWorkflow?: string | undefined;
-    callerPolicy?: "any" | "workflowsFromSameOwner" | "workflowsFromAList" | undefined;
-    availableInMCP?: boolean | undefined;
-}, {
-    executionOrder?: "v0" | "v1" | undefined;
     timezone?: string | undefined;
+    callerPolicy?: "any" | "none" | "workflowsFromSameOwner" | "workflowsFromAList" | undefined;
+    callerIds?: string | undefined;
+    timeSavedPerExecution?: number | undefined;
+    availableInMCP?: boolean | undefined;
+    customTelemetryTags?: {
+        value: string;
+        key: string;
+    }[] | undefined;
+    redactionPolicy?: "all" | "none" | "non-manual" | "manual-only" | undefined;
+    timeSavedMode?: "fixed" | "dynamic" | undefined;
+}, {
+    saveExecutionProgress?: boolean | undefined;
+    saveManualExecutions?: boolean | undefined;
     saveDataErrorExecution?: "all" | "none" | undefined;
     saveDataSuccessExecution?: "all" | "none" | undefined;
-    saveManualExecutions?: boolean | undefined;
-    saveExecutionProgress?: boolean | undefined;
     executionTimeout?: number | undefined;
     errorWorkflow?: string | undefined;
-    callerPolicy?: "any" | "workflowsFromSameOwner" | "workflowsFromAList" | undefined;
+    timezone?: string | undefined;
+    executionOrder?: "v0" | "v1" | undefined;
+    callerPolicy?: "any" | "none" | "workflowsFromSameOwner" | "workflowsFromAList" | undefined;
+    callerIds?: string | undefined;
+    timeSavedPerExecution?: number | undefined;
     availableInMCP?: boolean | undefined;
+    customTelemetryTags?: {
+        value: string;
+        key: string;
+    }[] | undefined;
+    redactionPolicy?: "all" | "none" | "non-manual" | "manual-only" | undefined;
+    timeSavedMode?: "fixed" | "dynamic" | undefined;
 }>;
 export declare const defaultWorkflowSettings: {
     executionOrder: "v1";

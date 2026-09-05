@@ -212,6 +212,25 @@ class TelemetryManager {
             }
         }
     }
+    async flushBeforeExit(timeoutMs = telemetry_types_1.TELEMETRY_CONFIG.SHUTDOWN_FLUSH_TIMEOUT_MS) {
+        if (!this.isInitialized || !this.configManager.isEnabled())
+            return;
+        let timer;
+        try {
+            const deadline = new Promise(resolve => {
+                timer = setTimeout(resolve, timeoutMs);
+                timer.unref?.();
+            });
+            await Promise.race([this.flush(), deadline]);
+        }
+        catch (error) {
+            logger_1.logger.debug('Telemetry flush before exit failed:', error);
+        }
+        finally {
+            if (timer)
+                clearTimeout(timer);
+        }
+    }
     async flushMutations() {
         this.ensureInitialized();
         if (!this.isEnabled() || !this.supabase)

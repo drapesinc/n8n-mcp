@@ -31,6 +31,8 @@ export interface WorkflowNode {
   alwaysOutputData?: boolean;
   executeOnce?: boolean;
   webhookId?: string; // n8n assigns this for webhook/form/chat trigger nodes
+  /** Node-level telemetry tags, accepted by n8n's node write schema since 2.36. */
+  customTelemetryTags?: { tag?: Array<{ key: string; value: string }> };
 }
 
 export interface WorkflowConnection {
@@ -92,6 +94,7 @@ export interface Workflow {
   id?: string;
   name: string;
   description?: string; // Returned by GET but must be excluded from PUT/PATCH (n8n API limitation, Issue #431)
+  parentFolderId?: string | null; // Write-only (n8n 2.32+): create places into a folder, update moves (null = project root). Never present in GET responses.
   nodes: WorkflowNode[];
   connections: WorkflowConnection;
   nodeGroups?: WorkflowNodeGroup[]; // Canvas groups (n8n 2.28+); absent on older instances
@@ -166,6 +169,67 @@ export interface Tag {
   id?: string;
   name: string;
   workflowIds?: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// Folder Types (n8n public API 2.19+; workflow placement via parentFolderId needs 2.32+)
+
+/**
+ * A workflow folder as returned by /projects/{projectId}/folders.
+ * List responses include only the fields named in the request's `select`;
+ * the detail endpoint adds recursive totals instead.
+ */
+export interface Folder {
+  id: string;
+  name: string;
+  parentFolderId?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+  // Present only when requested via `select` on the list endpoint
+  parentFolder?: { id: string; name: string } | null;
+  project?: { id: string; name: string; type?: string };
+  tags?: Array<{ id: string; name: string }>;
+  workflowCount?: number; // Direct children only
+  subFolderCount?: number; // Direct children only
+  path?: string[]; // Folder names from root to this folder
+  // Present only on the detail endpoint
+  totalSubFolders?: number; // Recursive
+  totalWorkflows?: number; // Recursive
+}
+
+export interface FolderListFilter {
+  parentFolderId?: string;
+  name?: string;
+  tags?: string[];
+  excludeFolderIdAndDescendants?: string;
+}
+
+export interface FolderListParams {
+  filter?: FolderListFilter;
+  select?: string[];
+  sortBy?: 'name:asc' | 'name:desc' | 'createdAt:asc' | 'createdAt:desc' | 'updatedAt:asc' | 'updatedAt:desc';
+  skip?: number;
+  take?: number;
+}
+
+export interface FolderListResponse {
+  count: number;
+  data: Folder[];
+}
+
+/** Minimal project shape from GET /projects (used only to resolve the `personal` alias). */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  type?: string;
+}
+
+/** Project shape returned by `listProjects()` (GET /projects). */
+export interface Project {
+  id: string;
+  name: string;
+  type?: 'personal' | 'team' | string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -432,6 +496,31 @@ export interface McpToolResponse {
   executionId?: string;
   workflowId?: string;
   operationsApplied?: number;
+  // Official-MCP-backed tools (e.g. n8n_manage_agents) — the action that was
+  // requested, the official tool name it was dispatched to, a human-readable
+  // hint, the raw official error payload on failure, and whether the result
+  // was truncated to the size cap.
+  action?: string;
+  officialTool?: string;
+  hint?: string;
+  officialError?: unknown;
+  truncated?: boolean;
+  // n8n_list_catalog: which catalog was listed ('projects' | 'tags') and
+  // which backend answered ('public-api' | 'official-mcp' | 'n8n-mcp').
+  kind?: string;
+  backend?: string;
+  // Routed workflow-side operations: which route ran (`method` for
+  // n8n_test_workflow, `source` for n8n_workflow_versions, `mode` for the
+  // requested sub-operation), whether the consent flow had to enable
+  // "Available in MCP" on the workflow, a validation report attached to the
+  // result, and non-fatal warnings from the call (e.g. canvas-group repairs
+  // reported by a workflow write).
+  method?: string;
+  source?: string;
+  mode?: string;
+  exposedToMcp?: boolean;
+  validation?: unknown;
+  warnings?: string[];
 }
 
 // Execution Filtering Types
@@ -511,9 +600,16 @@ export interface FilteredNodeData {
   status: 'success' | 'error';
   error?: string;
   data?: {
-    input?: any[][];
-    output?: any[][];
+    /** Branches are `null` where n8n recorded no data on that port. */
+    input?: Array<any[] | null>;
+    output?: Array<any[] | null>;
     metadata: {
+      totalItems: number;
+      itemsShown: number;
+      truncated: boolean;
+    };
+    /** In summary and filtered modes, with `input`: inputs obey the same item limit, since AI sub-nodes fill them with whole prompts. */
+    inputMetadata?: {
       totalItems: number;
       itemsShown: number;
       truncated: boolean;

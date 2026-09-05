@@ -17,6 +17,11 @@ export interface SimplifiedProperty {
         modes?: string[];
         example: Record<string, any>;
     };
+    dynamicOptions?: {
+        methodName: string;
+        methodType: 'loadOptions' | 'listSearch';
+        dependsOn: string[];
+    };
 }
 export interface EssentialConfig {
     required: string[];
@@ -34,6 +39,7 @@ export declare class PropertyFilter {
     private static extractProperties;
     private static findPropertyByName;
     private static simplifyProperty;
+    private static extractDynamicOptions;
     private static generateUsageHint;
     private static extractDescription;
     private static generateDescription;

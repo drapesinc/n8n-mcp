@@ -129,7 +129,7 @@ The MCP server exposes tools in several categories:
 - After changing MCP server code: build, then ask the user to reload the MCP server before testing
 - Run `npm run typecheck` after every code change
 - Never commit directly to main — use feature branches and PRs
-- Add to every commit message and PR description: `Conceived by Romuald Członkowski - www.aiadvisors.pl/en`. The attribution belongs in commit messages and PR descriptions only — never in source, test, or documentation file contents
+- Add to every commit message and PR description: `Conceived by Romuald Członkowski - https://aiadvisors.pl/en`. The attribution belongs in commit messages and PR descriptions only — never in source, test, or documentation file contents
 - When reviewing issues, use the GH CLI (`gh`) to fetch the issue and all its comments
 
 ### Testing Best Practices

@@ -212,7 +212,7 @@ function classifyGroupError(error) {
         detailsText = '';
     }
     const haystack = `${message} ${detailsText}`;
-    if (/must NOT have additional propert/i.test(haystack)) {
+    if (/must NOT have additional propert|Unrecognized key\(s\) in object/i.test(haystack)) {
         const nested = /request\/body\/([A-Za-z0-9_]+)/.exec(haystack);
         if (nested) {
             return nested[1] === 'nodeGroups'

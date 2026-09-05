@@ -1,8 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.WorkflowVersioningService = void 0;
+exports.WorkflowVersioningService = exports.VERSION_OWNERSHIP_ERROR_PREFIX = void 0;
 const workflow_validator_1 = require("./workflow-validator");
 const enhanced_config_validator_1 = require("./enhanced-config-validator");
+exports.VERSION_OWNERSHIP_ERROR_PREFIX = 'does not belong to workflow';
 class WorkflowVersioningService {
     constructor(nodeRepository, apiClient, instanceId = '') {
         this.nodeRepository = nodeRepository;
@@ -194,11 +195,16 @@ class WorkflowVersioningService {
             }))
         };
     }
-    async compareVersions(versionId1, versionId2) {
+    async compareVersions(versionId1, versionId2, workflowId) {
         const v1 = this.nodeRepository.getWorkflowVersion(versionId1, this.instanceId);
         const v2 = this.nodeRepository.getWorkflowVersion(versionId2, this.instanceId);
         if (!v1 || !v2) {
             throw new Error(`One or both versions not found: ${versionId1}, ${versionId2}`);
+        }
+        for (const version of [v1, v2]) {
+            if (version.workflowId !== workflowId) {
+                throw new Error(`Version ${version.id} ${exports.VERSION_OWNERSHIP_ERROR_PREFIX} ${workflowId}`);
+            }
         }
         const nodes1 = new Set(v1.workflowSnapshot.nodes?.map((n) => n.id) || []);
         const nodes2 = new Set(v2.workflowSnapshot.nodes?.map((n) => n.id) || []);

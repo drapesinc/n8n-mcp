@@ -59,11 +59,12 @@ export interface SanitizedWorkflow {
     workflowHash: string;
 }
 export declare const TELEMETRY_CONFIG: {
-    readonly BATCH_FLUSH_INTERVAL: 5000;
+    readonly BATCH_FLUSH_INTERVAL: 60000;
     readonly EVENT_QUEUE_THRESHOLD: 10;
     readonly WORKFLOW_QUEUE_THRESHOLD: 5;
     readonly OPERATION_TIMEOUT: 5000;
     readonly FETCH_TIMEOUT_MS: 2000;
+    readonly SHUTDOWN_FLUSH_TIMEOUT_MS: 2500;
     readonly RATE_LIMIT_WINDOW: 60000;
     readonly RATE_LIMIT_MAX_EVENTS: 100;
     readonly MAX_QUEUE_SIZE: 1000;
@@ -71,7 +72,7 @@ export declare const TELEMETRY_CONFIG: {
 };
 export declare const TELEMETRY_BACKEND: {
     readonly URL: "https://ydyufsohxdfpopqbubwk.supabase.co";
-    readonly ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlkeXVmc29oeGRmcG9wcWJ1YndrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg3OTYyMDAsImV4cCI6MjA3NDM3MjIwMH0.xESphg6h5ozaDsm4Vla3QnDJGc6Nc_cpfoqTHRynkCk";
+    readonly ANON_KEY: "sb_publishable_UbVUTyXgIyvemM9b15auQg_YzGa47Gq";
 };
 export interface TelemetryMetrics {
     eventsTracked: number;

@@ -53,6 +53,15 @@ class PropertyExtractor {
             this.getNodeDescription(nodeClass);
         return this.extractOperationsFromDescription(description);
     }
+    extractVersionDetails(description) {
+        return {
+            properties: Array.isArray(description?.properties)
+                ? this.normalizeProperties(description.properties)
+                : [],
+            operations: this.extractOperationsFromDescription(description),
+            credentials: Array.isArray(description?.credentials) ? description.credentials : []
+        };
+    }
     extractOperationsFromDescription(description) {
         const operations = [];
         if (!description)

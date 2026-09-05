@@ -54,6 +54,7 @@ export interface WorkflowStorageInfo {
     totalSizeFormatted: string;
     lastBackup: string;
 }
+export declare const VERSION_OWNERSHIP_ERROR_PREFIX = "does not belong to workflow";
 export interface VersionDiff {
     versionId1: number;
     versionId2: number;
@@ -94,7 +95,7 @@ export declare class WorkflowVersioningService {
         remaining: number;
     }>;
     getStorageStats(): Promise<StorageStats>;
-    compareVersions(versionId1: number, versionId2: number): Promise<VersionDiff>;
+    compareVersions(versionId1: number, versionId2: number, workflowId: string): Promise<VersionDiff>;
     private formatBytes;
     private diffObjects;
 }

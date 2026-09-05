@@ -85,6 +85,44 @@ function countOccurrences(str, search) {
     }
     return count;
 }
+const JS_CODE_FIELD_NAMES = new Set(['jsCode', 'functionCode']);
+const AsyncFunctionCtor = (async () => { }).constructor;
+const MAX_SYNTAX_CHECKED_LENGTH = 1000000;
+function checkJsSyntax(code) {
+    if (code.length > MAX_SYNTAX_CHECKED_LENGTH) {
+        return { status: 'uncheckable', reason: `code exceeds ${MAX_SYNTAX_CHECKED_LENGTH} characters` };
+    }
+    try {
+        new AsyncFunctionCtor(code);
+        return { status: 'valid' };
+    }
+    catch (error) {
+        if (error instanceof SyntaxError)
+            return { status: 'invalid', message: error.message };
+        return { status: 'uncheckable', reason: `the parser gave up (${error instanceof Error ? error.name : 'unknown error'})` };
+    }
+}
+function stripExpressionPrefix(value) {
+    return value.startsWith('=') ? value.slice(1) : value;
+}
+function assertPatchedJsSyntax(operation, fieldPath, patched, original) {
+    const fieldName = fieldPath.split('.').pop() ?? '';
+    if (!JS_CODE_FIELD_NAMES.has(fieldName))
+        return;
+    const patchedCheck = checkJsSyntax(stripExpressionPrefix(patched));
+    if (patchedCheck.status === 'valid')
+        return;
+    if (checkJsSyntax(stripExpressionPrefix(original)).status !== 'valid')
+        return;
+    if (patchedCheck.status === 'invalid') {
+        throw new Error(`${operation}: patches would leave "${fieldPath}" with invalid JavaScript (${patchedCheck.message}). ` +
+            `The workflow was not modified. If several dependent edits pass through an invalid intermediate state, ` +
+            `apply them as one operation — only the final result of the patches array is checked.`);
+    }
+    throw new Error(`${operation}: could not verify the JavaScript syntax of "${fieldPath}" after patching (${patchedCheck.reason}). ` +
+        `The workflow was not modified. To set the field anyway, replace its full value with an updateNode operation, ` +
+        `which is not syntax-checked.`);
+}
 function operationReferencesAddedNode(operation, addedNode) {
     if (operation.type === 'addConnection') {
         return operation.source === addedNode.name
@@ -318,6 +356,8 @@ class WorkflowDiffEngine {
                 return this.validateSetNodeGroups(workflow, operation);
             case 'transferWorkflow':
                 return this.validateTransferWorkflow(workflow, operation);
+            case 'moveToFolder':
+                return this.validateMoveToFolder(workflow, operation);
             case 'activateWorkflow':
                 return this.validateActivateWorkflow(workflow, operation);
             case 'deactivateWorkflow':
@@ -391,6 +431,9 @@ class WorkflowDiffEngine {
                 break;
             case 'transferWorkflow':
                 this.applyTransferWorkflow(workflow, operation);
+                break;
+            case 'moveToFolder':
+                this.applyMoveToFolder(workflow, operation);
                 break;
         }
     }
@@ -749,7 +792,8 @@ class WorkflowDiffEngine {
             if (value !== null && typeof value === 'object' && !Array.isArray(value)
                 && '__patch_find_replace' in value) {
                 const patches = value.__patch_find_replace;
-                let current = this.getNestedProperty(draft, path);
+                const original = this.getNestedProperty(draft, path);
+                let current = original;
                 for (const patch of patches) {
                     if (!current.includes(patch.find)) {
                         this.warnings.push({
@@ -758,8 +802,9 @@ class WorkflowDiffEngine {
                         });
                         continue;
                     }
-                    current = current.replace(patch.find, patch.replace);
+                    current = current.replace(patch.find, () => patch.replace);
                 }
+                assertPatchedJsSyntax('__patch_find_replace', path, current, original);
                 this.setNestedProperty(draft, path, current);
             }
             else {
@@ -809,7 +854,8 @@ class WorkflowDiffEngine {
         if (!node)
             return;
         this.modifiedNodeIds.add(node.id);
-        let current = this.getNestedProperty(node, operation.fieldPath);
+        const original = this.getNestedProperty(node, operation.fieldPath);
+        let current = original;
         for (let i = 0; i < operation.patches.length; i++) {
             const patch = operation.patches[i];
             if (patch.regex) {
@@ -837,14 +883,10 @@ class WorkflowDiffEngine {
                     throw new Error(`patchNodeField: "${patch.find.substring(0, 80)}" found ${occurrences} times in "${operation.fieldPath}" (patch index ${i}). ` +
                         `Set "replaceAll": true to replace all occurrences, or use a more specific find string that matches exactly once.`);
                 }
-                if (patch.replaceAll) {
-                    current = current.split(patch.find).join(patch.replace);
-                }
-                else {
-                    current = current.replace(patch.find, patch.replace);
-                }
+                current = current.split(patch.find).join(patch.replace);
             }
         }
+        assertPatchedJsSyntax('patchNodeField', operation.fieldPath, current, original);
         this.setNestedProperty(node, operation.fieldPath, current);
         const sanitized = (0, node_sanitizer_1.sanitizeNode)(node);
         Object.assign(node, sanitized);
@@ -1158,6 +1200,17 @@ class WorkflowDiffEngine {
     applyDeactivateWorkflow(workflow, operation) {
         workflow._shouldDeactivate = true;
         workflow._shouldActivate = false;
+    }
+    validateMoveToFolder(_workflow, operation) {
+        const target = operation.parentFolderId;
+        if (target !== null && (typeof target !== 'string' || target.trim().length === 0)) {
+            return 'moveToFolder requires parentFolderId to be a non-empty folder ID string, or null for the project root';
+        }
+        return null;
+    }
+    applyMoveToFolder(workflow, operation) {
+        const target = operation.parentFolderId;
+        workflow.parentFolderId = target === null ? null : target.trim();
     }
     validateTransferWorkflow(_workflow, operation) {
         if (!operation.destinationProjectId) {

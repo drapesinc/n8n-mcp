@@ -23,6 +23,12 @@ export interface WorkflowNode {
     alwaysOutputData?: boolean;
     executeOnce?: boolean;
     webhookId?: string;
+    customTelemetryTags?: {
+        tag?: Array<{
+            key: string;
+            value: string;
+        }>;
+    };
 }
 export interface WorkflowConnection {
     [sourceNodeId: string]: {
@@ -61,6 +67,7 @@ export interface Workflow {
     id?: string;
     name: string;
     description?: string;
+    parentFolderId?: string | null;
     nodes: WorkflowNode[];
     connections: WorkflowConnection;
     nodeGroups?: WorkflowNodeGroup[];
@@ -125,6 +132,60 @@ export interface Tag {
     id?: string;
     name: string;
     workflowIds?: string[];
+    createdAt?: string;
+    updatedAt?: string;
+}
+export interface Folder {
+    id: string;
+    name: string;
+    parentFolderId?: string | null;
+    createdAt?: string;
+    updatedAt?: string;
+    parentFolder?: {
+        id: string;
+        name: string;
+    } | null;
+    project?: {
+        id: string;
+        name: string;
+        type?: string;
+    };
+    tags?: Array<{
+        id: string;
+        name: string;
+    }>;
+    workflowCount?: number;
+    subFolderCount?: number;
+    path?: string[];
+    totalSubFolders?: number;
+    totalWorkflows?: number;
+}
+export interface FolderListFilter {
+    parentFolderId?: string;
+    name?: string;
+    tags?: string[];
+    excludeFolderIdAndDescendants?: string;
+}
+export interface FolderListParams {
+    filter?: FolderListFilter;
+    select?: string[];
+    sortBy?: 'name:asc' | 'name:desc' | 'createdAt:asc' | 'createdAt:desc' | 'updatedAt:asc' | 'updatedAt:desc';
+    skip?: number;
+    take?: number;
+}
+export interface FolderListResponse {
+    count: number;
+    data: Folder[];
+}
+export interface ProjectSummary {
+    id: string;
+    name: string;
+    type?: string;
+}
+export interface Project {
+    id: string;
+    name: string;
+    type?: 'personal' | 'team' | string;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -341,6 +402,19 @@ export interface McpToolResponse {
     executionId?: string;
     workflowId?: string;
     operationsApplied?: number;
+    action?: string;
+    officialTool?: string;
+    hint?: string;
+    officialError?: unknown;
+    truncated?: boolean;
+    kind?: string;
+    backend?: string;
+    method?: string;
+    source?: string;
+    mode?: string;
+    exposedToMcp?: boolean;
+    validation?: unknown;
+    warnings?: string[];
 }
 export type ExecutionMode = 'preview' | 'summary' | 'filtered' | 'full' | 'error';
 export interface ExecutionPreview {
@@ -403,9 +477,14 @@ export interface FilteredNodeData {
     status: 'success' | 'error';
     error?: string;
     data?: {
-        input?: any[][];
-        output?: any[][];
+        input?: Array<any[] | null>;
+        output?: Array<any[] | null>;
         metadata: {
+            totalItems: number;
+            itemsShown: number;
+            truncated: boolean;
+        };
+        inputMetadata?: {
             totalItems: number;
             itemsShown: number;
             truncated: boolean;

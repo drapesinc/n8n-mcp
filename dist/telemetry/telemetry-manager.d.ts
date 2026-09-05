@@ -23,6 +23,7 @@ export declare class TelemetryManager {
     trackNodeConfiguration(nodeType: string, propertiesSet: number, usedDefaults: boolean): void;
     trackPerformanceMetric(operation: string, duration: number, metadata?: Record<string, any>): void;
     flush(): Promise<void>;
+    flushBeforeExit(timeoutMs?: number): Promise<void>;
     flushMutations(): Promise<void>;
     private isEnabled;
     disable(): void;

@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import { z } from 'zod';
 import { WorkflowNode, WorkflowConnection, Workflow } from '../types/n8n-api';
 import { isTriggerNode, isActivatableTrigger } from '../utils/node-type-utils';
+import { DERIVED_SETTINGS_PROPERTIES } from '../constants/workflow-settings';
 import { isNonExecutableNode } from '../utils/node-classification';
 import {
   normalizeMcpWorkflowConnections,
@@ -10,7 +11,9 @@ import {
 
 // Zod schemas for n8n API validation
 
-export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, z.object({
+// The writable node shape, kept separate from the preprocess wrapper so the write allowlist
+// below can be derived from its keys instead of being maintained as a second list.
+const workflowNodeObjectSchema = z.object({
   id: z.string(),
   name: z.string(),
   type: z.string(),
@@ -26,12 +29,37 @@ export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, z.objec
   notes: z.string().optional(),
   notesInFlow: z.boolean().optional(),
   continueOnFail: z.boolean().optional(),
+  onError: z.enum(['continueRegularOutput', 'continueErrorOutput', 'stopWorkflow']).optional(),
   retryOnFail: z.boolean().optional(),
   maxTries: z.number().optional(),
   waitBetweenTries: z.number().optional(),
   alwaysOutputData: z.boolean().optional(),
   executeOnce: z.boolean().optional(),
-}));
+  webhookId: z.string().optional(),
+  customTelemetryTags: z
+    .object({ tag: z.array(z.object({ key: z.string(), value: z.string() })).optional() })
+    .optional(),
+});
+
+export const workflowNodeSchema = z.preprocess(normalizeMcpWorkflowNode, workflowNodeObjectSchema);
+
+/**
+ * Node properties n8n's Public API write schema accepts, taken from the zod schema above so the
+ * two cannot drift apart. n8n's node schema is `additionalProperties: false`, so a property missing
+ * here is dropped from every write; `npm run check:settings-drift` compares this set against the
+ * schema n8n ships and fails when n8n adds one.
+ */
+export const WRITABLE_NODE_PROPERTIES: ReadonlySet<string> = new Set(Object.keys(workflowNodeObjectSchema.shape));
+
+/**
+ * Strip unknown properties from a single node so it conforms to n8n's write schema.
+ * n8n GET responses echo server-managed fields (e.g. issues, runIndex, data) that
+ * PUT/PATCH rejects with "must NOT have additional properties".
+ */
+export function cleanNodeForApi(node: WorkflowNode): WorkflowNode {
+  const cleaned = Object.entries(node).filter(([key]) => WRITABLE_NODE_PROPERTIES.has(key));
+  return Object.fromEntries(cleaned) as WorkflowNode;
+}
 
 // Connection array schema used by all connection types
 const connectionArraySchema = z.array(
@@ -62,6 +90,13 @@ export const workflowConnectionSchema = z.preprocess(normalizeMcpWorkflowConnect
   }).catchall(connectionArraySchema) // Allow additional AI connection types (ai_outputParser, ai_document, ai_textSplitter, etc.)
 ));
 
+// Mirrors components.schemas.workflowSettings in n8n's Public API, minus the properties n8n
+// derives itself (see constants/workflow-settings.ts). Unknown keys are stripped by Zod here;
+// forwarding them to n8n is cleanWorkflowForUpdate's job, not this schema's.
+//
+// Hand-written rather than generated from that table, which does not model types or enum
+// values, and so NOT covered by `npm run check:settings-drift`. Keep it in step by hand when
+// the table gains a property.
 export const workflowSettingsSchema = z.object({
   executionOrder: z.enum(['v0', 'v1']).default('v1'),
   timezone: z.string().optional(),
@@ -71,8 +106,15 @@ export const workflowSettingsSchema = z.object({
   saveExecutionProgress: z.boolean().default(true),
   executionTimeout: z.number().optional(),
   errorWorkflow: z.string().optional(),
-  callerPolicy: z.enum(['any', 'workflowsFromSameOwner', 'workflowsFromAList']).optional(),
+  callerPolicy: z.enum(['any', 'none', 'workflowsFromSameOwner', 'workflowsFromAList']).optional(),
+  callerIds: z.string().optional(),
+  timeSavedMode: z.enum(['fixed', 'dynamic']).optional(),
+  timeSavedPerExecution: z.number().optional(),
+  redactionPolicy: z.enum(['none', 'non-manual', 'manual-only', 'all']).optional(),
   availableInMCP: z.boolean().optional(),
+  customTelemetryTags: z
+    .array(z.object({ key: z.string(), value: z.string() }))
+    .optional(),
 });
 
 // Default settings for workflow creation
@@ -114,6 +156,17 @@ function ensureWebhookIds(nodes?: WorkflowNode[]): void {
 }
 
 /**
+ * Drop the settings properties n8n derives itself and ignores on write. GET echoes them back,
+ * and our writes merge over a GET, so they would otherwise ride along into a payload the write
+ * schema rejects. Everything else is forwarded - see cleanWorkflowForUpdate.
+ */
+function stripDerivedSettings(settings: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(settings).filter(([key]) => !DERIVED_SETTINGS_PROPERTIES.has(key))
+  );
+}
+
+/**
  * Clean workflow data for create operations.
  *
  * This is a DENYLIST (unlike cleanWorkflowForUpdate): anything not named here is forwarded, so
@@ -135,6 +188,14 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
     ...cleanedWorkflow
   } = workflow;
 
+  // Creating from a workflow read off another instance would otherwise carry the derived
+  // properties into a payload the create schema rejects.
+  if (cleanedWorkflow.settings && typeof cleanedWorkflow.settings === 'object') {
+    cleanedWorkflow.settings = stripDerivedSettings(
+      cleanedWorkflow.settings as Record<string, unknown>
+    ) as Workflow['settings'];
+  }
+
   // Ensure settings are present with defaults
   // Treat empty settings object {} the same as missing settings
   if (!cleanedWorkflow.settings || Object.keys(cleanedWorkflow.settings).length === 0) {
@@ -142,6 +203,11 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
   }
 
   ensureWebhookIds(cleanedWorkflow.nodes);
+
+  // Strip unknown node properties that n8n GET echoes but PUT/PATCH rejects
+  if (cleanedWorkflow.nodes) {
+    cleanedWorkflow.nodes = cleanedWorkflow.nodes.map(cleanNodeForApi);
+  }
 
   return cleanedWorkflow;
 }
@@ -160,15 +226,14 @@ export function cleanWorkflowForCreate(workflow: Partial<Workflow>): Partial<Wor
  * such echoed field that a denylist doesn't explicitly drop leaks into the payload and
  * triggers: "Invalid request: request/body must NOT have additional properties".
  *
- * We therefore use an ALLOWLIST rather than a denylist: only fields the write schema accepts
- * are forwarded. This is forward-compatible — new read-only fields n8n adds in future
- * versions can never break updates. Settings are filtered separately to their own writable
- * allowlist below.
+ * We therefore use an ALLOWLIST rather than a denylist for top-level fields: only fields the
+ * write schema accepts are forwarded. This is forward-compatible — new read-only fields n8n
+ * adds in future versions can never break updates.
  *
- * NOTE: This function filters settings to ALL known properties (12 total).
- * For version-specific filtering (compatibility with older n8n versions),
- * use N8nApiClient.updateWorkflow() which automatically detects the n8n version
- * and filters settings accordingly.
+ * The settings object inside it is the opposite: everything is forwarded except the properties
+ * n8n derives and ignores on write, because an allowlist there drops settings n8n added after
+ * we last looked. Version-appropriate filtering happens in N8nApiClient.updateWorkflow(), which
+ * detects the target version first.
  *
  * @param workflow - The workflow object to clean
  * @returns A cleaned partial workflow suitable for API updates
@@ -190,36 +255,17 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   if (source.connections !== undefined) cleanedWorkflow.connections = source.connections;
   if (Array.isArray(source.nodeGroups)) cleanedWorkflow.nodeGroups = source.nodeGroups;
   if (source.settings !== undefined) cleanedWorkflow.settings = source.settings;
-
-  // ALL known settings properties accepted by n8n Public API (as of n8n 1.119.0+)
-  // This list is the UNION of all properties ever accepted by any n8n version
-  // Version-specific filtering is handled by N8nApiClient.updateWorkflow()
-  const ALL_KNOWN_SETTINGS_PROPERTIES = new Set([
-    // Core properties (all versions)
-    'saveExecutionProgress',
-    'saveManualExecutions',
-    'saveDataErrorExecution',
-    'saveDataSuccessExecution',
-    'executionTimeout',
-    'errorWorkflow',
-    'timezone',
-    // Added in n8n 1.37.0
-    'executionOrder',
-    // Added in n8n 1.119.0
-    'callerPolicy',
-    'callerIds',
-    'timeSavedPerExecution',
-    'availableInMCP',
-  ]);
+  // Write-only folder placement (n8n 2.32+): null moves to the project root. GET responses
+  // never echo it, so it only appears here when a caller explicitly asked for a move.
+  if (source.parentFolderId !== undefined) cleanedWorkflow.parentFolderId = source.parentFolderId;
 
   if (cleanedWorkflow.settings && typeof cleanedWorkflow.settings === 'object') {
-    // Filter to only known properties (security + prevent garbage)
-    const filteredSettings: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(cleanedWorkflow.settings as Record<string, unknown>)) {
-      if (ALL_KNOWN_SETTINGS_PROPERTIES.has(key)) {
-        filteredSettings[key] = value;
-      }
-    }
+    // Everything else is forwarded. An allowlist here silently dropped each new n8n setting
+    // until someone noticed - version-appropriate filtering belongs in
+    // N8nApiClient.updateWorkflow(), which knows the target version.
+    const filteredSettings = stripDerivedSettings(
+      cleanedWorkflow.settings as Record<string, unknown>
+    );
     // If no valid properties remain after filtering, use minimal defaults
     // Issue #431: n8n API rejects empty settings objects
     if (Object.keys(filteredSettings).length > 0) {
@@ -234,6 +280,11 @@ export function cleanWorkflowForUpdate(workflow: Workflow): Partial<Workflow> {
   }
 
   ensureWebhookIds(cleanedWorkflow.nodes as WorkflowNode[] | undefined);
+
+  // Strip unknown node properties that n8n GET echoes but PUT/PATCH rejects
+  if (cleanedWorkflow.nodes) {
+    cleanedWorkflow.nodes = (cleanedWorkflow.nodes as WorkflowNode[]).map(cleanNodeForApi);
+  }
 
   return cleanedWorkflow as Partial<Workflow>;
 }

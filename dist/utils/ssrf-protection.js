@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -6,11 +39,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SSRFProtection = void 0;
 const url_1 = require("url");
 const promises_1 = require("dns/promises");
-const net_1 = require("net");
+const net_1 = __importStar(require("net"));
 const http_1 = __importDefault(require("http"));
 const https_1 = __importDefault(require("https"));
 const ipaddr_js_1 = __importDefault(require("ipaddr.js"));
+const undici_1 = require("undici");
 const logger_1 = require("./logger");
+const supportsAutoSelectFamily = typeof net_1.default.getDefaultAutoSelectFamily === 'function';
 const CLOUD_METADATA = new Set([
     '169.254.169.254',
     '169.254.170.2',
@@ -33,20 +68,33 @@ const PRIVATE_IP_RANGES = [
     /^169\.254\./,
     /^127\./,
     /^0\./,
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./,
+    /^192\.0\.0\./,
+    /^(22[4-9]|23\d)\./,
+    /^(24\d|25[0-5])\./,
 ];
 class SSRFProtection {
+    static isLoopbackHost(host) {
+        return LOCALHOST_PATTERNS.has(host) || ((0, net_1.isIPv4)(host) && host.startsWith('127.'));
+    }
     static isPrivateOrMappedIpv6(hostname) {
         if (!(0, net_1.isIPv6)(hostname))
             return false;
+        hostname = hostname.toLowerCase();
         if (hostname.startsWith('::'))
             return true;
         if (hostname.startsWith('0:0:0:0:0:ffff:'))
             return true;
-        if (hostname.startsWith('fe80:'))
+        const hextet = SSRFProtection.firstHextet(hostname);
+        if (hextet === null)
             return true;
-        if (/^fe[c-f]/.test(hostname))
+        if ((hextet & 0xffc0) === 0xfe80)
             return true;
-        if (/^f[cd]/.test(hostname))
+        if ((hextet & 0xffc0) === 0xfec0)
+            return true;
+        if ((hextet & 0xfe00) === 0xfc00)
+            return true;
+        if ((hextet & 0xff00) === 0xff00)
             return true;
         const embedded = SSRFProtection.tryExtractTunneledIPv4(hostname);
         if (embedded === 'non_canonical')
@@ -87,6 +135,17 @@ class SSRFProtection {
         }
         return null;
     }
+    static firstHextet(hostname) {
+        try {
+            const parsed = ipaddr_js_1.default.parse(hostname);
+            if (parsed.kind() !== 'ipv6')
+                return null;
+            return parsed.parts[0];
+        }
+        catch {
+            return null;
+        }
+    }
     static hextetsToIPv4(hi, lo) {
         return `${(hi >>> 8) & 0xff}.${hi & 0xff}.${(lo >>> 8) & 0xff}.${lo & 0xff}`;
     }
@@ -116,13 +175,22 @@ class SSRFProtection {
                 logger_1.logger.warn('SSRF blocked: Cloud metadata endpoint', { hostname, mode });
                 return { valid: false, reason: 'Cloud metadata endpoint blocked' };
             }
-            let resolvedIP;
-            let resolvedFamily;
+            let resolved;
             try {
-                const { address, family } = await (0, promises_1.lookup)(hostname);
-                resolvedIP = address;
-                resolvedFamily = family === 6 ? 6 : 4;
-                logger_1.logger.debug('DNS resolved for SSRF check', { hostname, resolvedIP, mode });
+                const raw = await (0, promises_1.lookup)(hostname, { all: true });
+                const list = Array.isArray(raw) ? raw : [raw];
+                if (list.length === 0) {
+                    throw new Error('DNS lookup returned no addresses');
+                }
+                resolved = list.map((entry) => ({
+                    address: entry.address,
+                    family: entry.family === 6 ? 6 : 4,
+                }));
+                logger_1.logger.debug('DNS resolved for SSRF check', {
+                    hostname,
+                    resolvedIPs: resolved.map(r => r.address),
+                    mode
+                });
             }
             catch (error) {
                 logger_1.logger.warn('DNS resolution failed for webhook URL', {
@@ -131,84 +199,107 @@ class SSRFProtection {
                 });
                 return { valid: false, reason: 'DNS resolution failed' };
             }
-            if (CLOUD_METADATA.has(resolvedIP)) {
-                logger_1.logger.warn('SSRF blocked: Hostname resolves to cloud metadata IP', {
-                    hostname,
-                    resolvedIP,
-                    mode
-                });
-                return { valid: false, reason: 'Hostname resolves to cloud metadata endpoint' };
-            }
-            const tunneledReason = SSRFProtection.tunneledIPv6BlockReason(resolvedIP);
-            if (tunneledReason !== null) {
-                logger_1.logger.warn('SSRF blocked: IPv6 tunneling rejection (all-mode gate)', {
-                    hostname,
-                    resolvedIP,
-                    mode,
-                    reason: tunneledReason
-                });
-                return { valid: false, reason: tunneledReason };
+            for (const { address } of resolved) {
+                const check = SSRFProtection.validateResolvedAddress(hostname, address, mode);
+                if (!check.valid) {
+                    return { valid: false, reason: check.reason };
+                }
             }
             if (mode === 'permissive') {
                 logger_1.logger.warn('SSRF protection in permissive mode (localhost and private IPs allowed)', {
                     hostname,
-                    resolvedIP
+                    resolvedIPs: resolved.map(r => r.address)
                 });
-                return { valid: true, address: resolvedIP, family: resolvedFamily };
             }
-            const isLocalhost = LOCALHOST_PATTERNS.has(hostname) ||
-                resolvedIP === '::1' ||
-                resolvedIP.startsWith('127.');
-            if (mode === 'strict' && isLocalhost) {
-                logger_1.logger.warn('SSRF blocked: Localhost not allowed in strict mode', {
-                    hostname,
-                    resolvedIP
-                });
-                return { valid: false, reason: 'Localhost access is blocked in strict mode' };
-            }
-            if (mode === 'moderate' && isLocalhost) {
-                logger_1.logger.info('Localhost webhook allowed (moderate mode)', { hostname, resolvedIP });
-                return { valid: true, address: resolvedIP, family: resolvedFamily };
-            }
-            if (PRIVATE_IP_RANGES.some(regex => regex.test(resolvedIP))) {
-                logger_1.logger.warn('SSRF blocked: Private IP address', { hostname, resolvedIP, mode });
-                return {
-                    valid: false,
-                    reason: mode === 'strict'
-                        ? 'Private IP addresses not allowed'
-                        : 'Private IP addresses not allowed (use WEBHOOK_SECURITY_MODE=permissive if needed)'
-                };
-            }
-            if (SSRFProtection.isPrivateOrMappedIpv6(resolvedIP)) {
-                logger_1.logger.warn('SSRF blocked: IPv6 private address', {
-                    hostname,
-                    resolvedIP,
-                    mode
-                });
-                return { valid: false, reason: 'IPv6 private address not allowed' };
-            }
-            return { valid: true, address: resolvedIP, family: resolvedFamily };
+            const [first] = resolved;
+            return { valid: true, address: first.address, family: first.family, addresses: resolved };
         }
         catch (error) {
             return { valid: false, reason: 'Invalid URL format' };
         }
     }
-    static createPinnedAgents(address, family) {
-        const pinnedLookup = (_hostname, options, callback) => {
+    static validateResolvedAddress(hostname, resolvedIP, mode) {
+        if (CLOUD_METADATA.has(resolvedIP)) {
+            logger_1.logger.warn('SSRF blocked: Hostname resolves to cloud metadata IP', {
+                hostname,
+                resolvedIP,
+                mode
+            });
+            return { valid: false, reason: 'Hostname resolves to cloud metadata endpoint' };
+        }
+        const tunneledReason = SSRFProtection.tunneledIPv6BlockReason(resolvedIP);
+        if (tunneledReason !== null) {
+            logger_1.logger.warn('SSRF blocked: IPv6 tunneling rejection (all-mode gate)', {
+                hostname,
+                resolvedIP,
+                mode,
+                reason: tunneledReason
+            });
+            return { valid: false, reason: tunneledReason };
+        }
+        if (mode === 'permissive') {
+            return { valid: true };
+        }
+        const isLocalhost = SSRFProtection.isLoopbackHost(hostname) ||
+            resolvedIP === '::1' ||
+            resolvedIP.startsWith('127.');
+        if (mode === 'strict' && isLocalhost) {
+            logger_1.logger.warn('SSRF blocked: Localhost not allowed in strict mode', {
+                hostname,
+                resolvedIP
+            });
+            return { valid: false, reason: 'Localhost access is blocked in strict mode' };
+        }
+        if (mode === 'moderate' && isLocalhost) {
+            logger_1.logger.info('Localhost webhook allowed (moderate mode)', { hostname, resolvedIP });
+            return { valid: true };
+        }
+        if (PRIVATE_IP_RANGES.some(regex => regex.test(resolvedIP))) {
+            logger_1.logger.warn('SSRF blocked: Private IP address', { hostname, resolvedIP, mode });
+            return {
+                valid: false,
+                reason: mode === 'strict'
+                    ? 'Private IP addresses not allowed'
+                    : 'Private IP addresses not allowed (use WEBHOOK_SECURITY_MODE=permissive if needed)'
+            };
+        }
+        if (SSRFProtection.isPrivateOrMappedIpv6(resolvedIP)) {
+            logger_1.logger.warn('SSRF blocked: IPv6 private address', {
+                hostname,
+                resolvedIP,
+                mode
+            });
+            return { valid: false, reason: 'IPv6 private address not allowed' };
+        }
+        return { valid: true };
+    }
+    static buildPinnedLookup(addresses) {
+        return (_hostname, options, callback) => {
             if (options && options.all) {
-                callback(null, [{ address, family }]);
+                callback(null, addresses.map(a => ({ address: a.address, family: a.family })));
             }
             else {
-                callback(null, address, family);
+                callback(null, addresses[0].address, addresses[0].family);
             }
         };
+    }
+    static createPinnedAgents(addresses) {
+        if (!addresses || addresses.length === 0) {
+            throw new Error('createPinnedAgents requires at least one validated address');
+        }
+        const pinnedLookup = SSRFProtection.buildPinnedLookup(addresses);
         const httpAgent = new http_1.default.Agent({ keepAlive: false });
         const httpsAgent = new https_1.default.Agent({ keepAlive: false });
         const wrap = (agent) => {
             const proto = Object.getPrototypeOf(agent);
             const original = proto.createConnection;
             agent.createConnection = function (options, cb) {
-                return original.call(this, { ...options, lookup: pinnedLookup }, cb);
+                const connectOptions = { ...options, lookup: pinnedLookup };
+                if (supportsAutoSelectFamily) {
+                    connectOptions.autoSelectFamily = true;
+                    connectOptions.autoSelectFamilyAttemptTimeout = 250;
+                }
+                return original.call(this, connectOptions, cb);
             };
             agent.options = { ...(agent.options || {}), lookup: pinnedLookup };
             return agent;
@@ -216,6 +307,20 @@ class SSRFProtection {
         return {
             httpAgent: wrap(httpAgent),
             httpsAgent: wrap(httpsAgent),
+        };
+    }
+    static createPinnedFetch(addresses) {
+        if (!addresses || addresses.length === 0) {
+            throw new Error('createPinnedFetch requires at least one validated address');
+        }
+        const lookup = SSRFProtection.buildPinnedLookup(addresses);
+        const dispatcher = new undici_1.Agent({
+            connect: { lookup, autoSelectFamily: supportsAutoSelectFamily, autoSelectFamilyAttemptTimeout: 250 },
+            keepAliveTimeout: 1000,
+        });
+        return {
+            fetch: (url, init) => (0, undici_1.fetch)(url, { ...init, dispatcher, redirect: 'manual' }),
+            close: () => dispatcher.close(),
         };
     }
     static validateUrlSync(urlString) {
@@ -250,10 +355,14 @@ class SSRFProtection {
         if (mode === 'permissive') {
             return { valid: true };
         }
-        if (mode === 'strict' && LOCALHOST_PATTERNS.has(hostname)) {
+        const isLocalhost = SSRFProtection.isLoopbackHost(hostname);
+        if (mode === 'strict' && isLocalhost) {
             return { valid: false, reason: 'Localhost access is blocked in strict mode' };
         }
-        if (PRIVATE_IP_RANGES.some(regex => regex.test(hostname))) {
+        if (mode === 'moderate' && isLocalhost) {
+            return { valid: true };
+        }
+        if ((0, net_1.isIPv4)(hostname) && PRIVATE_IP_RANGES.some(regex => regex.test(hostname))) {
             return {
                 valid: false,
                 reason: mode === 'strict'

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.n8nManageCredentialsDoc = exports.n8nManageDatatableDoc = exports.n8nDeployTemplateDoc = exports.n8nWorkflowVersionsDoc = exports.n8nEvaluationsDoc = exports.n8nExecutionsDoc = exports.n8nTestWorkflowDoc = exports.n8nAutofixWorkflowDoc = exports.n8nValidateWorkflowDoc = exports.n8nListWorkflowsDoc = exports.n8nActivateWorkflowDoc = exports.n8nDeleteWorkflowDoc = exports.n8nUpdatePartialWorkflowDoc = exports.n8nUpdateFullWorkflowDoc = exports.n8nGetWorkflowDoc = exports.n8nCreateWorkflowDoc = void 0;
+exports.n8nListCatalogDoc = exports.n8nManageAgentsDoc = exports.n8nManageFoldersDoc = exports.n8nManageCredentialsDoc = exports.n8nManageDatatableDoc = exports.n8nDeployTemplateDoc = exports.n8nWorkflowVersionsDoc = exports.n8nEvaluationsDoc = exports.n8nExecutionsDoc = exports.n8nTestWorkflowDoc = exports.n8nAutofixWorkflowDoc = exports.n8nValidateWorkflowDoc = exports.n8nListWorkflowsDoc = exports.n8nActivateWorkflowDoc = exports.n8nDeleteWorkflowDoc = exports.n8nUpdatePartialWorkflowDoc = exports.n8nUpdateFullWorkflowDoc = exports.n8nGetWorkflowDoc = exports.n8nCreateWorkflowDoc = void 0;
 var n8n_create_workflow_1 = require("./n8n-create-workflow");
 Object.defineProperty(exports, "n8nCreateWorkflowDoc", { enumerable: true, get: function () { return n8n_create_workflow_1.n8nCreateWorkflowDoc; } });
 var n8n_get_workflow_1 = require("./n8n-get-workflow");
@@ -33,4 +33,10 @@ var n8n_manage_datatable_1 = require("./n8n-manage-datatable");
 Object.defineProperty(exports, "n8nManageDatatableDoc", { enumerable: true, get: function () { return n8n_manage_datatable_1.n8nManageDatatableDoc; } });
 var n8n_manage_credentials_1 = require("./n8n-manage-credentials");
 Object.defineProperty(exports, "n8nManageCredentialsDoc", { enumerable: true, get: function () { return n8n_manage_credentials_1.n8nManageCredentialsDoc; } });
+var n8n_manage_folders_1 = require("./n8n-manage-folders");
+Object.defineProperty(exports, "n8nManageFoldersDoc", { enumerable: true, get: function () { return n8n_manage_folders_1.n8nManageFoldersDoc; } });
+var n8n_manage_agents_1 = require("./n8n-manage-agents");
+Object.defineProperty(exports, "n8nManageAgentsDoc", { enumerable: true, get: function () { return n8n_manage_agents_1.n8nManageAgentsDoc; } });
+var n8n_list_catalog_1 = require("./n8n-list-catalog");
+Object.defineProperty(exports, "n8nListCatalogDoc", { enumerable: true, get: function () { return n8n_list_catalog_1.n8nListCatalogDoc; } });
 //# sourceMappingURL=index.js.map

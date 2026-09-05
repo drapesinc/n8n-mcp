@@ -1,8 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.N8NMCPEngine = void 0;
+exports.N8NMCPEngine = exports.probeOfficialMcp = void 0;
 const http_server_single_session_1 = require("./http-server-single-session");
 const logger_1 = require("./utils/logger");
+const version_1 = require("./utils/version");
+var n8n_official_mcp_client_1 = require("./services/n8n-official-mcp-client");
+Object.defineProperty(exports, "probeOfficialMcp", { enumerable: true, get: function () { return n8n_official_mcp_client_1.probeOfficialMcp; } });
 class N8NMCPEngine {
     constructor(options = {}) {
         this.server = new http_server_single_session_1.SingleSessionHTTPServer({
@@ -35,7 +38,7 @@ class N8NMCPEngine {
                     total: Math.round(memoryUsage.heapTotal / 1024 / 1024),
                     unit: 'MB'
                 },
-                version: '2.24.1'
+                version: version_1.PROJECT_VERSION
             };
         }
         catch (error) {
@@ -45,7 +48,7 @@ class N8NMCPEngine {
                 uptime: 0,
                 sessionActive: false,
                 memoryUsage: { used: 0, total: 0, unit: 'MB' },
-                version: '2.24.1'
+                version: version_1.PROJECT_VERSION
             };
         }
     }

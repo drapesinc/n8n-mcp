@@ -205,6 +205,7 @@ class TelemetryBatchProcessor {
     async flushMutations(mutations) {
         try {
             const batches = this.createBatches(mutations, telemetry_types_1.TELEMETRY_CONFIG.MAX_BATCH_SIZE);
+            let allBatchesSent = true;
             for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
                 const batch = batches[batchIndex];
                 const result = await this.executeWithTimeout(async () => {
@@ -230,13 +231,13 @@ class TelemetryBatchProcessor {
                     this.metrics.batchesSent++;
                 }
                 else {
-                    const unsent = this.addUnsentBatchesToDeadLetterQueue(batches, batchIndex);
-                    this.metrics.eventsFailed += unsent.itemCount;
-                    this.metrics.batchesFailed += unsent.batchCount;
-                    return false;
+                    this.metrics.eventsFailed += batch.length;
+                    this.metrics.eventsDropped += batch.length;
+                    this.metrics.batchesFailed++;
+                    allBatchesSent = false;
                 }
             }
-            return true;
+            return allBatchesSent;
         }
         catch (error) {
             logger_1.logger.error('Failed to flush mutations with details:', {
@@ -312,12 +313,8 @@ class TelemetryBatchProcessor {
         logger_1.logger.debug(`Processing ${this.deadLetterQueue.length} items from dead letter queue`);
         const events = [];
         const workflows = [];
-        const mutations = [];
         for (const item of this.deadLetterQueue) {
-            if ('workflowHashBefore' in item) {
-                mutations.push(item);
-            }
-            else if ('workflow_hash' in item) {
+            if ('workflow_hash' in item) {
                 workflows.push(item);
             }
             else {
@@ -330,9 +327,6 @@ class TelemetryBatchProcessor {
         }
         if (workflows.length > 0) {
             await this.flushWorkflows(workflows);
-        }
-        if (mutations.length > 0) {
-            await this.flushMutations(mutations);
         }
     }
     recordFlushTime(time) {

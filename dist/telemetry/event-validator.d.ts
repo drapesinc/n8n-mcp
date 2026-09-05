@@ -45,8 +45,8 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             webhookId: z.ZodOptional<z.ZodString>;
         }, "strict", z.ZodTypeAny, {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -54,17 +54,17 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }, {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -72,20 +72,20 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }>, "many">;
         connections: z.ZodRecord<z.ZodString, z.ZodAny>;
     }, "strip", z.ZodTypeAny, {
         nodes: {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -93,20 +93,20 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }[];
         connections: Record<string, any>;
     }, {
         nodes: {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -114,19 +114,19 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }[];
         connections: Record<string, any>;
     }>;
     created_at: z.ZodOptional<z.ZodString>;
 }, "strip", z.ZodTypeAny, {
-    complexity: "simple" | "medium" | "complex";
+    complexity: "medium" | "simple" | "complex";
     user_id: string;
     workflow_hash: string;
     node_count: number;
@@ -136,8 +136,8 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
     sanitized_workflow: {
         nodes: {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -145,19 +145,19 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }[];
         connections: Record<string, any>;
     };
     created_at?: string | undefined;
 }, {
-    complexity: "simple" | "medium" | "complex";
+    complexity: "medium" | "simple" | "complex";
     user_id: string;
     workflow_hash: string;
     node_count: number;
@@ -167,8 +167,8 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
     sanitized_workflow: {
         nodes: {
             type: string;
-            id: string;
             name: string;
+            id: string;
             typeVersion: number;
             position: [number, number];
             parameters: Record<string, unknown>;
@@ -176,12 +176,12 @@ export declare const workflowTelemetrySchema: z.ZodObject<{
             notes?: string | undefined;
             notesInFlow?: boolean | undefined;
             continueOnFail?: boolean | undefined;
+            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             retryOnFail?: boolean | undefined;
             maxTries?: number | undefined;
             waitBetweenTries?: number | undefined;
             alwaysOutputData?: boolean | undefined;
             executeOnce?: boolean | undefined;
-            onError?: "continueRegularOutput" | "continueErrorOutput" | "stopWorkflow" | undefined;
             webhookId?: string | undefined;
         }[];
         connections: Record<string, any>;

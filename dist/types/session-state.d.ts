@@ -1,15 +1,13 @@
+import { InstanceContext } from './instance-context.js';
 export interface SessionState {
     sessionId: string;
     metadata: {
         createdAt: string;
         lastAccess: string;
     };
-    context: {
+    context: Omit<InstanceContext, 'n8nApiUrl' | 'n8nApiKey'> & {
         n8nApiUrl: string;
         n8nApiKey: string;
-        instanceId?: string;
-        sessionId?: string;
-        metadata?: Record<string, any>;
     };
 }
 //# sourceMappingURL=session-state.d.ts.map

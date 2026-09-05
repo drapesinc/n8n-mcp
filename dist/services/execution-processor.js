@@ -5,6 +5,7 @@ exports.filterExecutionData = filterExecutionData;
 exports.processExecution = processExecution;
 const logger_1 = require("../utils/logger");
 const error_execution_processor_1 = require("./error-execution-processor");
+const execution_run_data_1 = require("./execution-run-data");
 const THRESHOLDS = {
     CHAR_SIZE_BYTES: 2,
     OVERHEAD_PER_OBJECT: 50,
@@ -70,15 +71,11 @@ function countItems(nodeData) {
         return counts;
     }
     for (const run of nodeData) {
-        if (run?.data?.main) {
-            const mainData = run.data.main;
-            if (Array.isArray(mainData)) {
-                for (const output of mainData) {
-                    if (Array.isArray(output)) {
-                        counts.output += output.length;
-                    }
-                }
-            }
+        for (const output of (0, execution_run_data_1.extractConnectionBranches)(run?.data)) {
+            counts.output += output?.length ?? 0;
+        }
+        for (const input of (0, execution_run_data_1.extractConnectionBranches)(run?.inputOverride)) {
+            counts.input += input?.length ?? 0;
         }
     }
     return counts;
@@ -109,12 +106,9 @@ function generatePreview(execution) {
         const nodeData = runData[nodeName];
         const itemCounts = countItems(nodeData);
         let dataStructure = {};
-        if (Array.isArray(nodeData) && nodeData.length > 0) {
-            const firstRun = nodeData[0];
-            const firstItem = firstRun?.data?.main?.[0]?.[0];
-            if (firstItem) {
-                dataStructure = extractStructure(firstItem);
-            }
+        const firstItem = (0, execution_run_data_1.firstRunItem)(nodeData);
+        if (firstItem) {
+            dataStructure = extractStructure(firstItem);
         }
         const nodeSize = estimateDataSize(nodeData);
         const nodePreview = {
@@ -123,14 +117,10 @@ function generatePreview(execution) {
             dataStructure,
             estimatedSizeKB: nodeSize,
         };
-        if (Array.isArray(nodeData)) {
-            for (const run of nodeData) {
-                if (run.error) {
-                    nodePreview.status = 'error';
-                    nodePreview.error = extractErrorMessage(run.error);
-                    break;
-                }
-            }
+        const runError = (0, execution_run_data_1.getRunError)(nodeData);
+        if (runError) {
+            nodePreview.status = 'error';
+            nodePreview.error = extractErrorMessage(runError);
         }
         preview.nodes[nodeName] = nodePreview;
         preview.estimatedSizeKB += nodeSize;
@@ -165,25 +155,29 @@ function generateRecommendation(totalSizeKB, totalItems, largestNodeItems) {
         reason: `Large dataset (${totalSizeKB}KB, ${totalItems} items). Use filtered mode with itemsLimit: ${suggestedLimit}.`,
     };
 }
-function truncateItems(items, limit) {
+function truncateItems(items, limit, knownTotal) {
     if (!Array.isArray(items) || items.length === 0) {
         return {
             truncated: items || [],
             metadata: {
-                totalItems: 0,
+                totalItems: knownTotal ?? 0,
                 itemsShown: 0,
-                truncated: false,
+                truncated: (knownTotal ?? 0) > 0,
             },
         };
     }
-    let totalItems = 0;
-    for (const output of items) {
-        if (Array.isArray(output)) {
-            totalItems += output.length;
+    let totalItems = knownTotal ?? 0;
+    if (knownTotal === undefined) {
+        for (const output of items) {
+            if (Array.isArray(output)) {
+                totalItems += output.length;
+            }
         }
     }
     if (limit === 0) {
         const structureOnly = items.map(output => {
+            if (output === null)
+                return null;
             if (!Array.isArray(output) || output.length === 0) {
                 return [];
             }
@@ -194,7 +188,7 @@ function truncateItems(items, limit) {
             metadata: {
                 totalItems,
                 itemsShown: 0,
-                truncated: true,
+                truncated: totalItems > 0,
             },
         };
     }
@@ -318,35 +312,33 @@ function filterExecutionData(execution, options, workflow) {
             };
             continue;
         }
-        const firstRun = nodeData[0];
         const itemCounts = countItems(nodeData);
         totalItems += itemCounts.output;
         const nodeResult = {
-            executionTime: firstRun.executionTime,
+            executionTime: (0, execution_run_data_1.totalExecutionTime)(nodeData),
             itemsInput: itemCounts.input,
             itemsOutput: itemCounts.output,
             status: 'success',
         };
-        if (firstRun.error) {
+        const runError = (0, execution_run_data_1.getRunError)(nodeData);
+        if (runError) {
             nodeResult.status = 'error';
-            nodeResult.error = extractErrorMessage(firstRun.error);
+            nodeResult.error = extractErrorMessage(runError);
         }
+        const maxPerBranch = mode === 'full' || itemsLimit < 0 ? -1 : Math.max(itemsLimit, 1);
+        const outputData = (0, execution_run_data_1.mergeRunBranches)(nodeData, 'data', maxPerBranch);
         if (mode === 'full') {
             nodeResult.data = {
-                output: firstRun.data?.main || [],
+                output: outputData,
                 metadata: {
                     totalItems: itemCounts.output,
                     itemsShown: itemCounts.output,
                     truncated: false,
                 },
             };
-            if (includeInputData && firstRun.inputData) {
-                nodeResult.data.input = firstRun.inputData;
-            }
         }
         else {
-            const outputData = firstRun.data?.main || [];
-            const { truncated, metadata } = truncateItems(outputData, itemsLimit);
+            const { truncated, metadata } = truncateItems(outputData, itemsLimit, itemCounts.output);
             if (metadata.truncated) {
                 hasMoreData = true;
             }
@@ -354,8 +346,19 @@ function filterExecutionData(execution, options, workflow) {
                 output: truncated,
                 metadata,
             };
-            if (includeInputData && firstRun.inputData) {
-                nodeResult.data.input = firstRun.inputData;
+        }
+        if (includeInputData && itemCounts.input > 0) {
+            const inputData = (0, execution_run_data_1.mergeRunBranches)(nodeData, 'inputOverride', maxPerBranch);
+            if (mode === 'full') {
+                nodeResult.data.input = inputData;
+            }
+            else {
+                const { truncated, metadata } = truncateItems(inputData, itemsLimit, itemCounts.input);
+                if (metadata.truncated) {
+                    hasMoreData = true;
+                }
+                nodeResult.data.input = truncated;
+                nodeResult.data.inputMetadata = metadata;
             }
         }
         processedNodes[nodeName] = nodeResult;

@@ -112,8 +112,29 @@ class PropertyFilter {
                 simplified.showWhen = prop.displayOptions.show;
             }
         }
+        const dynamic = PropertyFilter.extractDynamicOptions(prop);
+        if (dynamic)
+            simplified.dynamicOptions = dynamic;
         simplified.usageHint = this.generateUsageHint(prop);
         return simplified;
+    }
+    static extractDynamicOptions(prop) {
+        const dependsOn = (o) => Array.isArray(o?.loadOptionsDependsOn) ? o.loadOptionsDependsOn.map(String) : [];
+        const method = prop?.typeOptions?.loadOptionsMethod;
+        if (typeof method === 'string' && method) {
+            return { methodName: method, methodType: 'loadOptions', dependsOn: dependsOn(prop.typeOptions) };
+        }
+        if (Array.isArray(prop?.modes)) {
+            const mode = prop.modes.find((m) => typeof m?.typeOptions?.searchListMethod === 'string');
+            if (mode) {
+                return {
+                    methodName: mode.typeOptions.searchListMethod,
+                    methodType: 'listSearch',
+                    dependsOn: [...new Set([...dependsOn(prop.typeOptions), ...dependsOn(mode.typeOptions)])]
+                };
+            }
+        }
+        return undefined;
     }
     static generateUsageHint(prop) {
         if (prop.name.toLowerCase().includes('url') || prop.name === 'endpoint') {
@@ -333,7 +354,7 @@ PropertyFilter.ESSENTIAL_PROPERTIES = {
     },
     'nodes-base.slack': {
         required: [],
-        common: ['resource', 'operation', 'channel', 'text', 'attachments', 'blocks'],
+        common: ['resource', 'operation', 'channelId', 'text', 'attachments', 'blocksUi'],
         categoryPriority: ['basic', 'message', 'formatting', 'advanced']
     },
     'nodes-base.email': {

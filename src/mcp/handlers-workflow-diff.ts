@@ -5,14 +5,15 @@
 
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
-import { McpToolResponse } from '../types/n8n-api';
+import { isDeepStrictEqual } from 'node:util';
+import { McpToolResponse, Workflow } from '../types/n8n-api';
 import { WorkflowDiffRequest, WorkflowDiffOperation, WorkflowDiffValidationError } from '../types/workflow-diff';
 import { WorkflowDiffEngine } from '../services/workflow-diff-engine';
 import { getN8nApiClient } from './handlers-n8n-manager';
 import { N8nApiError, getUserFriendlyErrorMessage } from '../utils/n8n-errors';
 import { logger } from '../utils/logger';
 import { InstanceContext, getInstanceScopeId } from '../types/instance-context';
-import { validateWorkflowStructure } from '../services/n8n-validation';
+import { validateWorkflowStructure, cleanWorkflowForUpdate } from '../services/n8n-validation';
 import { NodeRepository } from '../database/node-repository';
 import { WorkflowVersioningService } from '../services/workflow-versioning-service';
 import { WorkflowValidator } from '../services/workflow-validator';
@@ -46,6 +47,38 @@ function compareVersions(
     return a.updatedAt === b.updatedAt ? 'same' : 'changed';
   }
   return 'unknown';
+}
+
+// Ids of nodes that lack a webhookId in the given read. cleanWorkflowForUpdate() assigns a random
+// one to such nodes, and the server persists it, so the snapshot taken before a write and the read
+// taken after it legitimately differ there. A webhookId both reads carry is real content.
+function nodesWithoutWebhookId(workflow: Workflow): string[] {
+  return (workflow.nodes ?? []).filter(node => node.id && !node.webhookId).map(node => node.id);
+}
+
+// The shape an update would send, for comparing two reads of the same workflow. Cloned because
+// cleanWorkflowForUpdate() mutates its input.
+function writableShape(workflow: Workflow, ignoreWebhookIdOf: Set<string>): Record<string, unknown> {
+  const cleaned = cleanWorkflowForUpdate(structuredClone(workflow)) as Record<string, unknown>;
+  if (Array.isArray(cleaned.nodes)) {
+    for (const node of cleaned.nodes) {
+      if (ignoreWebhookIdOf.has(node.id)) delete node.webhookId;
+    }
+  }
+  return cleaned;
+}
+
+// Compare only the fields the update allowlist accepts. Version identity cannot verify a rollback:
+// a successful rollback writes a new version, so compareVersions() reports 'changed' regardless.
+// Generated webhook ids are ignored on both sides whichever read lacks them, so the outcome does
+// not depend on whether an earlier write mutated the snapshot in place.
+function sameWritableContent(a: Workflow, b: Workflow): boolean {
+  try {
+    const generated = new Set([...nodesWithoutWebhookId(a), ...nodesWithoutWebhookId(b)]);
+    return isDeepStrictEqual(writableShape(a, generated), writableShape(b, generated));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -103,6 +136,10 @@ const workflowDiffSchema = z.object({
     nodeGroups: z.preprocess(normalizeMcpJsonValue, z.any()).optional(),
     // Transfer operation
     destinationProjectId: z.string().min(1).optional(),
+    // Folder move (moveToFolder). Must be declared here — unknown keys are stripped, and a
+    // moveToFolder op arriving without its payload would fail validation instead of moving.
+    // null is meaningful: it moves the workflow to the project root.
+    parentFolderId: z.string().min(1).nullable().optional(),
     // Aliases: LLMs often use "id" instead of "nodeId" — accept both
     id: z.string().optional(),
   }).transform((op) => {
@@ -463,6 +500,7 @@ export async function handleUpdatePartialWorkflow(
 
           // Either persist-then-fail OR couldn't determine — attempt rollback.
           let rollbackPerformed = false;
+          let rollbackVerifiedAfterError = false;
           let rollbackErrorMessage: string | undefined;
           try {
             // No authoredGroups here: restoring the graph matters, frames do not. If the snapshot's
@@ -477,19 +515,47 @@ export async function handleUpdatePartialWorkflow(
             });
           } catch (rollbackErr) {
             rollbackErrorMessage = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
-            logger.error('updateWorkflow failed AND rollback failed', {
-              workflowId: input.id,
-              originalError: updateError instanceof Error ? updateError.message : String(updateError),
-              rollbackError: rollbackErrorMessage,
-            });
+
+            // n8n can persist a rollback PUT and then reject it: the public API commits workflow
+            // content before it checks publish permission. Verify against the server rather than
+            // trusting the throw, or we warn of a broken workflow that was in fact restored.
+            try {
+              const afterRollback = await client.getWorkflow(input.id);
+              if (sameWritableContent(afterRollback, workflowBefore)) {
+                rollbackPerformed = true;
+                rollbackVerifiedAfterError = true;
+                logger.warn('rollback PUT errored but content matches the prior state; treating as rolled back', {
+                  workflowId: input.id,
+                  rollbackError: rollbackErrorMessage,
+                });
+                rollbackErrorMessage = undefined;
+              }
+            } catch (verifyErr) {
+              logger.debug('post-rollback verification GET failed', verifyErr);
+            }
+
+            if (!rollbackPerformed) {
+              logger.error('updateWorkflow failed AND rollback failed', {
+                workflowId: input.id,
+                originalError: updateError instanceof Error ? updateError.message : String(updateError),
+                rollbackError: rollbackErrorMessage,
+              });
+            }
           }
 
           // Re-throw with rollback context attached so the outer N8nApiError
           // catch (below) surfaces it with the user-friendly formatting.
           if (updateError instanceof N8nApiError) {
+            // A folder move cannot be rolled back: workflowBefore comes from a GET, and
+            // n8n never returns parentFolderId (write-only), so the restore PUT omits it
+            // and the move - if the failed PUT persisted - survives. Say so rather than
+            // claiming a full restoration.
+            const folderMoveInPayload = (diffResult.workflow as any)?.parentFolderId !== undefined;
             const augmentedDetails: Record<string, unknown> = {
               ...((updateError.details as Record<string, unknown>) ?? {}),
               rollbackPerformed,
+              ...(rollbackVerifiedAfterError ? { rollbackVerifiedAfterError: true } : {}),
+              ...(folderMoveInPayload && rollbackPerformed ? { folderMoveMayHavePersisted: true } : {}),
               ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
               ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),
               // A rollback can have to drop a canvas group the server no longer accepts. That is a
@@ -501,7 +567,9 @@ export async function handleUpdatePartialWorkflow(
                 : {}),
             };
             const suffix = rollbackPerformed
-              ? ' (workflow restored to prior state)'
+              ? (folderMoveInPayload
+                  ? ' (workflow restored to prior state; a folder move in the failed update may have persisted — n8n cannot report or restore folder placement)'
+                  : ' (workflow restored to prior state)')
               : (rollbackErrorMessage
                   ? ' (rollback also failed; workflow may be in a broken state — try n8n_workflow_versions for a backup)'
                   : '');
@@ -790,6 +858,10 @@ function inferIntentFromOperations(operations: any[]): string {
         return 'Deactivate workflow';
       case 'transferWorkflow':
         return `Transfer workflow to project ${op.destinationProjectId || ''}`.trim();
+      case 'moveToFolder':
+        return op.parentFolderId === null
+          ? 'Move workflow to project root'
+          : `Move workflow to folder ${op.parentFolderId || ''}`.trim();
       default:
         return `Workflow ${op.type}`;
     }

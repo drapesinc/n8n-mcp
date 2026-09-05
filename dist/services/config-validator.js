@@ -594,11 +594,6 @@ class ConfigValidator {
             }
         }
         if (language === 'python' && hasReturn) {
-            if (code.includes('result = {"data": "value"}')) {
-                console.log('DEBUG: Processing Python code with result variable');
-                console.log('DEBUG: Language:', language);
-                console.log('DEBUG: Has return:', hasReturn);
-            }
             if (/return\s+items\s*$/.test(code) && !code.includes('json') && !code.includes('dict')) {
                 warnings.push({
                     type: 'best_practice',

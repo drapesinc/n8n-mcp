@@ -22,8 +22,8 @@ function handleTelemetryCliIfPresent(args) {
 Usage: n8n-mcp telemetry [command]
 
 Commands:
-  enable   Enable anonymous telemetry
-  disable  Disable anonymous telemetry
+  enable   Enable telemetry
+  disable  Disable telemetry
   status   Show current telemetry status
 
 Learn more: https://github.com/czlonkowski/n8n-mcp/blob/main/PRIVACY.md

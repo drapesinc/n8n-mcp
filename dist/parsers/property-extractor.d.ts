@@ -3,6 +3,11 @@ export declare class PropertyExtractor {
     extractProperties(nodeClass: NodeClass): any[];
     private getNodeDescription;
     extractOperations(nodeClass: NodeClass): any[];
+    extractVersionDetails(description: any): {
+        properties: any[];
+        operations: any[];
+        credentials: any[];
+    };
     private extractOperationsFromDescription;
     private declaresToolUse;
     detectAIToolCapability(nodeClass: NodeClass): boolean;

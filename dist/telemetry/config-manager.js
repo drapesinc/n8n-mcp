@@ -191,14 +191,14 @@ class TelemetryConfigManager {
         config.enabled = true;
         this.config = config;
         this.saveConfig();
-        console.log('✓ Anonymous telemetry enabled');
+        console.log('✓ Telemetry enabled');
     }
     disable() {
         const config = this.loadConfig();
         config.enabled = false;
         this.config = config;
         this.saveConfig();
-        console.log('✓ Anonymous telemetry disabled');
+        console.log('✓ Telemetry disabled');
     }
     getStatus() {
         const config = this.loadConfig();
@@ -209,7 +209,7 @@ class TelemetryConfigManager {
         }
         return `
 Telemetry Status: ${status}
-Anonymous ID: ${config.userId}
+Installation ID: ${config.userId}
 First Run: ${config.firstRun || 'Unknown'}
 Config Path: ${this.configPath}
 
@@ -220,42 +220,47 @@ For Docker: Set N8N_MCP_TELEMETRY_DISABLED=true
 `;
     }
     showFirstRunNotice() {
-        console.log(`
-╔════════════════════════════════════════════════════════════╗
-║              Anonymous Usage Statistics                     ║
-╠════════════════════════════════════════════════════════════╣
-║                                                             ║
-║  n8n-mcp collects anonymous usage data to improve the      ║
-║  tool and understand how it's being used.                  ║
-║                                                             ║
-║  We track:                                                 ║
-║  • Which MCP tools are used (no parameters)                ║
-║  • Workflow structures (sanitized, no sensitive data)      ║
-║  • Error patterns (hashed, no details)                     ║
-║  • Performance metrics (timing, success rates)             ║
-║                                                             ║
-║  We NEVER collect:                                         ║
-║  • URLs, API keys, or credentials                          ║
-║  • Workflow content or actual data                         ║
-║  • Personal or identifiable information                    ║
-║  • n8n instance details or locations                       ║
-║                                                             ║
-║  Your anonymous ID: ${this.config?.userId || 'generating...'}          ║
-║                                                             ║
-║  This helps me understand usage patterns and improve       ║
-║  n8n-mcp for everyone. Thank you for your support!         ║
-║                                                             ║
-║  To opt-out at any time:                                   ║
-║  npx n8n-mcp telemetry disable                            ║
-║                                                             ║
-║  Data deletion requests:                                   ║
-║  Email romuald@n8n-mcp.com with your anonymous ID          ║
-║                                                             ║
-║  Learn more:                                               ║
-║  https://github.com/czlonkowski/n8n-mcp/blob/main/PRIVACY.md ║
-║                                                             ║
-╚════════════════════════════════════════════════════════════╝
-`);
+        const width = 60;
+        const row = (text = '') => `║ ${text.padEnd(width)}║`;
+        const id = this.config?.userId || 'generating...';
+        const lines = [
+            `╔${'═'.repeat(width + 1)}╗`,
+            row('Usage Telemetry'),
+            `╠${'═'.repeat(width + 1)}╣`,
+            row(),
+            row('n8n-mcp sends pseudonymous usage data to improve the tool'),
+            row('and to build datasets and models for workflow generation.'),
+            row(),
+            row('We collect:'),
+            row('• Which MCP tools are used, timing, and success rates'),
+            row('• Workflow structures, including node settings after'),
+            row('  credentials, URLs, emails, and keys are removed'),
+            row('• The "intent" text passed to workflow update tools'),
+            row('• Error categories and system information'),
+            row(),
+            row('We never collect:'),
+            row('• API keys, tokens, or credentials'),
+            row('• URLs, hostnames, or your n8n instance address'),
+            row('• Names, emails, or account details'),
+            row('• Workflow execution data or pinned data'),
+            row(),
+            row(`Your installation ID: ${id}`),
+            row(),
+            row('Leaving telemetry enabled means you accept the terms'),
+            row('in the policy linked below.'),
+            row(),
+            row('To opt out at any time:'),
+            row('npx n8n-mcp telemetry disable'),
+            row(),
+            row('Data deletion requests:'),
+            row('Email romuald@n8n-mcp.com with your installation ID'),
+            row(),
+            row('Full policy:'),
+            row('https://github.com/czlonkowski/n8n-mcp/blob/main/PRIVACY.md'),
+            row(),
+            `╚${'═'.repeat(width + 1)}╝`,
+        ];
+        process.stderr.write(`\n${lines.join('\n')}\n`);
     }
     getPackageVersion() {
         try {

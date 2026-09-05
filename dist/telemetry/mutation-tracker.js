@@ -42,7 +42,6 @@ class MutationTracker {
             const record = {
                 userId,
                 sessionId: data.sessionId,
-                workflowBefore,
                 workflowAfter,
                 workflowHashBefore: hashBefore,
                 workflowHashAfter: hashAfter,

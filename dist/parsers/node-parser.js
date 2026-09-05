@@ -1,8 +1,14 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeParser = void 0;
+exports.normalizeNodeVersion = normalizeNodeVersion;
 const property_extractor_1 = require("./property-extractor");
 const node_types_1 = require("../types/node-types");
+const version_display_gate_1 = require("./version-display-gate");
+function normalizeNodeVersion(version) {
+    const numeric = Number(version);
+    return Number.isFinite(numeric) ? String(numeric) : String(version);
+}
 class NodeParser {
     constructor() {
         this.propertyExtractor = new property_extractor_1.PropertyExtractor();
@@ -30,6 +36,59 @@ class NodeParser {
             outputs: outputInfo.outputs,
             outputNames: outputInfo.outputNames
         };
+    }
+    parseVersions(nodeClass, packageName) {
+        this.currentNodeClass = nodeClass;
+        const base = this.getNodeDescription(nodeClass);
+        const nodeType = this.extractNodeType(base, packageName);
+        const currentVersion = this.extractVersion(nodeClass);
+        const category = this.extractCategory(base);
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
+        const nodeVersions = instance?.nodeVersions ?? nodeClass.nodeVersions;
+        const entries = new Map();
+        const record = (version, description) => {
+            if (description && Number.isFinite(Number(version))) {
+                entries.set(normalizeNodeVersion(version), description);
+            }
+        };
+        if (nodeVersions && typeof nodeVersions === 'object') {
+            for (const [key, implementation] of Object.entries(nodeVersions)) {
+                record(key, implementation?.description);
+            }
+        }
+        else {
+            const declared = base.version;
+            if (!Array.isArray(declared))
+                return [];
+            for (const version of declared)
+                record(version, base);
+        }
+        const ordered = [...entries.entries()].sort(([a], [b]) => Number(a) - Number(b));
+        let previousNames = null;
+        return ordered.map(([version, description]) => {
+            const details = this.propertyExtractor.extractVersionDetails(description);
+            details.properties = (0, version_display_gate_1.filterPropertiesForVersion)(details.properties, version);
+            const names = new Set(details.properties.map((p) => p.name).filter((n) => typeof n === 'string'));
+            const previous = previousNames;
+            const addedProperties = previous ? [...names].filter(n => !previous.has(n)) : [];
+            const deprecatedProperties = previous ? [...previous].filter(n => !names.has(n)) : [];
+            previousNames = names;
+            return {
+                nodeType,
+                version,
+                packageName,
+                displayName: description.displayName || base.displayName || base.name,
+                description: description.description ?? base.description,
+                category,
+                isCurrentMax: version === currentVersion,
+                properties: details.properties,
+                operations: details.operations,
+                credentials: details.credentials,
+                outputs: this.extractOutputs(description).outputs,
+                addedProperties,
+                deprecatedProperties
+            };
+        });
     }
     getNodeDescription(nodeClass) {
         let description;

@@ -46,7 +46,6 @@ describe('TelemetryBatchProcessor', () => {
   const createMutationRecord = (index: number): WorkflowMutationRecord => ({
     userId: `mutation-user-${index}`,
     sessionId: `mutation-session-${index}`,
-    workflowBefore: { nodes: [], connections: {} },
     workflowAfter: { nodes: [], connections: {} },
     workflowHashBefore: `before-${index}`,
     workflowHashAfter: `after-${index}`,
@@ -371,16 +370,42 @@ describe('TelemetryBatchProcessor', () => {
       );
     });
 
-    it('should retain every unattempted mutation batch after a failure', async () => {
+    it('should drop a failed mutation batch, send the rest, and never retry it', async () => {
       const mutations = Array.from({ length: 60 }, (_, index) =>
         createMutationRecord(index)
       );
+      const insert = vi.fn()
+        .mockResolvedValueOnce(createMockSupabaseResponse(new Error('First batch timed out')))
+        .mockResolvedValue(createMockSupabaseResponse());
+      vi.mocked(mockSupabase.from).mockImplementation((requestedTable) => ({
+        insert: requestedTable === 'workflow_mutations'
+          ? insert
+          : vi.fn().mockResolvedValue(createMockSupabaseResponse()),
+        url: { href: '' },
+        headers: {},
+        select: vi.fn(),
+        upsert: vi.fn(),
+        update: vi.fn(),
+        delete: vi.fn()
+      } as any));
 
-      await expectAllUnsentBatchesRetried(
-        'workflow_mutations',
-        mutations.length,
-        () => batchProcessor.flush(undefined, undefined, mutations)
-      );
+      await batchProcessor.flush(undefined, undefined, mutations);
+
+      // Both batches were attempted once: the second batch is independent of the first.
+      expect(insert).toHaveBeenCalledTimes(2);
+      expect(insert.mock.calls[1][0]).toHaveLength(10);
+      expect(batchProcessor.getMetrics()).toMatchObject({
+        eventsTracked: 10,
+        eventsFailed: 50,
+        eventsDropped: 50,
+        batchesSent: 1,
+        batchesFailed: 1,
+        deadLetterQueueSize: 0,
+      });
+
+      // A later healthy flush must not replay the failed batch.
+      await batchProcessor.flush([]);
+      expect(insert).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -570,7 +595,7 @@ describe('TelemetryBatchProcessor', () => {
       expect(metrics.eventsDropped).toBe(50);
     });
 
-    it('should retry failed workflow mutations through the mutation table', async () => {
+    it('should not park a failed workflow mutation in the dead letter queue', async () => {
       const errorResponse = createMockSupabaseResponse(new Error('Temporary mutation error'));
       const mutationInsert = vi.fn()
         .mockResolvedValueOnce(errorResponse)
@@ -590,7 +615,6 @@ describe('TelemetryBatchProcessor', () => {
       const mutation: WorkflowMutationRecord = {
         userId: 'user1',
         sessionId: 'session1',
-        workflowBefore: { nodes: [], connections: {} },
         workflowAfter: { nodes: [], connections: {} },
         workflowHashBefore: 'hash1',
         workflowHashAfter: 'hash2',
@@ -614,14 +638,19 @@ describe('TelemetryBatchProcessor', () => {
       };
 
       await batchProcessor.flush(undefined, undefined, [mutation]);
-      expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(1);
+      expect(batchProcessor.getMetrics()).toMatchObject({
+        eventsFailed: 1,
+        eventsDropped: 1,
+        batchesFailed: 1,
+        deadLetterQueueSize: 0,
+      });
 
+      // The insert may have committed despite the reported failure, so a
+      // replay would duplicate the row. Nothing is sent again.
       await batchProcessor.flush([]);
 
-      expect(mutationInsert).toHaveBeenCalledTimes(2);
+      expect(mutationInsert).toHaveBeenCalledTimes(1);
       expect(eventInsert).not.toHaveBeenCalled();
-      expect(mockSupabase.from).toHaveBeenNthCalledWith(1, 'workflow_mutations');
-      expect(mockSupabase.from).toHaveBeenNthCalledWith(2, 'workflow_mutations');
       expect(mutationInsert).toHaveBeenLastCalledWith([
         expect.objectContaining({
           user_id: 'user1',
@@ -629,7 +658,6 @@ describe('TelemetryBatchProcessor', () => {
           workflow_hash_after: 'hash2'
         })
       ]);
-      expect(batchProcessor.getMetrics().deadLetterQueueSize).toBe(0);
     });
 
     it('should handle mixed events and workflows in dead letter queue', async () => {
@@ -870,7 +898,6 @@ describe('TelemetryBatchProcessor', () => {
       const mutation = {
         userId: 'mutation-user',
         sessionId: 'concurrent-session',
-        workflowBefore: { nodes: [], connections: {} },
         workflowAfter: { nodes: [], connections: {} },
         workflowHashBefore: 'before',
         workflowHashAfter: 'after',
@@ -1051,10 +1078,6 @@ describe('TelemetryBatchProcessor', () => {
       const mutation: WorkflowMutationRecord = {
         userId: 'user1',
         sessionId: 'session1',
-        workflowBefore: {
-          nodes: [],
-          connections: {}
-        },
         workflowAfter: {
           nodes: [
             { id: '1', name: 'Webhook', type: 'n8n-nodes-base.webhook', typeVersion: 1, position: [0, 0], parameters: {} }
@@ -1126,7 +1149,6 @@ describe('TelemetryBatchProcessor', () => {
       const mutation: WorkflowMutationRecord = {
         userId: 'user1',
         sessionId: 'session1',
-        workflowBefore: { nodes: [], connections: {} },
         workflowAfter: {
           nodes: [
             {
@@ -1214,7 +1236,6 @@ describe('TelemetryBatchProcessor', () => {
       const mutation: WorkflowMutationRecord = {
         userId: 'user1',
         sessionId: 'session1',
-        workflowBefore: { nodes: [], connections: {} },
         workflowAfter: { nodes: [], connections: {} },
         workflowHashBefore: 'hash1',
         workflowHashAfter: 'hash2',
@@ -1267,7 +1288,7 @@ describe('TelemetryBatchProcessor', () => {
       // Top-level fields should be converted to snake_case
       expect(saved).toHaveProperty('user_id', 'user1');
       expect(saved).toHaveProperty('session_id', 'session1');
-      expect(saved).toHaveProperty('workflow_before');
+      expect(saved).not.toHaveProperty('workflow_before');
       expect(saved).toHaveProperty('workflow_after');
       expect(saved).toHaveProperty('workflow_hash_before', 'hash1');
       expect(saved).toHaveProperty('workflow_hash_after', 'hash2');

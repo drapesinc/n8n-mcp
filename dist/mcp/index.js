@@ -41,6 +41,7 @@ const early_error_logger_1 = require("../telemetry/early-error-logger");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
 const fs_1 = require("fs");
 const stdin_teardown_1 = require("../utils/stdin-teardown");
+const stdio_guard_1 = require("../utils/stdio-guard");
 process.on('uncaughtException', (error) => {
     if (process.env.MCP_MODE !== 'stdio') {
         console.error('Uncaught Exception:', error);
@@ -73,14 +74,17 @@ function isContainerEnvironment() {
     }
 }
 async function main() {
+    (0, telemetry_cli_1.handleTelemetryCliIfPresent)(process.argv.slice(2));
+    const mode = process.env.MCP_MODE || 'stdio';
+    if (mode !== 'http') {
+        (0, stdio_guard_1.installStdioGuard)();
+    }
     const startTime = Date.now();
     const earlyLogger = early_error_logger_1.EarlyErrorLogger.getInstance();
     const checkpoints = [];
     try {
         earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.PROCESS_STARTED);
         checkpoints.push(startup_checkpoints_1.STARTUP_CHECKPOINTS.PROCESS_STARTED);
-        (0, telemetry_cli_1.handleTelemetryCliIfPresent)(process.argv.slice(2));
-        const mode = process.env.MCP_MODE || 'stdio';
         earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.TELEMETRY_INITIALIZING);
         checkpoints.push(startup_checkpoints_1.STARTUP_CHECKPOINTS.TELEMETRY_INITIALIZING);
         earlyLogger.logCheckpoint(startup_checkpoints_1.STARTUP_CHECKPOINTS.TELEMETRY_READY);

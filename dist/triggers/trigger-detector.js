@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.detectTriggerFromWorkflow = detectTriggerFromWorkflow;
+exports.classifyTriggerNode = classifyTriggerNode;
 exports.buildTriggerUrl = buildTriggerUrl;
 exports.describeTrigger = describeTrigger;
 const node_type_utils_1 = require("../utils/node-type-utils");
@@ -60,6 +61,17 @@ function detectTriggerFromWorkflow(workflow) {
         detected: false,
         reason: `Workflow has trigger nodes but none support external triggering (found: ${triggerNodes.map(n => n.type).join(', ')}). Only webhook, form, and chat triggers can be triggered via the API.`,
     };
+}
+function classifyTriggerNode(node) {
+    if (!isTriggerNodeType(node.type))
+        return null;
+    if (detectWebhookTrigger(node))
+        return 'webhook';
+    if (detectChatTrigger(node))
+        return 'chat';
+    if (detectFormTrigger(node))
+        return 'form';
+    return null;
 }
 function isTriggerNodeType(nodeType) {
     const normalized = (0, node_type_utils_1.normalizeNodeType)(nodeType).toLowerCase();

@@ -54,7 +54,6 @@ export interface WorkflowMutationRecord {
     id?: string;
     userId: string;
     sessionId: string;
-    workflowBefore: any;
     workflowAfter: any;
     workflowHashBefore: string;
     workflowHashAfter: string;

@@ -8,7 +8,7 @@ export declare const TemplateMetadataSchema: z.ZodObject<{
     key_features: z.ZodArray<z.ZodString, "many">;
     target_audience: z.ZodArray<z.ZodString, "many">;
 }, "strip", z.ZodTypeAny, {
-    complexity: "simple" | "medium" | "complex";
+    complexity: "medium" | "simple" | "complex";
     categories: string[];
     use_cases: string[];
     estimated_setup_minutes: number;
@@ -16,7 +16,7 @@ export declare const TemplateMetadataSchema: z.ZodObject<{
     key_features: string[];
     target_audience: string[];
 }, {
-    complexity: "simple" | "medium" | "complex";
+    complexity: "medium" | "simple" | "complex";
     categories: string[];
     use_cases: string[];
     estimated_setup_minutes: number;

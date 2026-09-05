@@ -3,6 +3,7 @@ import express from 'express';
 import { InstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
 import type { AdditionalTool } from './types/additional-tools';
+export declare function isImplementedMcpMethod(method: string): boolean;
 export interface SingleSessionHTTPServerOptions {
     additionalTools?: AdditionalTool[];
 }
@@ -26,6 +27,7 @@ export declare class SingleSessionHTTPServer {
     private canCreateSession;
     private isValidSessionId;
     private isJsonRpcNotification;
+    private handleUnimplementedMethod;
     private sanitizeErrorForClient;
     private updateSessionAccess;
     private authenticateRequest;

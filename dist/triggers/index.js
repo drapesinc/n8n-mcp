@@ -1,8 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BaseTriggerHandler = exports.ensureRegistryInitialized = exports.initializeTriggerRegistry = exports.TriggerRegistry = exports.describeTrigger = exports.buildTriggerUrl = exports.detectTriggerFromWorkflow = void 0;
+exports.BaseTriggerHandler = exports.ensureRegistryInitialized = exports.initializeTriggerRegistry = exports.TriggerRegistry = exports.describeTrigger = exports.buildTriggerUrl = exports.classifyTriggerNode = exports.detectTriggerFromWorkflow = void 0;
 var trigger_detector_1 = require("./trigger-detector");
 Object.defineProperty(exports, "detectTriggerFromWorkflow", { enumerable: true, get: function () { return trigger_detector_1.detectTriggerFromWorkflow; } });
+Object.defineProperty(exports, "classifyTriggerNode", { enumerable: true, get: function () { return trigger_detector_1.classifyTriggerNode; } });
 Object.defineProperty(exports, "buildTriggerUrl", { enumerable: true, get: function () { return trigger_detector_1.buildTriggerUrl; } });
 Object.defineProperty(exports, "describeTrigger", { enumerable: true, get: function () { return trigger_detector_1.describeTrigger; } });
 var trigger_registry_1 = require("./trigger-registry");

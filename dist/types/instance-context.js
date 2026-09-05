@@ -1,10 +1,33 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.pickInstanceContextFields = pickInstanceContextFields;
 exports.isInstanceContext = isInstanceContext;
 exports.validateInstanceContext = validateInstanceContext;
 exports.getInstanceScopeId = getInstanceScopeId;
 const crypto_1 = require("crypto");
 const ssrf_protection_1 = require("../utils/ssrf-protection");
+const n8n_api_1 = require("../config/n8n-api");
+const INSTANCE_CONTEXT_KEYS = [
+    'n8nApiUrl',
+    'n8nApiKey',
+    'n8nApiTimeout',
+    'n8nApiMaxRetries',
+    'n8nMcpAccessToken',
+    'instanceId',
+    'sessionId',
+    'metadata'
+];
+const _instanceContextKeysExhaustive = true;
+void _instanceContextKeysExhaustive;
+function pickInstanceContextFields(source) {
+    const picked = {};
+    for (const key of INSTANCE_CONTEXT_KEYS) {
+        if (source[key] !== undefined) {
+            picked[key] = source[key];
+        }
+    }
+    return picked;
+}
 function isValidUrl(url) {
     try {
         const parsed = new URL(url);
@@ -45,6 +68,12 @@ function isValidApiKey(key) {
         !key.toLowerCase().includes('placeholder') &&
         !key.toLowerCase().includes('example');
 }
+function isValidMcpAccessTokenField(token) {
+    if (!(0, n8n_api_1.isValidMcpAccessToken)(token))
+        return false;
+    const lowered = token.toLowerCase();
+    return !['placeholder', 'your_token_here', 'your-token-here', 'example', 'test-token'].includes(lowered);
+}
 function isInstanceContext(obj) {
     if (!obj || typeof obj !== 'object')
         return false;
@@ -56,11 +85,14 @@ function isInstanceContext(obj) {
         (typeof obj.n8nApiTimeout === 'number' && obj.n8nApiTimeout > 0);
     const hasValidRetries = obj.n8nApiMaxRetries === undefined ||
         (typeof obj.n8nApiMaxRetries === 'number' && obj.n8nApiMaxRetries >= 0);
+    const hasValidMcpAccessToken = obj.n8nMcpAccessToken === undefined ||
+        isValidMcpAccessTokenField(obj.n8nMcpAccessToken);
     const hasValidInstanceId = obj.instanceId === undefined || typeof obj.instanceId === 'string';
     const hasValidSessionId = obj.sessionId === undefined || typeof obj.sessionId === 'string';
     const hasValidMetadata = obj.metadata === undefined ||
         (typeof obj.metadata === 'object' && obj.metadata !== null);
     return hasValidUrl && hasValidKey && hasValidTimeout && hasValidRetries &&
+        hasValidMcpAccessToken &&
         hasValidInstanceId && hasValidSessionId && hasValidMetadata;
 }
 function validateInstanceContext(context) {
@@ -105,6 +137,9 @@ function validateInstanceContext(context) {
                 errors.push(`Invalid n8nApiKey: format validation failed - Ensure key is valid`);
             }
         }
+    }
+    if (context.n8nMcpAccessToken !== undefined && !isValidMcpAccessTokenField(context.n8nMcpAccessToken)) {
+        errors.push('Invalid n8nMcpAccessToken: must be a non-empty string without whitespace (max 4 KB) and not a placeholder value');
     }
     if (context.n8nApiTimeout !== undefined) {
         if (typeof context.n8nApiTimeout !== 'number') {

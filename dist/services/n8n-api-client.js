@@ -46,16 +46,43 @@ const node_groups_1 = require("./node-groups");
 const n8n_version_1 = require("./n8n-version");
 const GROUPS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas groups (added in 2.28); the workflow was saved without them.';
 const GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas group descriptions (added in 2.32); the descriptions were not saved.';
+const settingsRejectedWarning = (keys) => `This n8n version rejects the workflow settings ${keys.join(', ')}; they were left out of the write ` +
+    '(on an update, the values the instance already stores are unchanged). Upgrade n8n to set them.';
+const ROUTE_ABSENT_STATUSES = new Set([404, 405, 410]);
+function failureStatus(error) {
+    if (error instanceof n8n_errors_1.N8nApiError)
+        return error.statusCode;
+    return error?.response?.status;
+}
+function hasDeprecationHeader(headers) {
+    if (!headers || typeof headers !== 'object')
+        return false;
+    return Object.entries(headers).some(([name, value]) => name.toLowerCase() === 'deprecation' && value !== undefined && value !== '');
+}
 function withoutNodeGroups(payload) {
     const { nodeGroups, ...rest } = payload;
     return rest;
+}
+function withoutSettings(payload, keys) {
+    const drop = new Set(keys);
+    const settings = payload.settings;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings))
+        return payload;
+    const kept = Object.fromEntries(Object.entries(settings).filter(([key]) => !drop.has(key)));
+    if (Object.keys(kept).length === Object.keys(settings).length)
+        return payload;
+    return { ...payload, settings: Object.keys(kept).length > 0 ? kept : { executionOrder: 'v1' } };
 }
 class N8nApiClient {
     constructor(config) {
         this.versionInfo = null;
         this.versionPromise = null;
+        this.personalProjectId = null;
         this.pinnedAgentsPromise = null;
+        this.pinnedAgentsResolvedAt = 0;
         this.groupSupport = { groups: true, descriptions: true };
+        this.rejectedSettings = new Set();
+        this.modernPublishRoute = false;
         const { baseUrl, apiKey, timeout = 30000, maxRetries = 3, cfClientId, cfClientSecret } = config;
         this.maxRetries = maxRetries;
         this.cfClientId = cfClientId;
@@ -103,13 +130,71 @@ class N8nApiClient {
         this.client.interceptors.response.use((response) => {
             logger_1.logger.debug(`n8n API Response: ${response.status} ${response.config.url}`);
             return response;
-        }, (error) => {
+        }, async (error) => {
+            const retryAttempt = this.tryRetry(error);
+            if (retryAttempt) {
+                return retryAttempt;
+            }
             const n8nError = (0, n8n_errors_1.handleN8nApiError)(error);
+            if (n8nError.code === 'NO_RESPONSE') {
+                this.pinnedAgentsPromise = null;
+            }
             (0, n8n_errors_1.logN8nError)(n8nError, 'n8n API Response');
             return Promise.reject(n8nError);
         });
     }
+    tryRetry(error) {
+        const axiosError = error;
+        const config = axiosError?.config;
+        const noResponse = !!(axiosError && axiosError.request && !axiosError.response);
+        if (!noResponse || !config) {
+            return undefined;
+        }
+        const retryCount = config.__retryCount || 0;
+        if (retryCount >= this.maxRetries) {
+            return undefined;
+        }
+        const method = String(config.method || '');
+        if (!this.isRetryableConnectionError(axiosError, method)) {
+            return undefined;
+        }
+        config.__retryCount = retryCount + 1;
+        this.pinnedAgentsPromise = null;
+        const backoffMs = 250 * Math.pow(2, retryCount);
+        return new Promise((resolve, reject) => {
+            setTimeout(() => {
+                this.client.request(config).then(resolve, reject);
+            }, backoffMs);
+        });
+    }
+    isRetryableConnectionError(axiosError, method) {
+        const codes = this.extractErrorCodes(axiosError);
+        if (codes.length === 0)
+            return false;
+        const isIdempotent = method.toUpperCase() === 'GET' || method.toUpperCase() === 'HEAD';
+        const anyMethodCodes = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN']);
+        const idempotentOnlyCodes = new Set(['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED']);
+        return codes.some(code => anyMethodCodes.has(code) || (isIdempotent && idempotentOnlyCodes.has(code)));
+    }
+    extractErrorCodes(error) {
+        const codes = [];
+        if (error?.code)
+            codes.push(error.code);
+        const aggregateMembers = error?.errors ?? error?.cause?.errors;
+        if (Array.isArray(aggregateMembers)) {
+            for (const member of aggregateMembers) {
+                if (member?.code)
+                    codes.push(member.code);
+            }
+        }
+        return codes;
+    }
     getPinnedAgents() {
+        const isExpired = this.pinnedAgentsPromise !== null &&
+            Date.now() - this.pinnedAgentsResolvedAt > N8nApiClient.PINNED_AGENTS_TTL_MS;
+        if (isExpired) {
+            this.pinnedAgentsPromise = null;
+        }
         if (!this.pinnedAgentsPromise) {
             const promise = (async () => {
                 const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('../utils/ssrf-protection')));
@@ -117,8 +202,14 @@ class N8nApiClient {
                 if (!validation.valid || !validation.address || !validation.family) {
                     throw new Error(`SSRF protection: ${validation.reason || 'baseUrl rejected'}`);
                 }
-                return SSRFProtection.createPinnedAgents(validation.address, validation.family);
+                return SSRFProtection.createPinnedAgents(validation.addresses ?? [{ address: validation.address, family: validation.family }]);
             })();
+            this.pinnedAgentsResolvedAt = Date.now();
+            promise.then(() => {
+                if (this.pinnedAgentsPromise === promise) {
+                    this.pinnedAgentsResolvedAt = Date.now();
+                }
+            }, () => { });
             promise.catch(() => {
                 if (this.pinnedAgentsPromise === promise) {
                     this.pinnedAgentsPromise = null;
@@ -228,6 +319,81 @@ class N8nApiClient {
         }
     }
     async sendWorkflowWrite(payload, send, options) {
+        const sentBodies = new WeakMap();
+        const trackedSend = async (body) => {
+            try {
+                return await send(body);
+            }
+            catch (error) {
+                const apiError = (0, n8n_errors_1.handleN8nApiError)(error);
+                sentBodies.set(apiError, body);
+                throw apiError;
+            }
+        };
+        try {
+            return await this.sendWorkflowWriteWithSettingsFallback(payload, trackedSend, options);
+        }
+        catch (error) {
+            const apiError = (0, n8n_errors_1.handleN8nApiError)(error);
+            const enriched = (0, n8n_errors_1.enrichUnknownPropertyError)(apiError, sentBodies.get(apiError) ?? payload);
+            if (enriched !== apiError) {
+                logger_1.logger.warn('n8n rejected a workflow write with an unnamed additional property', {
+                    message: enriched.message
+                });
+            }
+            throw enriched;
+        }
+    }
+    async sendWorkflowWriteWithSettingsFallback(payload, send, options) {
+        const settings = payload.settings;
+        const remembered = settings
+            ? [...this.rejectedSettings].filter(key => Object.prototype.hasOwnProperty.call(settings, key))
+            : [];
+        let body = withoutSettings(payload, remembered);
+        if (remembered.length > 0)
+            options.onWarning?.(settingsRejectedWarning(remembered));
+        const steps = (0, n8n_version_1.settingsRejectionLadder)(body.settings);
+        const dropped = [];
+        const namedByN8n = [];
+        let lastGuess = [];
+        const settingsKeys = () => Object.keys(body.settings ?? {});
+        const maxSettingsRetries = steps.length + settingsKeys().length;
+        for (let step = 0, retries = 0;;) {
+            try {
+                const result = await this.sendWorkflowWriteWithGroupFallback(body, send, options);
+                if (dropped.length > 0) {
+                    const certain = lastGuess.length === 1 ? [...namedByN8n, ...lastGuess] : namedByN8n;
+                    for (const key of certain)
+                        this.rejectedSettings.add(key);
+                    options.onWarning?.(settingsRejectedWarning(dropped));
+                }
+                return result;
+            }
+            catch (error) {
+                const apiError = (0, n8n_errors_1.handleN8nApiError)(error);
+                if (!(0, n8n_errors_1.isUnknownSettingsPropertyError)(apiError) || retries++ >= maxSettingsRetries)
+                    throw apiError;
+                const present = new Set(settingsKeys());
+                const named = (0, n8n_errors_1.unknownSettingsKeysNamedBy)(apiError).filter(key => present.has(key));
+                let drop = named;
+                while (drop.length === 0 && step < steps.length) {
+                    drop = steps[step++].filter(key => present.has(key));
+                }
+                if (drop.length === 0)
+                    throw apiError;
+                if (named.length > 0) {
+                    namedByN8n.push(...named);
+                    lastGuess = [];
+                }
+                else {
+                    lastGuess = drop;
+                }
+                body = withoutSettings(body, drop);
+                dropped.push(...drop);
+            }
+        }
+    }
+    async sendWorkflowWriteWithGroupFallback(payload, send, options) {
         if (!Array.isArray(payload.nodeGroups)) {
             return await send(payload);
         }
@@ -257,8 +423,9 @@ class N8nApiClient {
                     try {
                         result = await send(withoutNodeGroups(payload));
                     }
-                    catch {
-                        throw apiError;
+                    catch (retryError) {
+                        const second = (0, n8n_errors_1.handleN8nApiError)(retryError);
+                        throw (0, n8n_errors_1.isUnknownSettingsPropertyError)(second) ? second : apiError;
                     }
                     this.groupSupport.groups = false;
                     options.onWarning?.(GROUPS_UNSUPPORTED_WARNING);
@@ -305,7 +472,7 @@ class N8nApiClient {
             return response.data;
         }
         catch (putError) {
-            if (putError.response?.status !== 405)
+            if (failureStatus(putError) !== 405)
                 throw putError;
             logger_1.logger.debug('PUT method not supported, falling back to PATCH');
             const response = await this.client.patch(`/workflows/${safeId}`, body);
@@ -355,7 +522,7 @@ class N8nApiClient {
                 cleanedWorkflow.settings = (0, n8n_version_1.cleanSettingsForVersion)(cleanedWorkflow.settings, versionInfo);
             }
             else {
-                logger_1.logger.warn('Could not determine n8n version, sending all known settings properties');
+                logger_1.logger.debug('n8n version unknown, forwarding workflow settings unfiltered');
             }
             const safeId = (0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId');
             const payload = this.repairGroupsForWrite(cleanedWorkflow, options);
@@ -382,23 +549,60 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
-    async activateWorkflow(id) {
-        try {
-            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}/activate`, {});
+    async postPublishRoute(id, modernPath, legacyPath) {
+        const safeId = (0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId');
+        let preferModern = this.modernPublishRoute;
+        if (!preferModern) {
+            const version = await this.getVersion();
+            preferModern = version !== null && (0, n8n_version_1.versionAtLeast)(version, 2, 33, 0);
+        }
+        const [primaryPath, fallbackPath] = preferModern
+            ? [modernPath, legacyPath]
+            : [legacyPath, modernPath];
+        const post = async (path) => {
+            const response = await this.client.post(`/workflows/${safeId}/${path}`, {});
+            if (path === legacyPath && hasDeprecationHeader(response.headers)) {
+                this.confirmModernPublishRoute(`/${legacyPath} answered with a Deprecation header`);
+            }
             return response.data;
+        };
+        let status;
+        let primaryError;
+        try {
+            return await post(primaryPath);
         }
         catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
+            status = failureStatus(error);
+            if (!ROUTE_ABSENT_STATUSES.has(status)) {
+                throw (0, n8n_errors_1.handleN8nApiError)(error);
+            }
+            primaryError = error;
+        }
+        logger_1.logger.debug(`POST /workflows/{id}/${primaryPath} returned ${status} - retrying /${fallbackPath} ` +
+            '(this n8n does not serve that route, or the workflow does not exist)');
+        try {
+            const workflow = await post(fallbackPath);
+            if (fallbackPath === modernPath) {
+                this.confirmModernPublishRoute(`/${legacyPath} is absent and /${modernPath} answered`);
+            }
+            return workflow;
+        }
+        catch (fallbackError) {
+            const fallbackStatus = failureStatus(fallbackError);
+            throw (0, n8n_errors_1.handleN8nApiError)(ROUTE_ABSENT_STATUSES.has(fallbackStatus) ? primaryError : fallbackError);
         }
     }
+    confirmModernPublishRoute(evidence) {
+        if (this.modernPublishRoute)
+            return;
+        this.modernPublishRoute = true;
+        logger_1.logger.debug(`Using the publish/unpublish routes for this instance: ${evidence}`);
+    }
+    async activateWorkflow(id) {
+        return this.postPublishRoute(id, 'publish', 'activate');
+    }
     async deactivateWorkflow(id) {
-        try {
-            const response = await this.client.post(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'workflowId')}/deactivate`, {});
-            return response.data;
-        }
-        catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
-        }
+        return this.postPublishRoute(id, 'unpublish', 'deactivate');
     }
     async listWorkflows(params = {}) {
         try {
@@ -541,7 +745,7 @@ class N8nApiClient {
                 timeout: waitForResponse ? 120000 : 30000,
             };
             const pinned = validation.address && validation.family
-                ? SSRFProtection.createPinnedAgents(validation.address, validation.family)
+                ? SSRFProtection.createPinnedAgents(validation.addresses ?? [{ address: validation.address, family: validation.family }])
                 : undefined;
             const webhookClient = axios_1.default.create({
                 baseURL: new URL('/', webhookUrl).toString(),
@@ -790,7 +994,7 @@ class N8nApiClient {
         try {
             const response = await this.client.get(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows`, {
                 params,
-                paramsSerializer: (p) => this.serializeDataTableParams(p),
+                paramsSerializer: (p) => this.serializeQueryParams(p),
             });
             return this.validateListResponse(response.data, 'data-table-rows');
         }
@@ -829,7 +1033,7 @@ class N8nApiClient {
         try {
             const response = await this.client.delete(`/data-tables/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'dataTableId')}/rows/delete`, {
                 params,
-                paramsSerializer: (p) => this.serializeDataTableParams(p),
+                paramsSerializer: (p) => this.serializeQueryParams(p),
             });
             return response.data;
         }
@@ -837,7 +1041,120 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
-    serializeDataTableParams(params) {
+    async createFolder(projectId, data) {
+        try {
+            const response = await this.client.post(`/projects/${(0, validation_schemas_1.encodeApiPathSegment)(projectId, 'projectId')}/folders`, data);
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async listFolders(projectId, params = {}) {
+        try {
+            const { filter, select, ...rest } = params;
+            const response = await this.client.get(`/projects/${(0, validation_schemas_1.encodeApiPathSegment)(projectId, 'projectId')}/folders`, {
+                params: {
+                    ...rest,
+                    ...(filter && Object.keys(filter).length > 0 ? { filter: JSON.stringify(filter) } : {}),
+                    ...(select && select.length > 0 ? { select: JSON.stringify(select) } : {}),
+                },
+                paramsSerializer: (p) => this.serializeQueryParams(p),
+            });
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async getFolder(projectId, folderId) {
+        try {
+            const response = await this.client.get(`/projects/${(0, validation_schemas_1.encodeApiPathSegment)(projectId, 'projectId')}/folders/${(0, validation_schemas_1.encodeApiPathSegment)(folderId, 'folderId')}`);
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async updateFolder(projectId, folderId, data) {
+        try {
+            const response = await this.client.patch(`/projects/${(0, validation_schemas_1.encodeApiPathSegment)(projectId, 'projectId')}/folders/${(0, validation_schemas_1.encodeApiPathSegment)(folderId, 'folderId')}`, data);
+            return response.data;
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async deleteFolder(projectId, folderId, transferToFolderId) {
+        try {
+            await this.client.delete(`/projects/${(0, validation_schemas_1.encodeApiPathSegment)(projectId, 'projectId')}/folders/${(0, validation_schemas_1.encodeApiPathSegment)(folderId, 'folderId')}`, { params: transferToFolderId ? { transferToFolderId } : {} });
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async listProjects(limit = 100) {
+        try {
+            const response = await this.client.get('/projects', { params: { limit } });
+            const payload = response.data;
+            return Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : [];
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+    }
+    async resolvePersonalProjectId() {
+        if (this.personalProjectId)
+            return this.personalProjectId;
+        let projects = [];
+        let truncated = false;
+        let projectsApiAvailable = true;
+        try {
+            const response = await this.client.get('/projects', { params: { limit: 100 } });
+            if (Array.isArray(response.data?.data))
+                projects = response.data.data;
+            truncated = Boolean(response.data?.nextCursor);
+        }
+        catch (error) {
+            const apiError = (0, n8n_errors_1.handleN8nApiError)(error);
+            if (apiError.statusCode !== 403 && apiError.statusCode !== 404)
+                throw apiError;
+            projectsApiAvailable = false;
+        }
+        if (projectsApiAvailable) {
+            if (truncated) {
+                throw new n8n_errors_1.N8nValidationError(`This instance has more projects than one listing page; resolving 'personal' from a ` +
+                    `truncated listing could pick the wrong project. Pass an explicit projectId.`);
+            }
+            const personal = projects.filter(p => p.type === 'personal');
+            if (personal.length === 1) {
+                this.personalProjectId = personal[0].id;
+                return personal[0].id;
+            }
+            if (personal.length > 1) {
+                throw new n8n_errors_1.N8nValidationError(`This API key sees ${personal.length} personal projects, so 'personal' is ambiguous. ` +
+                    `Pass an explicit projectId. Visible personal projects: ` +
+                    personal.map(p => `${p.id} (${p.name})`).join(', '));
+            }
+            throw new n8n_errors_1.N8nValidationError(`The projects listing shows no personal project for this API key. Pass an explicit projectId.`);
+        }
+        try {
+            const response = await this.client.get('/workflows', { params: { limit: 1 } });
+            const workflow = Array.isArray(response.data?.data) ? response.data.data[0] : undefined;
+            const projectId = workflow?.shared?.[0]?.projectId;
+            if (typeof projectId === 'string' && projectId.length > 0) {
+                this.personalProjectId = projectId;
+                return projectId;
+            }
+        }
+        catch (error) {
+            throw (0, n8n_errors_1.handleN8nApiError)(error);
+        }
+        throw new n8n_errors_1.N8nValidationError(`Could not resolve the 'personal' project: the projects API is not available on this instance ` +
+            `and no workflow exists to infer the project from. Create any workflow first, or pass an ` +
+            `explicit projectId. (The folder 'create' action itself accepts 'personal' directly.)`);
+    }
+    serializeQueryParams(params) {
         const parts = [];
         for (const [key, value] of Object.entries(params)) {
             if (value === undefined || value === null)
@@ -872,4 +1189,5 @@ class N8nApiClient {
     }
 }
 exports.N8nApiClient = N8nApiClient;
+N8nApiClient.PINNED_AGENTS_TTL_MS = 60000;
 //# sourceMappingURL=n8n-api-client.js.map

@@ -1,7 +1,10 @@
 export { N8NMCPEngine, EngineHealth, EngineOptions } from './mcp-engine';
+export { probeOfficialMcp } from './services/n8n-official-mcp-client';
+export type { OfficialMcpCapabilities, OfficialMcpErrorCode } from './services/n8n-official-mcp-client';
 export { SingleSessionHTTPServer } from './http-server-single-session';
 export { ConsoleManager } from './utils/console-manager';
 export { N8NDocumentationMCPServer } from './mcp/server';
+export { installStdioGuard, StdioGuardOptions, OriginalConsole } from './utils/stdio-guard';
 export type { InstanceContext } from './types/instance-context';
 export { validateInstanceContext, isInstanceContext } from './types/instance-context';
 export type { SessionState } from './types/session-state';

@@ -75,12 +75,21 @@ exports.handleInsertRows = handleInsertRows;
 exports.handleUpdateRows = handleUpdateRows;
 exports.handleUpsertRows = handleUpsertRows;
 exports.handleDeleteRows = handleDeleteRows;
+exports.handleAddColumn = handleAddColumn;
+exports.handleDeleteColumn = handleDeleteColumn;
+exports.handleRenameColumn = handleRenameColumn;
 exports.handleListCredentials = handleListCredentials;
 exports.handleGetCredential = handleGetCredential;
 exports.handleCreateCredential = handleCreateCredential;
 exports.handleUpdateCredential = handleUpdateCredential;
 exports.handleDeleteCredential = handleDeleteCredential;
 exports.handleGetCredentialSchema = handleGetCredentialSchema;
+exports.handleCreateFolder = handleCreateFolder;
+exports.handleListFolders = handleListFolders;
+exports.handleGetFolder = handleGetFolder;
+exports.handleRenameFolder = handleRenameFolder;
+exports.handleMoveFolder = handleMoveFolder;
+exports.handleDeleteFolder = handleDeleteFolder;
 exports.handleAuditInstance = handleAuditInstance;
 const crypto_1 = require("crypto");
 const n8n_api_client_1 = require("../services/n8n-api-client");
@@ -107,6 +116,11 @@ const execution_processor_1 = require("../services/execution-processor");
 const npm_version_checker_1 = require("../utils/npm-version-checker");
 const workspace_api_client_1 = require("../services/workspace-api-client");
 const mcp_input_normalizer_1 = require("../utils/mcp-input-normalizer");
+const official_mcp_access_1 = require("./official-mcp-access");
+const handlers_official_tools_1 = require("./handlers-official-tools");
+const mcp_exposure_1 = require("../services/mcp-exposure");
+const tool_policy_1 = require("./tool-policy");
+const agents_action_map_1 = require("./agents-action-map");
 let defaultApiClient = null;
 let lastDefaultConfigUrl = null;
 const cacheMutex = new cache_utils_1.CacheMutex();
@@ -237,9 +251,10 @@ const createWorkflowSchema = zod_1.z.object({
         saveExecutionProgress: zod_1.z.boolean().optional(),
         executionTimeout: zod_1.z.number().optional(),
         errorWorkflow: zod_1.z.string().optional(),
-    })).optional(),
+    }).passthrough()).optional(),
     nodeGroups: zod_1.z.any().optional(),
     projectId: zod_1.z.string().optional(),
+    parentFolderId: optionalEmptyAware(zod_1.z.string().trim().min(1)),
 });
 const updateWorkflowSchema = zod_1.z.object({
     id: zod_1.z.string(),
@@ -248,6 +263,7 @@ const updateWorkflowSchema = zod_1.z.object({
     connections: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowConnections, zod_1.z.record(zod_1.z.string(), zod_1.z.any())).optional(),
     settings: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
     nodeGroups: zod_1.z.any().optional(),
+    parentFolderId: optionalEmptyAware(zod_1.z.string().trim().min(1).nullable()),
     createBackup: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
@@ -291,6 +307,7 @@ const autofixWorkflowSchema = zod_1.z.object({
 });
 const testWorkflowSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
+    method: optionalEmptyAware(zod_1.z.enum(['auto', 'trigger', 'prepare', 'pinned', 'direct'])),
     triggerType: optionalEmptyAware(zod_1.z.enum(['webhook', 'form', 'chat'])),
     httpMethod: optionalEmptyAware(zod_1.z.enum(['GET', 'POST', 'PUT', 'DELETE'])),
     webhookPath: optionalEmptyAware(zod_1.z.string()),
@@ -300,6 +317,11 @@ const testWorkflowSchema = zod_1.z.object({
     headers: zod_1.z.record(zod_1.z.string()).optional(),
     timeout: zod_1.z.number().optional(),
     waitForResponse: zod_1.z.boolean().optional(),
+    exposeToMcp: zod_1.z.boolean().optional(),
+    timeoutMs: zod_1.z.number().int().min(agents_action_map_1.MIN_TIMEOUT_MS).max(agents_action_map_1.MAX_TIMEOUT_MS).optional(),
+    pinData: zod_1.z.record(zod_1.z.array(zod_1.z.unknown())).optional(),
+    triggerNodeName: optionalEmptyAware(zod_1.z.string()),
+    executionMode: optionalEmptyAware(zod_1.z.enum(['manual', 'production'])),
 });
 const listExecutionsSchema = zod_1.z.object({
     limit: zod_1.z.number().min(1).max(100).optional(),
@@ -333,14 +355,20 @@ const cancelTestRunSchema = zod_1.z.object({
     workflowId: testRunPathId,
     runId: testRunPathId,
 });
+const versionIdValue = zod_1.z.union([zod_1.z.number().int(), zod_1.z.string().min(1)]);
 const workflowVersionsSchema = zod_1.z.object({
-    mode: zod_1.z.enum(['list', 'get', 'rollback', 'delete', 'prune']),
+    mode: zod_1.z.preprocess(emptyToUndefined, zod_1.z.enum(['list', 'get', 'rollback', 'delete', 'prune', 'diff']).default('list')),
+    source: zod_1.z.enum(['local', 'native']).optional(),
     workflowId: zod_1.z.string().optional(),
-    versionId: zod_1.z.number().optional(),
+    versionId: versionIdValue.optional(),
+    toVersionId: versionIdValue.optional(),
     limit: zod_1.z.number().default(10).optional(),
+    offset: zod_1.z.number().int().min(0).optional(),
     validateBefore: zod_1.z.boolean().default(true).optional(),
     deleteAll: zod_1.z.boolean().default(false).optional(),
     maxVersions: zod_1.z.number().default(10).optional(),
+    exposeToMcp: zod_1.z.boolean().optional(),
+    timeoutMs: zod_1.z.number().int().min(5000).max(600000).optional(),
 });
 async function handleCreateWorkflow(args, context) {
     try {
@@ -717,11 +745,13 @@ async function handleUpdateWorkflow(args, repository, context) {
     const sessionId = `mutation_${Date.now()}_${(0, crypto_1.randomUUID)()}`;
     let workflowBefore = null;
     let userIntent = 'Full workflow update';
+    let sentParentFolderId = false;
     try {
         const client = ensureApiConfigured(context);
         const input = updateWorkflowSchema.parse(args);
         const { id, createBackup, intent, ...updateData } = input;
         userIntent = intent || 'Full workflow update';
+        sentParentFolderId = updateData.parentFolderId !== undefined;
         const current = await client.getWorkflow(id);
         workflowBefore = JSON.parse(JSON.stringify(current));
         if (updateData.nodes && current.nodes) {
@@ -842,11 +872,16 @@ async function handleUpdateWorkflow(args, repository, context) {
             };
         }
         if (error instanceof n8n_errors_1.N8nApiError) {
+            const baseDetails = error.details;
             return {
                 success: false,
-                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
+                error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error) + (sentParentFolderId
+                    ? ' A folder move in the failed update may still have persisted - n8n cannot report or restore folder placement.'
+                    : ''),
                 code: error.code,
-                details: error.details
+                details: sentParentFolderId
+                    ? { ...(baseDetails ?? {}), folderMoveMayHavePersisted: true }
+                    : baseDetails
             };
         }
         return {
@@ -1197,16 +1232,151 @@ async function handleAutofixWorkflow(args, repository, context) {
         };
     }
 }
+const OFFICIAL_TEST_ACTION = 'test_workflow';
+const FAILED_RUN_STATUSES = new Set(['error', 'crashed', 'canceled']);
+const LEGACY_TIMEOUT_SCOPE_WARNING = 'timeout applies to the HTTP trigger path only; use timeoutMs for method prepare/pinned/direct';
+const OFFICIAL_TEST_METHODS = new Set(['prepare', 'pinned', 'direct']);
 async function handleTestWorkflow(args, context) {
     try {
-        const client = ensureApiConfigured(context);
         const input = testWorkflowSchema.parse(args);
-        const { detectTriggerFromWorkflow, ensureRegistryInitialized, TriggerRegistry, } = await Promise.resolve().then(() => __importStar(require('../triggers')));
-        await ensureRegistryInitialized();
+        const method = input.method ?? 'auto';
+        const apiClient = getN8nApiClient(context);
+        const officialTimeoutMs = input.timeoutMs ?? (method === 'prepare' ? agents_action_map_1.DEFAULT_TIMEOUT_MS : agents_action_map_1.PINNED_TIMEOUT_MS);
+        const routeOfficial = async (aliases, officialArgs, idempotent, resolvedMethod) => {
+            const response = await (0, mcp_exposure_1.withMcpExposure)({
+                apiClient,
+                workflowId: input.workflowId,
+                exposeToMcp: input.exposeToMcp,
+                action: OFFICIAL_TEST_ACTION,
+                toolName: 'n8n_test_workflow',
+                context,
+            }, () => (0, handlers_official_tools_1.callOfficialTool)(context, aliases, officialArgs, officialTimeoutMs, OFFICIAL_TEST_ACTION, idempotent));
+            const decorated = { ...response, method: resolvedMethod, backend: 'official-mcp' };
+            if (input.timeout !== undefined && decorated.success) {
+                decorated.warnings = [...(decorated.warnings ?? []), LEGACY_TIMEOUT_SCOPE_WARNING];
+            }
+            return decorated;
+        };
+        if (method === 'pinned' && Object.keys(input.pinData ?? {}).length === 0) {
+            return {
+                success: false,
+                code: 'INVALID_ARGS',
+                method: 'pinned',
+                error: 'pinData is required for method: pinned (keys are node names, values are arrays of items wrapped as { "json": { ... } }). Run method: prepare first to see which nodes need pinned data.',
+            };
+        }
+        if ((method === 'auto' || method === 'trigger') && (0, tool_policy_1.isOperationDisabled)('n8n_test_workflow', 'trigger')) {
+            return {
+                success: false,
+                code: 'OPERATION_DISABLED',
+                method: 'trigger',
+                backend: 'public-api',
+                error: "Operation 'trigger' on tool 'n8n_test_workflow' is disabled by server policy.",
+                details: { requestedMethod: method },
+            };
+        }
+        const isPlainPrepare = method === 'prepare' && input.exposeToMcp !== true;
+        if (!isPlainPrepare && !(0, mcp_exposure_1.publicApiMatchesContext)(context)) {
+            return {
+                success: false,
+                code: 'NOT_CONFIGURED',
+                method,
+                backend: OFFICIAL_TEST_METHODS.has(method) ? 'official-mcp' : 'public-api',
+                error: mcp_exposure_1.PUBLIC_API_CONTEXT_HINT,
+            };
+        }
+        if (method === 'prepare') {
+            return routeOfficial(['prepare_workflow_pin_data'], { workflowId: input.workflowId }, true, 'prepare');
+        }
+        const client = ensureApiConfigured(context);
+        const { detectTriggerFromWorkflow, classifyTriggerNode, ensureRegistryInitialized, TriggerRegistry, } = await Promise.resolve().then(() => __importStar(require('../triggers')));
         const workflow = await client.getWorkflow(input.workflowId);
+        const detection = detectTriggerFromWorkflow(workflow);
+        const detectedNodeName = detection.trigger?.node.name;
+        if (method === 'pinned') {
+            const pinnedTriggerNode = input.triggerNodeName ?? detectedNodeName;
+            const response = await routeOfficial(['test_workflow'], {
+                workflowId: input.workflowId,
+                pinData: input.pinData,
+                ...(pinnedTriggerNode ? { triggerNodeName: pinnedTriggerNode } : {}),
+                timeout: Math.max(1, Math.floor(officialTimeoutMs / 1000) - 5),
+            }, false, 'pinned');
+            if (!response.success)
+                return response;
+            const run = (response.data ?? {});
+            const executionId = typeof run.executionId === 'string' ? run.executionId : undefined;
+            const status = typeof run.status === 'string' ? run.status : undefined;
+            if (status && FAILED_RUN_STATUSES.has(status)) {
+                return {
+                    ...response,
+                    success: false,
+                    code: 'EXECUTION_FAILED',
+                    error: typeof run.error === 'string' ? run.error : `Run finished with status ${status}`,
+                    ...(executionId ? { executionId } : {}),
+                };
+            }
+            return { ...response, ...(executionId ? { executionId } : {}) };
+        }
+        if (method === 'direct') {
+            const namedNode = input.triggerNodeName
+                ? (workflow.nodes ?? []).find(node => node.name === input.triggerNodeName)
+                : undefined;
+            if (input.triggerNodeName && !namedNode) {
+                return {
+                    success: false,
+                    code: 'INVALID_ARGS',
+                    method: 'direct',
+                    backend: 'official-mcp',
+                    error: `triggerNodeName "${input.triggerNodeName}" is not a node of workflow ${input.workflowId}`,
+                };
+            }
+            const triggerKind = input.triggerNodeName
+                ? (namedNode ? classifyTriggerNode(namedNode) : null)
+                : (detection.trigger?.type ?? null);
+            let inputs;
+            if (input.message !== undefined) {
+                inputs = { chatInput: input.message };
+            }
+            else if (input.data && triggerKind === 'form') {
+                inputs = { formData: input.data };
+            }
+            else if (input.data || input.headers || input.httpMethod) {
+                inputs = {
+                    webhookData: {
+                        method: input.httpMethod ?? 'POST',
+                        ...(input.data ? { body: input.data } : {}),
+                        ...(input.headers ? { headers: input.headers } : {}),
+                    },
+                };
+            }
+            const directTriggerNode = input.triggerNodeName ?? (inputs ? detectedNodeName : undefined);
+            if (inputs && !directTriggerNode) {
+                return {
+                    success: false,
+                    code: 'INVALID_ARGS',
+                    method: 'direct',
+                    error: 'triggerNodeName is required when inputs are given and no trigger node could be detected',
+                    details: { workflowId: input.workflowId, reason: detection.reason },
+                };
+            }
+            const response = await routeOfficial(['execute_workflow'], {
+                workflowId: input.workflowId,
+                executionMode: input.executionMode ?? 'manual',
+                ...(directTriggerNode ? { triggerNodeName: directTriggerNode } : {}),
+                ...(inputs ? { inputs } : {}),
+            }, false, 'direct');
+            if (!response.success)
+                return response;
+            const executionId = response.data?.executionId;
+            return {
+                ...response,
+                ...(typeof executionId === 'string' ? { executionId } : {}),
+                hint: 'execute_workflow returns as soon as the run starts; poll n8n_executions with the executionId for the result.',
+            };
+        }
+        await ensureRegistryInitialized();
         let triggerType = input.triggerType;
         let triggerInfo;
-        const detection = detectTriggerFromWorkflow(workflow);
         if (!triggerType) {
             if (detection.detected && detection.trigger) {
                 triggerType = detection.trigger.type;
@@ -1216,10 +1386,13 @@ async function handleTestWorkflow(args, context) {
                 return {
                     success: false,
                     error: 'Workflow cannot be triggered externally',
+                    method,
+                    backend: 'public-api',
                     details: {
                         workflowId: input.workflowId,
                         reason: detection.reason,
-                        hint: 'Only workflows with webhook, form, or chat triggers can be executed via the API. Add one of these trigger nodes to your workflow.',
+                        hint: 'Only workflows with webhook, form, or chat triggers can be executed via the API. Add one of these trigger nodes to your workflow.'
+                            + ' To run it anyway through n8n\'s MCP server, call again with method: direct (executionMode manual) or method: pinned with pinData from method: prepare — both need N8N_MCP_ACCESS_TOKEN.',
                     },
                 };
             }
@@ -1232,6 +1405,8 @@ async function handleTestWorkflow(args, context) {
                 return {
                     success: false,
                     error: `Workflow does not have a ${triggerType} trigger`,
+                    method: 'trigger',
+                    backend: 'public-api',
                     details: {
                         workflowId: input.workflowId,
                         requestedTrigger: triggerType,
@@ -1248,6 +1423,8 @@ async function handleTestWorkflow(args, context) {
             return {
                 success: false,
                 error: `No handler registered for trigger type: ${triggerType}`,
+                method: 'trigger',
+                backend: 'public-api',
                 details: {
                     supportedTypes: TriggerRegistry.getRegisteredTypes(),
                 },
@@ -1257,6 +1434,8 @@ async function handleTestWorkflow(args, context) {
             return {
                 success: false,
                 error: 'Workflow must be active to trigger via this method',
+                method: 'trigger',
+                backend: 'public-api',
                 details: {
                     workflowId: input.workflowId,
                     triggerType,
@@ -1268,6 +1447,8 @@ async function handleTestWorkflow(args, context) {
             return {
                 success: false,
                 error: 'Chat trigger requires a message parameter',
+                method: 'trigger',
+                backend: 'public-api',
                 details: {
                     hint: 'Provide message="your message" for chat triggers',
                 },
@@ -1295,6 +1476,8 @@ async function handleTestWorkflow(args, context) {
                 : response.error,
             executionId: response.executionId,
             workflowId: input.workflowId,
+            method: 'trigger',
+            backend: 'public-api',
             details: {
                 triggerType,
                 metadata: response.metadata,
@@ -1303,9 +1486,16 @@ async function handleTestWorkflow(args, context) {
         };
     }
     catch (error) {
+        const raw = (args && typeof args === 'object' ? args : {});
+        const rawMethod = typeof raw.method === 'string' && raw.method.trim() !== '' ? raw.method : 'auto';
+        const label = {
+            method: rawMethod,
+            backend: OFFICIAL_TEST_METHODS.has(rawMethod) ? 'official-mcp' : 'public-api',
+        };
         if (error instanceof zod_1.z.ZodError) {
             return {
                 success: false,
+                ...label,
                 error: 'Invalid input',
                 details: { errors: error.errors },
             };
@@ -1313,6 +1503,7 @@ async function handleTestWorkflow(args, context) {
         if (error instanceof n8n_errors_1.N8nApiError) {
             return {
                 success: false,
+                ...label,
                 error: (0, n8n_errors_1.getUserFriendlyErrorMessage)(error),
                 code: error.code,
                 details: error.details,
@@ -1320,6 +1511,7 @@ async function handleTestWorkflow(args, context) {
         }
         return {
             success: false,
+            ...label,
             error: error instanceof Error ? error.message : 'Unknown error occurred',
         };
     }
@@ -1672,6 +1864,7 @@ async function handleHealthCheck(context) {
             status: health.status,
             instanceId: health.instanceId,
             n8nVersion: health.n8nVersion,
+            ...(health.n8nVersion ? {} : { n8nVersionNote: n8n_version_1.N8N_VERSION_UNAVAILABLE_NOTE }),
             features: health.features,
             apiUrl: resolveN8nApiConfigForResponse(context)?.baseUrl,
             mcpVersion,
@@ -1691,6 +1884,7 @@ async function handleHealthCheck(context) {
                 cachedInstances: cacheMetricsData.size
             }
         };
+        responseData.officialMcp = await (0, official_mcp_access_1.buildOfficialMcpHealth)(context, false);
         responseData.nextSteps = [
             '• Create workflow: n8n_create_workflow',
             '• List workflows: n8n_list_workflows',
@@ -1937,7 +2131,7 @@ async function handleDiagnostic(request, context) {
         try {
             const health = await apiClient.healthCheck();
             apiStatus.connected = true;
-            apiStatus.version = health.n8nVersion || 'unknown';
+            apiStatus.version = health.n8nVersion || n8n_version_1.N8N_VERSION_UNAVAILABLE_NOTE;
         }
         catch (error) {
             apiStatus.error = error instanceof Error ? error.message : 'Unknown error';
@@ -2006,6 +2200,7 @@ async function handleDiagnostic(request, context) {
         },
         modeSpecificDebug: getModeSpecificDebug(mcpMode)
     };
+    diagnostic.officialMcp = await (0, official_mcp_access_1.buildOfficialMcpHealth)(context, true);
     if (apiConfigured && apiStatus.connected) {
         diagnostic.nextSteps = {
             message: '✓ API connected! Here\'s what you can do:',
@@ -2149,146 +2344,322 @@ async function handleDiagnostic(request, context) {
         data: diagnostic
     };
 }
+const VERSIONS_ACTION = 'workflow_versions';
+const VERSIONS_TIMEOUT_MS = 30000;
+const NATIVE_VERSIONS_LIMIT_CAP = 50;
+const NATIVE_VALIDATION_NOTE = 'not available for native versions';
+function withDiffFormat(data, format) {
+    return data && typeof data === 'object' && !Array.isArray(data)
+        ? { ...data, format }
+        : { diff: data, format };
+}
+const LOCAL_VERSION_ID_PATTERN = /^-?\d+$/;
+function parseLocalVersionId(value, field) {
+    if (value === undefined)
+        return { ok: true, value: undefined };
+    if (typeof value === 'string' && value.trim() === '') {
+        return { ok: false, error: `${field} must be an integer version id for source: local` };
+    }
+    if (typeof value === 'string' && !LOCAL_VERSION_ID_PATTERN.test(value.trim())) {
+        return {
+            ok: false,
+            error: `${field} must be an integer version id for source: local (got ${JSON.stringify(value)}). n8n's own string version ids need source: native.`,
+        };
+    }
+    const parsed = typeof value === 'number' ? value : Number(value.trim());
+    if (!Number.isInteger(parsed)) {
+        return {
+            ok: false,
+            error: `${field} must be an integer version id for source: local (got ${JSON.stringify(value)}). n8n's own string version ids need source: native.`,
+        };
+    }
+    return { ok: true, value: parsed };
+}
+async function handleNativeWorkflowVersions(input, context) {
+    const mode = input.mode;
+    const label = (response) => ({
+        ...response,
+        mode,
+        source: 'native',
+        backend: 'official-mcp',
+    });
+    const invalid = (error) => label({ success: false, action: VERSIONS_ACTION, code: 'INVALID_ARGS', error });
+    if (mode === 'delete' || mode === 'prune') {
+        return label({
+            success: false,
+            action: VERSIONS_ACTION,
+            code: 'MODE_NOT_SUPPORTED_FOR_SOURCE',
+            error: `n8n's own version history cannot be ${mode === 'delete' ? 'deleted' : 'pruned'} through MCP; use source: local for n8n-mcp snapshots`,
+        });
+    }
+    const workflowId = input.workflowId;
+    if (!workflowId) {
+        return invalid(`workflowId is required for source: native (mode: ${mode})`);
+    }
+    if (mode !== 'list' && input.versionId === undefined) {
+        return invalid(`versionId is required for mode: ${mode}`);
+    }
+    if (mode === 'diff' && input.toVersionId === undefined) {
+        return invalid('toVersionId is required for mode: diff');
+    }
+    const versionId = input.versionId === undefined ? undefined : String(input.versionId);
+    const toVersionId = input.toVersionId === undefined ? undefined : String(input.toVersionId);
+    let aliases;
+    let officialArgs;
+    let idempotent = true;
+    switch (mode) {
+        case 'list':
+            aliases = ['get_workflow_history'];
+            officialArgs = {
+                workflowId,
+                limit: Math.max(1, Math.min(NATIVE_VERSIONS_LIMIT_CAP, Math.floor(input.limit ?? 10))),
+                offset: Math.max(0, Math.floor(input.offset ?? 0)),
+            };
+            break;
+        case 'get':
+            aliases = ['get_workflow_version'];
+            officialArgs = { workflowId, versionId };
+            break;
+        case 'diff':
+            aliases = ['get_workflow_versions_diff'];
+            officialArgs = { workflowId, fromVersionId: versionId, toVersionId };
+            break;
+        case 'rollback':
+            aliases = ['restore_workflow_version'];
+            officialArgs = { workflowId, versionId };
+            idempotent = false;
+            break;
+        default:
+            return invalid(`Unknown mode: ${mode}`);
+    }
+    const response = await (0, mcp_exposure_1.withMcpExposure)({
+        apiClient: getN8nApiClient(context),
+        workflowId,
+        exposeToMcp: input.exposeToMcp,
+        action: VERSIONS_ACTION,
+        toolName: 'n8n_workflow_versions',
+        context,
+    }, () => (0, handlers_official_tools_1.callOfficialTool)(context, aliases, officialArgs, input.timeoutMs ?? VERSIONS_TIMEOUT_MS, VERSIONS_ACTION, idempotent));
+    const labelled = label(response);
+    if (mode === 'diff' && labelled.success) {
+        labelled.data = withDiffFormat(labelled.data, 'n8n');
+    }
+    if (mode === 'rollback' && labelled.success) {
+        labelled.validation = NATIVE_VALIDATION_NOTE;
+    }
+    return labelled;
+}
+async function handleLocalWorkflowVersions(input, versionId, toVersionId, repository, context) {
+    const client = getN8nApiClient(context);
+    const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, (0, instance_context_1.getInstanceScopeId)(context));
+    switch (input.mode) {
+        case 'list': {
+            if (!input.workflowId) {
+                return {
+                    success: false,
+                    error: 'workflowId is required for list mode'
+                };
+            }
+            const versions = await versioningService.getVersionHistory(input.workflowId, input.limit);
+            return {
+                success: true,
+                data: {
+                    workflowId: input.workflowId,
+                    versions,
+                    count: versions.length,
+                    message: `Found ${versions.length} version(s) for workflow ${input.workflowId}`
+                }
+            };
+        }
+        case 'get': {
+            if (!versionId) {
+                return {
+                    success: false,
+                    error: 'versionId is required for get mode'
+                };
+            }
+            const version = await versioningService.getVersion(versionId);
+            if (!version) {
+                return {
+                    success: false,
+                    error: `Version ${versionId} not found`
+                };
+            }
+            return {
+                success: true,
+                data: version
+            };
+        }
+        case 'rollback': {
+            if (!input.workflowId) {
+                return {
+                    success: false,
+                    error: 'workflowId is required for rollback mode'
+                };
+            }
+            if (!client) {
+                return {
+                    success: false,
+                    error: 'n8n API not configured. Cannot perform rollback without API access.'
+                };
+            }
+            const result = await versioningService.restoreVersion(input.workflowId, versionId, input.validateBefore);
+            return {
+                success: result.success,
+                data: result.success ? result : undefined,
+                error: result.success ? undefined : result.message,
+                details: result.success ? undefined : {
+                    validationErrors: result.validationErrors
+                }
+            };
+        }
+        case 'delete': {
+            if (input.deleteAll) {
+                if (!input.workflowId) {
+                    return {
+                        success: false,
+                        error: 'workflowId is required for deleteAll mode'
+                    };
+                }
+                const result = await versioningService.deleteAllVersions(input.workflowId);
+                return {
+                    success: true,
+                    data: {
+                        workflowId: input.workflowId,
+                        deleted: result.deleted,
+                        message: result.message
+                    }
+                };
+            }
+            else {
+                if (!versionId) {
+                    return {
+                        success: false,
+                        error: 'versionId is required for single version delete'
+                    };
+                }
+                const result = await versioningService.deleteVersion(versionId);
+                return {
+                    success: result.success,
+                    data: result.success ? { message: result.message } : undefined,
+                    error: result.success ? undefined : result.message
+                };
+            }
+        }
+        case 'prune': {
+            if (!input.workflowId) {
+                return {
+                    success: false,
+                    error: 'workflowId is required for prune mode'
+                };
+            }
+            const result = await versioningService.pruneVersions(input.workflowId, input.maxVersions || 10);
+            return {
+                success: true,
+                data: {
+                    workflowId: input.workflowId,
+                    pruned: result.pruned,
+                    remaining: result.remaining,
+                    message: `Pruned ${result.pruned} old version(s), ${result.remaining} version(s) remaining`
+                }
+            };
+        }
+        case 'diff': {
+            if (!input.workflowId) {
+                return {
+                    success: false,
+                    error: 'workflowId is required for diff mode'
+                };
+            }
+            if (versionId === undefined || toVersionId === undefined) {
+                return {
+                    success: false,
+                    code: 'INVALID_ARGS',
+                    error: 'versionId and toVersionId are both required for diff mode'
+                };
+            }
+            try {
+                const diff = await versioningService.compareVersions(versionId, toVersionId, input.workflowId);
+                return {
+                    success: true,
+                    data: withDiffFormat(diff, 'n8n-mcp')
+                };
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                if (message.includes(workflow_versioning_service_1.VERSION_OWNERSHIP_ERROR_PREFIX)) {
+                    return {
+                        success: false,
+                        code: 'INVALID_ARGS',
+                        error: message
+                    };
+                }
+                throw error;
+            }
+        }
+        default:
+            return {
+                success: false,
+                error: `Unknown mode: ${input.mode}`
+            };
+    }
+}
 async function handleWorkflowVersions(args, repository, context) {
     try {
         const input = workflowVersionsSchema.parse(args);
         if (process.env.ENABLE_MULTI_TENANT === 'true' && (0, instance_context_1.getInstanceScopeId)(context) === '') {
+            const source = input.source ?? 'local';
             return {
                 success: false,
-                error: 'Workflow version storage is not available for this tenant context'
+                mode: input.mode,
+                source,
+                backend: source === 'native' ? 'official-mcp' : 'n8n-mcp',
+                error: source === 'native'
+                    ? "Reading n8n's own version history needs an instance-scoped context for this tenant"
+                    : 'Workflow version storage is not available for this tenant context'
             };
         }
-        const client = getN8nApiClient(context);
-        const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, (0, instance_context_1.getInstanceScopeId)(context));
-        switch (input.mode) {
-            case 'list': {
-                if (!input.workflowId) {
-                    return {
-                        success: false,
-                        error: 'workflowId is required for list mode'
-                    };
-                }
-                const versions = await versioningService.getVersionHistory(input.workflowId, input.limit);
-                return {
-                    success: true,
-                    data: {
-                        workflowId: input.workflowId,
-                        versions,
-                        count: versions.length,
-                        message: `Found ${versions.length} version(s) for workflow ${input.workflowId}`
-                    }
-                };
-            }
-            case 'get': {
-                if (!input.versionId) {
-                    return {
-                        success: false,
-                        error: 'versionId is required for get mode'
-                    };
-                }
-                const version = await versioningService.getVersion(input.versionId);
-                if (!version) {
-                    return {
-                        success: false,
-                        error: `Version ${input.versionId} not found`
-                    };
-                }
-                return {
-                    success: true,
-                    data: version
-                };
-            }
-            case 'rollback': {
-                if (!input.workflowId) {
-                    return {
-                        success: false,
-                        error: 'workflowId is required for rollback mode'
-                    };
-                }
-                if (!client) {
-                    return {
-                        success: false,
-                        error: 'n8n API not configured. Cannot perform rollback without API access.'
-                    };
-                }
-                const result = await versioningService.restoreVersion(input.workflowId, input.versionId, input.validateBefore);
-                return {
-                    success: result.success,
-                    data: result.success ? result : undefined,
-                    error: result.success ? undefined : result.message,
-                    details: result.success ? undefined : {
-                        validationErrors: result.validationErrors
-                    }
-                };
-            }
-            case 'delete': {
-                if (input.deleteAll) {
-                    if (!input.workflowId) {
-                        return {
-                            success: false,
-                            error: 'workflowId is required for deleteAll mode'
-                        };
-                    }
-                    const result = await versioningService.deleteAllVersions(input.workflowId);
-                    return {
-                        success: true,
-                        data: {
-                            workflowId: input.workflowId,
-                            deleted: result.deleted,
-                            message: result.message
-                        }
-                    };
-                }
-                else {
-                    if (!input.versionId) {
-                        return {
-                            success: false,
-                            error: 'versionId is required for single version delete'
-                        };
-                    }
-                    const result = await versioningService.deleteVersion(input.versionId);
-                    return {
-                        success: result.success,
-                        data: result.success ? { message: result.message } : undefined,
-                        error: result.success ? undefined : result.message
-                    };
-                }
-            }
-            case 'prune': {
-                if (!input.workflowId) {
-                    return {
-                        success: false,
-                        error: 'workflowId is required for prune mode'
-                    };
-                }
-                const result = await versioningService.pruneVersions(input.workflowId, input.maxVersions || 10);
-                return {
-                    success: true,
-                    data: {
-                        workflowId: input.workflowId,
-                        pruned: result.pruned,
-                        remaining: result.remaining,
-                        message: `Pruned ${result.pruned} old version(s), ${result.remaining} version(s) remaining`
-                    }
-                };
-            }
-            default:
-                return {
-                    success: false,
-                    error: `Unknown mode: ${input.mode}`
-                };
+        if ((input.source ?? 'local') === 'native') {
+            return handleNativeWorkflowVersions(input, context);
         }
+        const invalidLocalVersionId = (error) => ({
+            success: false,
+            mode: input.mode,
+            source: 'local',
+            backend: 'n8n-mcp',
+            code: 'INVALID_ARGS',
+            error,
+        });
+        const parsedVersionId = parseLocalVersionId(input.versionId, 'versionId');
+        if (!parsedVersionId.ok)
+            return invalidLocalVersionId(parsedVersionId.error);
+        const parsedToVersionId = parseLocalVersionId(input.toVersionId, 'toVersionId');
+        if (!parsedToVersionId.ok)
+            return invalidLocalVersionId(parsedToVersionId.error);
+        const versionId = parsedVersionId.value;
+        const toVersionId = parsedToVersionId.value;
+        const localResult = await handleLocalWorkflowVersions(input, versionId, toVersionId, repository, context);
+        return { ...localResult, mode: input.mode, source: 'local', backend: 'n8n-mcp' };
     }
     catch (error) {
+        const raw = (args && typeof args === 'object' ? args : {});
+        const source = raw.source === 'native' ? 'native' : 'local';
+        const label = {
+            ...(typeof raw.mode === 'string' ? { mode: raw.mode } : {}),
+            source,
+            backend: source === 'native' ? 'official-mcp' : 'n8n-mcp',
+        };
         if (error instanceof zod_1.z.ZodError) {
             return {
                 success: false,
+                ...label,
                 error: 'Invalid input',
                 details: { errors: error.errors }
             };
         }
         return {
             success: false,
+            ...label,
             error: error instanceof Error ? error.message : 'Unknown error occurred'
         };
     }
@@ -2755,6 +3126,115 @@ async function handleDeleteRows(args, context) {
         return handleCrudError(error);
     }
 }
+const DATATABLE_ACTION = 'manage_datatable';
+const DATATABLE_TIMEOUT_MS = agents_action_map_1.DEFAULT_TIMEOUT_MS;
+const COLUMN_TOOLS = {
+    addColumn: ['add_data_table_column'],
+    deleteColumn: ['delete_data_table_column'],
+    renameColumn: ['rename_data_table_column'],
+};
+const columnNameSchema = zod_1.z
+    .string()
+    .min(1, 'Column name cannot be empty')
+    .max(63, 'Column name must be at most 63 characters')
+    .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, 'Column name must start with a letter and contain only letters, digits and underscores');
+const columnTargetSchema = tableIdSchema.extend({
+    projectId: optionalEmptyAware(zod_1.z.string()),
+    timeoutMs: zod_1.z.number().int().min(agents_action_map_1.MIN_TIMEOUT_MS).max(agents_action_map_1.MAX_TIMEOUT_MS).optional(),
+});
+const addColumnSchema = columnTargetSchema.extend({
+    column: zod_1.z.preprocess(tryParseJson, zod_1.z.object({
+        name: columnNameSchema,
+        type: zod_1.z.enum(['string', 'number', 'boolean', 'date']),
+    })),
+});
+const deleteColumnSchema = columnTargetSchema.extend({
+    columnId: zod_1.z.string().min(1, 'columnId is required'),
+});
+const renameColumnSchema = deleteColumnSchema.extend({
+    name: columnNameSchema,
+});
+function columnInvalidArgs(action, error) {
+    return {
+        success: false,
+        action,
+        code: 'INVALID_ARGS',
+        error: error.issues.map(i => `${i.path.join('.') || 'input'}: ${i.message}`).join('; '),
+    };
+}
+async function resolveDataTableProjectId(input, action, context) {
+    if (input.projectId)
+        return { projectId: input.projectId };
+    const resolved = await (0, handlers_official_tools_1.resolveProjectChoices)(context);
+    if ('failure' in resolved)
+        return { failure: { ...resolved.failure, action } };
+    const items = resolved.choices.items;
+    if (items.length === 1)
+        return { projectId: items[0].id };
+    const backend = resolved.choices.backend;
+    if (items.length === 0) {
+        return {
+            failure: {
+                success: false,
+                action,
+                backend,
+                code: 'PROJECT_REQUIRED',
+                error: 'No project could be resolved for this instance; pass projectId',
+            },
+        };
+    }
+    return {
+        failure: {
+            success: false,
+            action,
+            backend,
+            code: 'PROJECT_REQUIRED',
+            error: 'Several projects are accessible; pass projectId',
+            details: { candidates: items },
+        },
+    };
+}
+async function callColumnTool(action, officialArgs, timeoutMs, context) {
+    const response = await (0, handlers_official_tools_1.callOfficialTool)(context, COLUMN_TOOLS[action], officialArgs, timeoutMs ?? DATATABLE_TIMEOUT_MS, DATATABLE_ACTION, false);
+    return { ...response, action, backend: 'official-mcp' };
+}
+async function handleAddColumn(args, context) {
+    const parsed = addColumnSchema.safeParse(args);
+    if (!parsed.success)
+        return columnInvalidArgs('addColumn', parsed.error);
+    const resolved = await resolveDataTableProjectId(parsed.data, 'addColumn', context);
+    if ('failure' in resolved)
+        return resolved.failure;
+    return callColumnTool('addColumn', {
+        dataTableId: parsed.data.tableId,
+        projectId: resolved.projectId,
+        name: parsed.data.column.name,
+        type: parsed.data.column.type,
+    }, parsed.data.timeoutMs, context);
+}
+async function handleDeleteColumn(args, context) {
+    const parsed = deleteColumnSchema.safeParse(args);
+    if (!parsed.success)
+        return columnInvalidArgs('deleteColumn', parsed.error);
+    const resolved = await resolveDataTableProjectId(parsed.data, 'deleteColumn', context);
+    if ('failure' in resolved)
+        return resolved.failure;
+    return callColumnTool('deleteColumn', { dataTableId: parsed.data.tableId, projectId: resolved.projectId, columnId: parsed.data.columnId }, parsed.data.timeoutMs, context);
+}
+async function handleRenameColumn(args, context) {
+    const parsed = renameColumnSchema.safeParse(args);
+    if (!parsed.success)
+        return columnInvalidArgs('renameColumn', parsed.error);
+    const resolved = await resolveDataTableProjectId(parsed.data, 'renameColumn', context);
+    if ('failure' in resolved)
+        return resolved.failure;
+    return callColumnTool('renameColumn', {
+        dataTableId: parsed.data.tableId,
+        projectId: resolved.projectId,
+        columnId: parsed.data.columnId,
+        name: parsed.data.name,
+    }, parsed.data.timeoutMs, context);
+}
 const listCredentialsSchema = zod_1.z.object({
     includeUsage: zod_1.z.boolean().optional(),
     cursor: optionalEmptyAware(zod_1.z.string()),
@@ -3036,6 +3516,171 @@ async function handleGetCredentialSchema(args, context) {
     }
     catch (error) {
         return handleCrudError(error);
+    }
+}
+const FOLDER_PROJECT_ROOT = '0';
+const folderProjectSchema = zod_1.z.object({
+    projectId: optionalEmptyAware(zod_1.z.string().trim().min(1)).transform((v) => v ?? 'personal'),
+});
+const folderIdSchema = folderProjectSchema.extend({
+    folderId: zod_1.z.string().trim().min(1),
+});
+const nullOrEmptyToUndefined = (v) => (v === null ? undefined : emptyToUndefined(v));
+const optionalParentFolderId = zod_1.z.preprocess(nullOrEmptyToUndefined, zod_1.z.string().trim().min(1).optional());
+const createFolderSchema = folderProjectSchema.extend({
+    name: zod_1.z.string().trim().min(1),
+    parentFolderId: optionalParentFolderId,
+});
+const listFoldersSchema = folderProjectSchema.extend({
+    nameFilter: optionalEmptyAware(zod_1.z.string().trim().min(1)),
+    parentFolderId: optionalParentFolderId,
+    sortBy: zod_1.z.enum(['name:asc', 'name:desc', 'createdAt:asc', 'createdAt:desc', 'updatedAt:asc', 'updatedAt:desc']).optional(),
+    skip: zod_1.z.number().int().min(0).optional(),
+    take: zod_1.z.number().int().min(1).max(100).optional(),
+});
+const renameFolderSchema = folderIdSchema.extend({
+    name: zod_1.z.string().trim().min(1),
+});
+const moveFolderSchema = folderIdSchema.extend({
+    parentFolderId: zod_1.z.preprocess(emptyToUndefined, zod_1.z.string().trim().min(1).nullable()),
+});
+const deleteFolderSchema = folderIdSchema.extend({
+    transferToFolderId: optionalEmptyAware(zod_1.z.string().trim().min(1)),
+});
+function handleFolderError(error) {
+    const response = handleCrudError(error);
+    if (error instanceof n8n_errors_1.N8nApiError) {
+        const appendHint = (hint) => {
+            const base = (response.error ?? '').trimEnd();
+            response.error = `${base}${/[.!?]$/.test(base) ? '' : '.'} ${hint}`;
+        };
+        if (error.statusCode === 403) {
+            appendHint('Folders need an API key with folder:* scopes AND a licensed instance: folders unlock on the registered free Community tier (Settings -> Usage and plan -> register) and up.');
+        }
+        else if (error.statusCode === 404) {
+            appendHint('Check the projectId and folderId; on n8n older than 2.19 the folders API does not exist at all.');
+        }
+    }
+    return response;
+}
+async function resolveFolderProjectId(client, projectId) {
+    return projectId === 'personal' ? await client.resolvePersonalProjectId() : projectId;
+}
+const FOLDER_LIST_SELECT = ['id', 'name', 'createdAt', 'updatedAt', 'parentFolder', 'workflowCount', 'subFolderCount', 'path'];
+async function handleCreateFolder(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = createFolderSchema.parse(args);
+        const folder = await client.createFolder(input.projectId, {
+            name: input.name,
+            ...(input.parentFolderId ? { parentFolderId: input.parentFolderId } : {}),
+        });
+        if (!folder || !folder.id) {
+            return { success: false, error: 'Folder creation failed: n8n API returned an empty or invalid response' };
+        }
+        return {
+            success: true,
+            data: { id: folder.id, name: folder.name, parentFolderId: folder.parentFolderId ?? null },
+            message: `Folder "${folder.name}" created with ID: ${folder.id}. Place workflows in it via n8n_create_workflow's parentFolderId or the moveToFolder operation of n8n_update_partial_workflow.`,
+        };
+    }
+    catch (error) {
+        return handleFolderError(error);
+    }
+}
+async function handleListFolders(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = listFoldersSchema.parse(args || {});
+        const projectId = await resolveFolderProjectId(client, input.projectId);
+        const filter = {};
+        if (input.nameFilter)
+            filter.name = input.nameFilter;
+        if (input.parentFolderId)
+            filter.parentFolderId = input.parentFolderId;
+        const result = await client.listFolders(projectId, {
+            ...(Object.keys(filter).length > 0 ? { filter } : {}),
+            select: FOLDER_LIST_SELECT,
+            sortBy: input.sortBy ?? 'updatedAt:desc',
+            skip: input.skip ?? 0,
+            take: input.take ?? 50,
+        });
+        return {
+            success: true,
+            data: {
+                folders: result.data,
+                count: result.count,
+                projectId,
+            },
+        };
+    }
+    catch (error) {
+        return handleFolderError(error);
+    }
+}
+async function handleGetFolder(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = folderIdSchema.parse(args);
+        const projectId = await resolveFolderProjectId(client, input.projectId);
+        const folder = await client.getFolder(projectId, input.folderId);
+        return { success: true, data: { ...folder, projectId } };
+    }
+    catch (error) {
+        return handleFolderError(error);
+    }
+}
+async function handleRenameFolder(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = renameFolderSchema.parse(args);
+        const projectId = await resolveFolderProjectId(client, input.projectId);
+        const folder = await client.updateFolder(projectId, input.folderId, { name: input.name });
+        return {
+            success: true,
+            data: { id: folder.id, name: folder.name },
+            message: `Folder renamed to "${folder.name}"`,
+        };
+    }
+    catch (error) {
+        return handleFolderError(error);
+    }
+}
+async function handleMoveFolder(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = moveFolderSchema.parse(args);
+        const projectId = await resolveFolderProjectId(client, input.projectId);
+        const target = input.parentFolderId ?? FOLDER_PROJECT_ROOT;
+        const folder = await client.updateFolder(projectId, input.folderId, { parentFolderId: target });
+        return {
+            success: true,
+            data: { id: folder.id, name: folder.name, parentFolderId: folder.parentFolderId ?? null },
+            message: target === FOLDER_PROJECT_ROOT
+                ? `Folder "${folder.name}" moved to the project root`
+                : `Folder "${folder.name}" moved under folder ${target}`,
+        };
+    }
+    catch (error) {
+        return handleFolderError(error);
+    }
+}
+async function handleDeleteFolder(args, context) {
+    try {
+        const client = ensureApiConfigured(context);
+        const input = deleteFolderSchema.parse(args);
+        const projectId = await resolveFolderProjectId(client, input.projectId);
+        await client.deleteFolder(projectId, input.folderId, input.transferToFolderId);
+        return {
+            success: true,
+            data: { id: input.folderId, deleted: true },
+            message: input.transferToFolderId
+                ? `Folder ${input.folderId} deleted; contents transferred to ${input.transferToFolderId === FOLDER_PROJECT_ROOT ? 'the project root' : `folder ${input.transferToFolderId}`}`
+                : `Folder ${input.folderId} deleted; its workflows were moved to the project root and ARCHIVED, sub-folders were deleted`,
+        };
+    }
+    catch (error) {
+        return handleFolderError(error);
     }
 }
 const auditInstanceSchema = zod_1.z.object({

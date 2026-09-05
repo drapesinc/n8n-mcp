@@ -1,6 +1,8 @@
 import { NodeRepository } from '../database/node-repository';
 export interface DetectedChange {
     propertyName: string;
+    fromVersion?: string;
+    toVersion?: string;
     changeType: 'added' | 'removed' | 'renamed' | 'type_changed' | 'requirement_changed' | 'default_changed';
     isBreaking: boolean;
     oldValue?: any;

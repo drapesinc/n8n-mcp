@@ -46,9 +46,12 @@ const tools_1 = require("./tools");
 const ui_1 = require("./ui");
 const skills_1 = require("./skills");
 const tools_n8n_manager_1 = require("./tools-n8n-manager");
+const tool_policy_1 = require("./tool-policy");
 const tools_n8n_friendly_1 = require("./tools-n8n-friendly");
 const workflow_examples_1 = require("./workflow-examples");
 const logger_1 = require("../utils/logger");
+const param_aliases_1 = require("./param-aliases");
+const stdio_guard_1 = require("../utils/stdio-guard");
 const redaction_1 = require("../utils/redaction");
 const node_repository_1 = require("../database/node-repository");
 const database_adapter_1 = require("../database/database-adapter");
@@ -66,6 +69,8 @@ const n8n_api_1 = require("../config/n8n-api");
 const workspace_config_1 = require("../config/workspace-config");
 const workspace_api_client_1 = require("../services/workspace-api-client");
 const n8nHandlers = __importStar(require("./handlers-n8n-manager"));
+const handlers_agents_1 = require("./handlers-agents");
+const handlers_official_tools_1 = require("./handlers-official-tools");
 const handlers_workflow_diff_1 = require("./handlers-workflow-diff");
 const tools_documentation_1 = require("./tools-documentation");
 const version_1 = require("../utils/version");
@@ -74,8 +79,11 @@ const node_type_normalizer_1 = require("../utils/node-type-normalizer");
 const typeversion_1 = require("../utils/typeversion");
 const validation_schemas_1 = require("../utils/validation-schemas");
 const protocol_version_1 = require("../utils/protocol-version");
+const breaking_change_detector_1 = require("../services/breaking-change-detector");
+const node_parser_1 = require("../parsers/node-parser");
 const telemetry_1 = require("../telemetry");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
+const STDIO_MAX_BUFFER_SIZE = Math.max(1024 * 1024, parseInt(process.env.N8N_MCP_STDIO_MAX_BUFFER_SIZE || '', 10) || 64 * 1024 * 1024);
 function escapeRegExp(input) {
     return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -83,6 +91,7 @@ class N8NDocumentationMCPServer {
     constructor(instanceContext, earlyLogger, options) {
         this.db = null;
         this.repository = null;
+        this.breakingChangeDetector = null;
         this.templateService = null;
         this.cache = new simple_cache_1.SimpleCache();
         this.clientInfo = null;
@@ -98,6 +107,9 @@ class N8NDocumentationMCPServer {
         this.additionalToolsByName = new Map();
         this.dbHealthChecked = false;
         this.workflowPatternsCache = null;
+        if (process.env.MCP_MODE && process.env.MCP_MODE !== 'http') {
+            (0, stdio_guard_1.installStdioGuard)();
+        }
         this.instanceContext = instanceContext;
         this.earlyLogger = earlyLogger || null;
         this.registerAdditionalTools(options?.additionalTools || []);
@@ -370,84 +382,14 @@ class N8NDocumentationMCPServer {
         if (this.disabledToolsCache !== null) {
             return this.disabledToolsCache;
         }
-        let disabledToolsEnv = process.env.DISABLED_TOOLS || '';
-        if (!disabledToolsEnv) {
-            this.disabledToolsCache = new Set();
-            return this.disabledToolsCache;
-        }
-        if (disabledToolsEnv.length > 10000) {
-            logger_1.logger.warn(`DISABLED_TOOLS environment variable too long (${disabledToolsEnv.length} chars), truncating to 10000`);
-            disabledToolsEnv = disabledToolsEnv.substring(0, 10000);
-        }
-        let tools = disabledToolsEnv
-            .split(',')
-            .map(t => t.trim())
-            .filter(Boolean);
-        if (tools.length > 200) {
-            logger_1.logger.warn(`DISABLED_TOOLS contains ${tools.length} tools, limiting to first 200`);
-            tools = tools.slice(0, 200);
-        }
-        if (tools.length > 0) {
-            logger_1.logger.info(`Disabled tools configured: ${tools.join(', ')}`);
-        }
-        this.disabledToolsCache = new Set(tools);
+        this.disabledToolsCache = (0, tool_policy_1.getDisabledTools)();
         return this.disabledToolsCache;
     }
     getDisabledToolOperations() {
         if (this.disabledToolOperationsCache !== null) {
             return this.disabledToolOperationsCache;
         }
-        const result = new Map();
-        let envVal = process.env.DISABLED_TOOL_OPERATIONS || '';
-        if (!envVal) {
-            this.disabledToolOperationsCache = result;
-            this.filteredToolDefinitionsCache = new Map();
-            return result;
-        }
-        if (envVal.length > 10000) {
-            logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS environment variable too long (${envVal.length} chars), truncating to 10000`);
-            envVal = envVal.substring(0, 10000);
-        }
-        let entries = envVal.split(';').map(e => e.trim()).filter(Boolean);
-        if (entries.length > 50) {
-            logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS contains ${entries.length} entries, limiting to first 50`);
-            entries = entries.slice(0, 50);
-        }
-        for (const entry of entries) {
-            const colonIdx = entry.indexOf(':');
-            if (colonIdx === -1)
-                continue;
-            const toolName = entry.substring(0, colonIdx).trim();
-            const opsStr = entry.substring(colonIdx + 1).trim();
-            if (!toolName || !opsStr)
-                continue;
-            const ops = opsStr.split(',').map(o => o.trim().toLowerCase()).filter(Boolean);
-            if (ops.length === 0)
-                continue;
-            const existing = result.get(toolName) ?? new Set();
-            ops.forEach(op => existing.add(op));
-            result.set(toolName, existing);
-        }
-        for (const [toolName, ops] of result) {
-            const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[toolName];
-            if (!paramName) {
-                logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: unknown tool '${toolName}' — no per-operation filtering applied. Eligible tools: ${Object.keys(tools_n8n_manager_1.TOOL_OPERATION_PARAM).join(', ')}`);
-                continue;
-            }
-            const tool = tools_n8n_manager_1.n8nManagementTools.find(t => t.name === toolName);
-            const enumValues = tool?.inputSchema?.properties?.[paramName]?.enum ?? [];
-            for (const op of ops) {
-                if (enumValues.length > 0 && !enumValues.includes(op)) {
-                    logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: '${op}' is not a valid ${paramName} for '${toolName}' (valid: ${enumValues.join(', ')}); it will have no effect.`);
-                }
-            }
-        }
-        if (result.size > 0) {
-            const summary = [...result.entries()]
-                .map(([t, ops]) => `${t}: [${[...ops].join(', ')}]`)
-                .join('; ');
-            logger_1.logger.info(`Disabled tool operations configured: ${summary}`);
-        }
+        const result = (0, tool_policy_1.getDisabledToolOperations)();
         this.disabledToolOperationsCache = result;
         this.filteredToolDefinitionsCache = this.buildFilteredToolDefinitions(result);
         return result;
@@ -462,9 +404,15 @@ class N8NDocumentationMCPServer {
             if (!original)
                 continue;
             const cloned = JSON.parse(JSON.stringify(original));
+            const remaining = [...(0, tool_policy_1.getValidOperations)(toolName)].filter(v => !ops.has(v));
             const param = cloned.inputSchema?.properties?.[paramName];
+            let defaultRemoved = false;
             if (param?.enum) {
                 param.enum = param.enum.filter(v => !ops.has(v.toLowerCase()));
+                if (typeof param.default === 'string' && ops.has(param.default.toLowerCase())) {
+                    delete param.default;
+                    defaultRemoved = true;
+                }
                 if (param.enum.length === 0) {
                     logger_1.logger.warn(`DISABLED_TOOL_OPERATIONS: all operations for '${toolName}' are disabled ` +
                         `but the tool still appears in ListTools. ` +
@@ -472,14 +420,15 @@ class N8NDocumentationMCPServer {
                 }
                 if (param.description) {
                     const disabledList = [...ops].join(', ');
-                    param.description = `${param.description} (disabled by server policy: ${disabledList})`;
+                    param.description = `${param.description} (disabled by server policy: ${disabledList}`
+                        + `${defaultRemoved ? '; no default, pass a value' : ''})`;
                 }
             }
             const disabledList = [...ops].join(', ');
-            cloned.description = `${cloned.description}\n\n> Operations disabled by server policy: ${disabledList}`;
+            cloned.description = `${cloned.description}\n\n> Operations disabled by server policy: ${disabledList}`
+                + (defaultRemoved ? `. The default for ${paramName} was one of them, so ${paramName} must be passed explicitly.` : '');
             const destructive = tools_n8n_manager_1.DESTRUCTIVE_TOOL_OPERATIONS[toolName];
             if (destructive && cloned.annotations) {
-                const remaining = param?.enum ?? [];
                 const stillDestructive = remaining.some(v => destructive.has(String(v).toLowerCase()));
                 if (!stillDestructive) {
                     cloned.annotations = { ...cloned.annotations, readOnlyHint: true, destructiveHint: false };
@@ -656,7 +605,7 @@ class N8NDocumentationMCPServer {
             if (disabledOpsForTool && disabledOpsForTool.size > 0) {
                 const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[name];
                 if (paramName) {
-                    const requestedOp = processedArgs?.[paramName];
+                    const requestedOp = (0, tool_policy_1.resolveRequestedOperation)(name, processedArgs);
                     if (requestedOp && disabledOpsForTool.has(String(requestedOp).toLowerCase())) {
                         logger_1.logger.warn(`Attempted to call disabled operation: ${name}.${requestedOp}`);
                         return {
@@ -927,9 +876,18 @@ class N8NDocumentationMCPServer {
                     validationResult = validation_schemas_1.ToolValidation.validateWorkflowId(args);
                     break;
                 case 'n8n_executions':
-                    validationResult = args.action
+                    validationResult = { valid: true, errors: [] };
+                    break;
+                case 'n8n_test_workflow':
+                    validationResult = (0, param_aliases_1.hasText)(args.workflowId)
                         ? { valid: true, errors: [] }
-                        : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
+                        : {
+                            valid: false,
+                            errors: [{
+                                    field: 'workflowId',
+                                    message: 'workflowId is required: the ID of the workflow to run ("id" is accepted as an alias)'
+                                }]
+                        };
                     break;
                 case 'n8n_evaluations': {
                     const evalErrors = [];
@@ -948,6 +906,12 @@ class N8NDocumentationMCPServer {
                         : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
                     break;
                 case 'n8n_manage_credentials':
+                    validationResult = args.action
+                        ? { valid: true, errors: [] }
+                        : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
+                    break;
+                case 'n8n_manage_folders':
+                case 'n8n_manage_agents':
                     validationResult = args.action
                         ? { valid: true, errors: [] }
                         : { valid: false, errors: [{ field: 'action', message: 'action is required' }] };
@@ -1165,6 +1129,19 @@ class N8NDocumentationMCPServer {
         }
         return coerced;
     }
+    async listExecutionsInsteadOfGet(args) {
+        if ((0, tool_policy_1.isOperationDisabled)('n8n_executions', 'list')) {
+            throw new Error('id is required for action=get');
+        }
+        const result = await n8nHandlers.handleListExecutions(args, this.instanceContext);
+        if (!result.success)
+            return result;
+        const scope = (0, param_aliases_1.hasText)(args.workflowId) ? `executions of workflow ${args.workflowId}` : 'recent executions';
+        return {
+            ...result,
+            message: `action=get was called without an execution id, so ${scope} were listed instead. Pass id to get one execution.`
+        };
+    }
     async executeTool(name, args) {
         args = args || {};
         const disabledTools = this.getDisabledTools();
@@ -1176,7 +1153,7 @@ class N8NDocumentationMCPServer {
         if (disabledOpsForTool && disabledOpsForTool.size > 0) {
             const paramName = tools_n8n_manager_1.TOOL_OPERATION_PARAM[name];
             if (paramName) {
-                const requestedOp = args[paramName];
+                const requestedOp = (0, tool_policy_1.resolveRequestedOperation)(name, args);
                 if (requestedOp && disabledOpsForTool.has(String(requestedOp).toLowerCase())) {
                     throw new Error(`Operation '${requestedOp}' on tool '${name}' is disabled by server policy`);
                 }
@@ -1202,19 +1179,21 @@ class N8NDocumentationMCPServer {
                     includeOperations: args.includeOperations,
                     source: args.source
                 });
-            case 'get_node':
+            case 'get_node': {
                 this.validateToolParams(name, args, ['nodeType']);
-                if (args.mode === 'docs') {
+                const { mode: nodeMode, detail: nodeDetail } = (0, param_aliases_1.resolveGetNodeAliases)(args.mode, args.detail);
+                if (nodeMode === 'docs') {
                     return this.getNodeDocumentation(args.nodeType);
                 }
-                if (args.mode === 'search_properties') {
+                if (nodeMode === 'search_properties') {
                     if (!args.propertyQuery) {
                         throw new Error('propertyQuery is required for mode=search_properties');
                     }
                     const maxResults = args.maxPropertyResults !== undefined ? Number(args.maxPropertyResults) || 20 : 20;
                     return this.searchNodeProperties(args.nodeType, args.propertyQuery, maxResults);
                 }
-                return this.getNode(args.nodeType, args.detail, args.mode, args.includeTypeInfo, args.includeExamples, args.fromVersion, args.toVersion);
+                return this.getNode(args.nodeType, nodeDetail, nodeMode, args.includeTypeInfo, args.includeExamples, args.fromVersion, args.toVersion);
+            }
             case 'validate_node':
                 this.validateToolParams(name, args, ['nodeType', 'config']);
                 if (typeof args.config !== 'object' || args.config === null) {
@@ -1354,28 +1333,33 @@ class N8NDocumentationMCPServer {
                 if (!this.repository)
                     throw new Error('Repository not initialized');
                 return n8nHandlers.handleAutofixWorkflow(args, this.repository, this.resolveContextFromArgs(args));
-            case 'n8n_test_workflow':
-                this.validateToolParams(name, args, ['workflowId']);
-                return n8nHandlers.handleTestWorkflow(args, this.resolveContextFromArgs(args));
+            case 'n8n_test_workflow': {
+                const testArgs = (0, param_aliases_1.withWorkflowIdAlias)(args);
+                this.validateToolParams(name, testArgs);
+                return n8nHandlers.handleTestWorkflow(testArgs, this.resolveContextFromArgs(testArgs));
+            }
             case 'n8n_executions': {
-                this.validateToolParams(name, args, ['action']);
+                this.validateToolParams(name, args);
                 const execCtx = this.resolveContextFromArgs(args);
-                const execAction = args.action;
+                const execAction = String((0, tool_policy_1.resolveRequestedOperation)(name, args));
                 switch (execAction) {
                     case 'get':
-                        if (!args.id) {
-                            throw new Error('id is required for action=get');
+                        if (!(0, param_aliases_1.hasText)(args.id)) {
+                            return this.listExecutionsInsteadOfGet(args);
                         }
                         return n8nHandlers.handleGetExecution(args, execCtx);
                     case 'list':
                         return n8nHandlers.handleListExecutions(args, execCtx);
                     case 'delete':
-                        if (!args.id) {
+                        if (!(0, param_aliases_1.hasText)(args.id)) {
                             throw new Error('id is required for action=delete');
                         }
                         return n8nHandlers.handleDeleteExecution(args, execCtx);
-                    default:
-                        throw new Error(`Unknown action: ${execAction}. Valid actions: get, list, delete`);
+                    default: {
+                        const message = `Unknown action: ${execAction}. Valid actions: get, list, delete.`;
+                        const hint = (0, param_aliases_1.suggestExecutionsAction)(execAction);
+                        throw new Error(hint ? `${message} ${hint}` : message);
+                    }
                 }
             }
             case 'n8n_evaluations': {
@@ -1411,8 +1395,7 @@ class N8NDocumentationMCPServer {
                 }
                 return n8nHandlers.handleHealthCheck(this.resolveContextFromArgs(args));
             case 'n8n_workflow_versions':
-                this.validateToolParams(name, args, ['mode']);
-                return n8nHandlers.handleWorkflowVersions(args, this.repository, this.resolveContextFromArgs(args));
+                return n8nHandlers.handleWorkflowVersions((0, param_aliases_1.withWorkflowIdAlias)(args), this.repository, this.resolveContextFromArgs(args));
             case 'n8n_deploy_template':
                 this.validateToolParams(name, args, ['templateId']);
                 await this.ensureInitialized();
@@ -1435,10 +1418,35 @@ class N8NDocumentationMCPServer {
                     case 'updateRows': return n8nHandlers.handleUpdateRows(args, this.instanceContext);
                     case 'upsertRows': return n8nHandlers.handleUpsertRows(args, this.instanceContext);
                     case 'deleteRows': return n8nHandlers.handleDeleteRows(args, this.instanceContext);
+                    case 'addColumn': return n8nHandlers.handleAddColumn(args, this.instanceContext);
+                    case 'deleteColumn': return n8nHandlers.handleDeleteColumn(args, this.instanceContext);
+                    case 'renameColumn': return n8nHandlers.handleRenameColumn(args, this.instanceContext);
                     default:
-                        throw new Error(`Unknown action: ${dtAction}. Valid actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows`);
+                        throw new Error(`Unknown action: ${dtAction}. Valid actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows, addColumn, deleteColumn, renameColumn`);
                 }
             }
+            case 'n8n_manage_folders': {
+                this.validateToolParams(name, args, ['action']);
+                const folderAction = args.action;
+                switch (folderAction) {
+                    case 'create': return n8nHandlers.handleCreateFolder(args, this.instanceContext);
+                    case 'list': return n8nHandlers.handleListFolders(args, this.instanceContext);
+                    case 'get': return n8nHandlers.handleGetFolder(args, this.instanceContext);
+                    case 'rename': return n8nHandlers.handleRenameFolder(args, this.instanceContext);
+                    case 'move': return n8nHandlers.handleMoveFolder(args, this.instanceContext);
+                    case 'delete': return n8nHandlers.handleDeleteFolder(args, this.instanceContext);
+                    default:
+                        throw new Error(`Unknown action: ${folderAction}. Valid actions: create, list, get, rename, move, delete`);
+                }
+            }
+            case 'n8n_manage_agents':
+                this.validateToolParams(name, args, ['action']);
+                return (0, handlers_agents_1.handleManageAgents)(args, this.instanceContext);
+            case 'n8n_explore_node_resources':
+                return (0, handlers_official_tools_1.handleExploreNodeResources)(args, this.instanceContext);
+            case 'n8n_list_catalog':
+                this.validateToolParams(name, args, ['kind']);
+                return (0, handlers_official_tools_1.handleListCatalog)(args, this.instanceContext);
             case 'n8n_manage_credentials': {
                 this.validateToolParams(name, args, ['action']);
                 const credAction = args.action;
@@ -2472,7 +2480,7 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             throw new Error(`get_node: Invalid detail level "${detail}". Valid options: ${validDetailLevels.join(', ')}`);
         }
         if (!validModes.includes(mode)) {
-            throw new Error(`get_node: Invalid mode "${mode}". Valid options: ${validModes.join(', ')}`);
+            throw new Error(`get_node: Invalid mode "${mode}". Valid options: info, docs, search_properties, ${validModes.slice(1).join(', ')}`);
         }
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
         if (mode !== 'info') {
@@ -2592,28 +2600,75 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             ...extra
         };
     }
-    getVersionHistory(nodeType) {
+    async getVersionHistory(nodeType) {
         if (!this.repository.hasVersionMetadata(nodeType)) {
+            const node = this.repository.getNode(nodeType);
+            if (node && node.isVersioned === false && node.version) {
+                return {
+                    nodeType,
+                    available: true,
+                    totalVersions: 1,
+                    versions: [{
+                            version: String(node.version),
+                            isCurrent: true,
+                            hasBreakingChanges: false,
+                            breakingChangesCount: 0,
+                            deprecatedProperties: [],
+                            addedProperties: []
+                        }]
+                };
+            }
             return this.versionMetadataUnavailable(nodeType, { totalVersions: 0, versions: [] });
         }
         const versions = this.repository.getNodeVersions(nodeType);
+        const entries = [];
+        for (let i = 0; i < versions.length; i++) {
+            const v = versions[i];
+            const previous = versions[i + 1];
+            const breakingCount = previous
+                ? (await this.analyzeVersionUpgrade(nodeType, previous.version, v.version))
+                    .changes.filter(c => c.isBreaking).length
+                : 0;
+            entries.push({
+                version: v.version,
+                isCurrent: v.isCurrentMax,
+                hasBreakingChanges: breakingCount > 0,
+                breakingChangesCount: breakingCount,
+                deprecatedProperties: v.deprecatedProperties || [],
+                addedProperties: v.addedProperties || []
+            });
+        }
         return {
             nodeType,
             available: true,
-            totalVersions: versions.length,
-            versions: versions.map(v => ({
-                version: v.version,
-                isCurrent: v.isCurrentMax,
-                minimumN8nVersion: v.minimumN8nVersion,
-                releasedAt: v.releasedAt,
-                hasBreakingChanges: (v.breakingChanges || []).length > 0,
-                breakingChangesCount: (v.breakingChanges || []).length,
-                deprecatedProperties: v.deprecatedProperties || [],
-                addedProperties: v.addedProperties || []
-            }))
+            totalVersions: entries.length,
+            versions: entries
         };
     }
-    compareVersions(nodeType, fromVersion, toVersion) {
+    async analyzeVersionUpgrade(nodeType, fromVersion, toVersion) {
+        const from = (0, node_parser_1.normalizeNodeVersion)(fromVersion);
+        const to = (0, node_parser_1.normalizeNodeVersion)(toVersion ?? this.defaultTargetVersion(nodeType, from));
+        for (const version of [from, to]) {
+            if (!this.repository.getNodeVersion(nodeType, version)) {
+                const known = this.repository.getNodeVersions(nodeType).map(v => v.version).join(', ');
+                throw new Error(`get_node: version "${version}" is not a recorded version of ${nodeType} (recorded: ${known})`);
+            }
+        }
+        this.breakingChangeDetector ?? (this.breakingChangeDetector = new breaking_change_detector_1.BreakingChangeDetector(this.repository));
+        return this.breakingChangeDetector.analyzeVersionUpgrade(node_type_normalizer_1.NodeTypeNormalizer.toWorkflowFormat(nodeType), from, to);
+    }
+    defaultTargetVersion(nodeType, fromVersion) {
+        const current = this.repository.getLatestNodeVersion(nodeType)?.version
+            ?? this.repository.getNode(nodeType)?.version;
+        if (!current) {
+            throw new Error('No target version available');
+        }
+        if (Number(fromVersion) <= Number(current))
+            return current;
+        const newest = this.repository.getNodeVersions(nodeType)[0]?.version;
+        return newest ?? current;
+    }
+    async compareVersions(nodeType, fromVersion, toVersion) {
         if (!this.repository.hasVersionMetadata(nodeType)) {
             return this.versionMetadataUnavailable(nodeType, {
                 fromVersion,
@@ -2622,20 +2677,15 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 changes: []
             });
         }
-        const latest = this.repository.getLatestNodeVersion(nodeType);
-        const targetVersion = toVersion || latest?.version;
-        if (!targetVersion) {
-            throw new Error('No target version available');
-        }
-        const changes = this.repository.getPropertyChanges(nodeType, fromVersion, targetVersion);
+        const analysis = await this.analyzeVersionUpgrade(nodeType, fromVersion, toVersion);
         return {
             nodeType,
             available: true,
-            fromVersion,
-            toVersion: targetVersion,
-            totalChanges: changes.length,
-            breakingChanges: changes.filter(c => c.isBreaking).length,
-            changes: changes.map(c => ({
+            fromVersion: analysis.fromVersion,
+            toVersion: analysis.toVersion,
+            totalChanges: analysis.changes.length,
+            breakingChanges: analysis.changes.filter(c => c.isBreaking).length,
+            changes: analysis.changes.map(c => ({
                 property: c.propertyName,
                 changeType: c.changeType,
                 isBreaking: c.isBreaking,
@@ -2643,11 +2693,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 oldValue: c.oldValue,
                 newValue: c.newValue,
                 migrationHint: c.migrationHint,
-                autoMigratable: c.autoMigratable
+                autoMigratable: c.autoMigratable,
+                source: c.source
             }))
         };
     }
-    getBreakingChanges(nodeType, fromVersion, toVersion) {
+    async getBreakingChanges(nodeType, fromVersion, toVersion) {
         if (!this.repository.hasVersionMetadata(nodeType)) {
             return this.versionMetadataUnavailable(nodeType, {
                 fromVersion,
@@ -2656,27 +2707,30 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 changes: []
             });
         }
-        const breakingChanges = this.repository.getBreakingChanges(nodeType, fromVersion, toVersion);
+        const analysis = await this.analyzeVersionUpgrade(nodeType, fromVersion, toVersion);
+        const breakingChanges = analysis.changes.filter(c => c.isBreaking);
         return {
             nodeType,
             available: true,
-            fromVersion,
-            toVersion: toVersion || 'latest',
+            fromVersion: analysis.fromVersion,
+            toVersion: analysis.toVersion,
             totalBreakingChanges: breakingChanges.length,
             changes: breakingChanges.map(c => ({
-                fromVersion: c.fromVersion,
-                toVersion: c.toVersion,
+                fromVersion: c.fromVersion ?? analysis.fromVersion,
+                toVersion: c.toVersion ?? analysis.toVersion,
                 property: c.propertyName,
                 changeType: c.changeType,
                 severity: c.severity,
                 migrationHint: c.migrationHint,
                 oldValue: c.oldValue,
-                newValue: c.newValue
+                newValue: c.newValue,
+                source: c.source
             })),
-            upgradeSafe: breakingChanges.length === 0
+            upgradeSafe: breakingChanges.length === 0,
+            recommendations: analysis.recommendations
         };
     }
-    getMigrations(nodeType, fromVersion, toVersion) {
+    async getMigrations(nodeType, fromVersion, toVersion) {
         if (!this.repository.hasVersionMetadata(nodeType)) {
             return this.versionMetadataUnavailable(nodeType, {
                 fromVersion,
@@ -2686,22 +2740,25 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 migrations: []
             });
         }
-        const migrations = this.repository.getAutoMigratableChanges(nodeType, fromVersion, toVersion);
-        const allChanges = this.repository.getPropertyChanges(nodeType, fromVersion, toVersion);
+        const analysis = await this.analyzeVersionUpgrade(nodeType, fromVersion, toVersion);
+        const migrations = analysis.changes.filter(c => c.autoMigratable && c.migrationStrategy);
+        const noActionRequired = analysis.changes.filter(c => c.autoMigratable && !c.migrationStrategy).length;
         return {
             nodeType,
             available: true,
-            fromVersion,
-            toVersion,
+            fromVersion: analysis.fromVersion,
+            toVersion: analysis.toVersion,
             autoMigratableChanges: migrations.length,
-            totalChanges: allChanges.length,
+            noActionRequired,
+            totalChanges: analysis.changes.length,
             migrations: migrations.map(m => ({
                 property: m.propertyName,
                 changeType: m.changeType,
                 migrationStrategy: m.migrationStrategy,
-                severity: m.severity
+                severity: m.severity,
+                source: m.source
             })),
-            requiresManualMigration: migrations.length < allChanges.length
+            requiresManualMigration: analysis.manualRequiredCount > 0
         };
     }
     enrichPropertyWithTypeInfo(property) {
@@ -3492,17 +3549,16 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
     }
     async run() {
+        (0, stdio_guard_1.installStdioGuard)();
         await this.ensureInitialized();
-        const transport = new stdio_js_1.StdioServerTransport();
+        const transport = new stdio_js_1.StdioServerTransport(process.stdin, process.stdout, {
+            maxBufferSize: STDIO_MAX_BUFFER_SIZE,
+        });
+        transport.onerror = (error) => {
+            const detail = error?.stack ?? error?.message ?? String(error);
+            process.stderr.write(`[ERROR] stdio transport error: ${detail}\n`);
+        };
         await this.server.connect(transport);
-        if (!process.stdout.isTTY || process.env.IS_DOCKER) {
-            const originalWrite = process.stdout.write.bind(process.stdout);
-            process.stdout.write = function (chunk, encoding, callback) {
-                const result = originalWrite(chunk, encoding, callback);
-                process.stdout.emit('drain');
-                return result;
-            };
-        }
         logger_1.logger.info('n8n Documentation MCP Server running on stdio transport');
         process.stdin.resume();
     }
@@ -3513,6 +3569,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
         this.isShutdown = true;
         logger_1.logger.info('Shutting down MCP server...');
+        try {
+            await telemetry_1.telemetry.flushBeforeExit();
+        }
+        catch (error) {
+            logger_1.logger.debug('Telemetry flush during shutdown failed:', error);
+        }
         try {
             await this.initialized;
         }

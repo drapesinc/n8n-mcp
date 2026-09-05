@@ -29,7 +29,12 @@ vi.mock('@/services/workflow-versioning-service', () => ({
   })),
 }));
 vi.mock('@/config/n8n-api', () => ({
-  getN8nApiConfig: vi.fn()
+  getN8nApiConfig: vi.fn(),
+  // Official MCP is not under test here; keep it "not configured" so
+  // buildOfficialMcpHealth (called by handleHealthCheck/handleDiagnostic)
+  // resolves without a network probe.
+  getOfficialMcpConfig: vi.fn().mockReturnValue(null),
+  getOfficialMcpConfigFromContext: vi.fn().mockReturnValue(null),
 }));
 vi.mock('@/services/n8n-validation', () => ({
   validateWorkflowStructure: vi.fn(),
@@ -306,6 +311,101 @@ describe('handlers-n8n-manager', () => {
       // Should send input as-is to API (n8n expects FULL form: n8n-nodes-base.*)
       expect(mockApiClient.createWorkflow).toHaveBeenCalledWith(input, expect.objectContaining({ onWarning: expect.any(Function) }));
       expect(n8nValidation.validateWorkflowStructure).toHaveBeenCalledWith(input);
+    });
+
+    it('should forward settings keys outside the typed schema, such as availableInMCP (issue #1026)', async () => {
+      // Regression: the create schema was a closed z.object, so Zod stripped every settings key
+      // it did not list before the payload reached the API client. The update path forwards them.
+      const testWorkflow = createTestWorkflow();
+      const input = {
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        settings: {
+          executionOrder: 'v1',
+          availableInMCP: true,
+          callerPolicy: 'workflowsFromSameOwner',
+          timeSavedPerExecution: 5,
+        },
+      };
+
+      mockApiClient.createWorkflow.mockResolvedValue(testWorkflow);
+
+      const result = await handlers.handleCreateWorkflow(input);
+
+      expect(result.success).toBe(true);
+      const sentWorkflow = mockApiClient.createWorkflow.mock.calls[0][0];
+      expect(sentWorkflow.settings).toEqual(input.settings);
+    });
+
+    it('should still reject invalid values for the typed settings keys', async () => {
+      const testWorkflow = createTestWorkflow();
+      const result = await handlers.handleCreateWorkflow({
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        settings: { executionOrder: 'v2', availableInMCP: true },
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid input');
+      expect(mockApiClient.createWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('forwards parentFolderId to the create payload (folder placement, n8n 2.32+)', async () => {
+      const testWorkflow = createTestWorkflow();
+      const input = {
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        parentFolderId: 'folder-abc',
+      };
+
+      mockApiClient.createWorkflow.mockResolvedValue(testWorkflow);
+
+      const result = await handlers.handleCreateWorkflow(input);
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.createWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ parentFolderId: 'folder-abc' }),
+        expect.anything()
+      );
+    });
+
+    it('trims a padded parentFolderId before it reaches the API', async () => {
+      const testWorkflow = createTestWorkflow();
+      const input = {
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        parentFolderId: '  folder-abc  ',
+      };
+
+      mockApiClient.createWorkflow.mockResolvedValue(testWorkflow);
+
+      await handlers.handleCreateWorkflow(input);
+
+      expect(mockApiClient.createWorkflow).toHaveBeenCalledWith(
+        expect.objectContaining({ parentFolderId: 'folder-abc' }),
+        expect.anything()
+      );
+    });
+
+    it('treats a blank parentFolderId as omitted (lossy MCP clients, #774)', async () => {
+      const testWorkflow = createTestWorkflow();
+      const input = {
+        name: 'Test Workflow',
+        nodes: testWorkflow.nodes,
+        connections: testWorkflow.connections,
+        parentFolderId: '',
+      };
+
+      mockApiClient.createWorkflow.mockResolvedValue(testWorkflow);
+
+      await handlers.handleCreateWorkflow(input);
+
+      const payload = mockApiClient.createWorkflow.mock.calls[0][0];
+      expect(payload.parentFolderId).toBeUndefined();
     });
 
     it('normalizes HTTP MCP serialized workflow fields before validation and create (#814)', async () => {
@@ -1578,6 +1678,26 @@ describe('handlers-n8n-manager', () => {
       });
     });
 
+    it('should explain a missing version rather than leaving it blank', async () => {
+      // Every n8n from 1.119.0 withholds its version from API clients, so an empty field here is
+      // the norm and not a lookup worth retrying.
+      mockApiClient.healthCheck.mockResolvedValue({ status: 'ok', features: [] });
+
+      const result = await handlers.handleHealthCheck();
+
+      expect(result.success).toBe(true);
+      expect((result.data as any).n8nVersion).toBeUndefined();
+      expect((result.data as any).n8nVersionNote).toMatch(/1\.119\.0/);
+    });
+
+    it('should not annotate a version the instance did report', async () => {
+      mockApiClient.healthCheck.mockResolvedValue({ status: 'ok', n8nVersion: '1.100.0' });
+
+      const result = await handlers.handleHealthCheck();
+
+      expect((result.data as any).n8nVersionNote).toBeUndefined();
+    });
+
     it('should handle API errors', async () => {
       const apiError = new N8nServerError('Service unavailable');
       mockApiClient.healthCheck.mockRejectedValue(apiError);
@@ -1920,6 +2040,43 @@ describe('handlers-n8n-manager', () => {
       });
 
       expect(result.error).toMatch(/mode:\s*'preview'/);
+    });
+  });
+
+  describe('handleWorkflowVersions - mode default (#1051)', () => {
+    async function mockHistory(versions: unknown[]) {
+      const { WorkflowVersioningService } = await import('@/services/workflow-versioning-service');
+      const getVersionHistory = vi.fn().mockResolvedValue(versions);
+      vi.mocked(WorkflowVersioningService).mockImplementation(() => ({ getVersionHistory }) as any);
+      return getVersionHistory;
+    }
+
+    it('lists versions when mode is omitted', async () => {
+      const getVersionHistory = await mockHistory([{ versionId: 1 }, { versionId: 2 }]);
+
+      const result = await handlers.handleWorkflowVersions({ workflowId: 'wf-1' }, mockRepository);
+
+      expect(getVersionHistory).toHaveBeenCalledWith('wf-1', undefined);
+      expect(result.success).toBe(true);
+      expect((result.data as any).count).toBe(2);
+    });
+
+    it('treats a blank mode as omitted', async () => {
+      await mockHistory([]);
+
+      const result = await handlers.handleWorkflowVersions({ mode: '', workflowId: 'wf-1' }, mockRepository);
+
+      expect(result.success).toBe(true);
+      expect((result.data as any).count).toBe(0);
+    });
+
+    it('still rejects an unknown mode', async () => {
+      await mockHistory([]);
+
+      const result = await handlers.handleWorkflowVersions({ mode: 'history', workflowId: 'wf-1' }, mockRepository);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('Invalid input');
     });
   });
 

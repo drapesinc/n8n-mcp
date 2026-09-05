@@ -31,6 +31,8 @@ class BreakingChangeDetector {
         const registryChanges = (0, breaking_changes_registry_1.getAllChangesForNode)(nodeType, fromVersion, toVersion);
         return registryChanges.map(change => ({
             propertyName: change.propertyName,
+            fromVersion: change.fromVersion,
+            toVersion: change.toVersion,
             changeType: change.changeType,
             isBreaking: change.isBreaking,
             oldValue: change.oldValue,
@@ -49,8 +51,8 @@ class BreakingChangeDetector {
             return [];
         }
         const changes = [];
-        const oldProps = this.flattenProperties(oldVersionData.propertiesSchema || []);
-        const newProps = this.flattenProperties(newVersionData.propertiesSchema || []);
+        const oldProps = this.flattenProperties(oldVersionData.propertiesSchema || [], 'parameters');
+        const newProps = this.flattenProperties(newVersionData.propertiesSchema || [], 'parameters');
         for (const propName of Object.keys(newProps)) {
             if (!oldProps[propName]) {
                 const prop = newProps[propName];
@@ -62,14 +64,8 @@ class BreakingChangeDetector {
                     newValue: prop.type || 'unknown',
                     migrationHint: isRequired
                         ? `Property "${propName}" is now required in v${toVersion}. Provide a value to prevent validation errors.`
-                        : `Property "${propName}" was added in v${toVersion}. Optional parameter, safe to ignore if not needed.`,
+                        : `Property "${propName}" was added in v${toVersion}. Optional; n8n applies its default when it is not set.`,
                     autoMigratable: !isRequired,
-                    migrationStrategy: !isRequired
-                        ? {
-                            type: 'add_property',
-                            defaultValue: prop.default || null
-                        }
-                        : undefined,
                     severity: isRequired ? 'HIGH' : 'LOW',
                     source: 'dynamic'
                 });
@@ -82,11 +78,8 @@ class BreakingChangeDetector {
                     changeType: 'removed',
                     isBreaking: true,
                     oldValue: oldProps[propName].type || 'unknown',
-                    migrationHint: `Property "${propName}" was removed in v${toVersion}. Remove this property from your configuration.`,
-                    autoMigratable: true,
-                    migrationStrategy: {
-                        type: 'remove_property'
-                    },
+                    migrationHint: `Property "${propName}" no longer exists in v${toVersion}. If it is set, move its value to the replacement property before upgrading.`,
+                    autoMigratable: false,
                     severity: 'MEDIUM',
                     source: 'dynamic'
                 });
@@ -94,8 +87,38 @@ class BreakingChangeDetector {
         }
         for (const propName of Object.keys(newProps)) {
             if (oldProps[propName]) {
-                const oldRequired = oldProps[propName].required === true;
-                const newRequired = newProps[propName].required === true;
+                const oldProp = oldProps[propName];
+                const newProp = newProps[propName];
+                if (oldProp.type && newProp.type && oldProp.type !== newProp.type) {
+                    changes.push({
+                        propertyName: propName,
+                        changeType: 'type_changed',
+                        isBreaking: true,
+                        oldValue: oldProp.type,
+                        newValue: newProp.type,
+                        migrationHint: `Property "${propName}" changed type from ${oldProp.type} to ${newProp.type} in v${toVersion}. Review the configured value.`,
+                        autoMigratable: false,
+                        severity: 'HIGH',
+                        source: 'dynamic'
+                    });
+                }
+                else if (oldProp.default !== undefined &&
+                    newProp.default !== undefined &&
+                    JSON.stringify(oldProp.default) !== JSON.stringify(newProp.default)) {
+                    changes.push({
+                        propertyName: propName,
+                        changeType: 'default_changed',
+                        isBreaking: false,
+                        oldValue: oldProp.default,
+                        newValue: newProp.default,
+                        migrationHint: `Default of "${propName}" changed in v${toVersion}. Nodes that relied on the old default now behave differently unless the value is set explicitly.`,
+                        autoMigratable: false,
+                        severity: 'LOW',
+                        source: 'dynamic'
+                    });
+                }
+                const oldRequired = oldProp.required === true;
+                const newRequired = newProp.required === true;
                 if (oldRequired !== newRequired) {
                     changes.push({
                         propertyName: propName,
@@ -123,8 +146,15 @@ class BreakingChangeDetector {
             const propName = prop.name || prop.displayName;
             const fullPath = prefix ? `${prefix}.${propName}` : propName;
             flat[fullPath] = prop;
-            if (prop.options && Array.isArray(prop.options)) {
+            if (prop.type === 'collection' && Array.isArray(prop.options)) {
                 Object.assign(flat, this.flattenProperties(prop.options, fullPath));
+            }
+            else if (prop.type === 'fixedCollection' && Array.isArray(prop.options)) {
+                for (const group of prop.options) {
+                    if (!group?.name || !Array.isArray(group.values))
+                        continue;
+                    Object.assign(flat, this.flattenProperties(group.values, `${fullPath}.${group.name}`));
+                }
             }
         }
         return flat;
@@ -172,8 +202,9 @@ class BreakingChangeDetector {
         return recommendations;
     }
     hasBreakingChanges(nodeType, fromVersion, toVersion) {
-        const registryChanges = (0, breaking_changes_registry_1.getBreakingChangesForNode)(nodeType, fromVersion, toVersion);
-        return registryChanges.length > 0;
+        if ((0, breaking_changes_registry_1.getBreakingChangesForNode)(nodeType, fromVersion, toVersion).length > 0)
+            return true;
+        return this.detectDynamicChanges(nodeType, fromVersion, toVersion).some(c => c.isBreaking);
     }
     getChangedProperties(nodeType, fromVersion, toVersion) {
         const registryChanges = (0, breaking_changes_registry_1.getAllChangesForNode)(nodeType, fromVersion, toVersion);

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.processErrorExecution = processErrorExecution;
 const logger_1 = require("../utils/logger");
+const execution_run_data_1 = require("./execution-run-data");
 const MAX_STACK_LINES = 3;
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SENSITIVE_PATTERNS = [
@@ -50,7 +51,7 @@ function extractPrimaryError(error, lastNode, runData, includeFullStackTrace) {
     const errorNode = error?.node;
     const nodeName = errorNode?.name || lastNode || 'Unknown';
     const nodeRunData = runData[nodeName];
-    const nodeError = nodeRunData?.[0]?.error;
+    const nodeError = (0, execution_run_data_1.getRunError)(nodeRunData);
     const stackTrace = (error?.stack || nodeError?.stack);
     return {
         message: (error?.message || nodeError?.message || 'Unknown error'),
@@ -81,12 +82,12 @@ function extractUpstreamContext(errorNodeName, runData, workflow, itemsLimit = 2
         if (name === errorNodeName)
             return false;
         const runs = data;
-        return runs?.[0]?.data?.main?.[0]?.length > 0 && !runs?.[0]?.error;
+        return (0, execution_run_data_1.countRunItems)(runs) > 0 && !(0, execution_run_data_1.getRunError)(runs);
     })
         .map(([name, data]) => ({
         name,
-        executionTime: data?.[0]?.executionTime || 0,
-        startTime: data?.[0]?.startTime || 0
+        executionTime: (0, execution_run_data_1.totalExecutionTime)(data) ?? 0,
+        startTime: (0, execution_run_data_1.latestStartTime)(data)
     }))
         .sort((a, b) => b.startTime - a.startTime);
     if (successfulNodes.length > 0) {
@@ -129,15 +130,15 @@ function findAllUpstreamNodes(targetNode, workflow, visited = new Set()) {
 }
 function extractNodeOutput(nodeName, runData, itemsLimit) {
     const nodeData = runData[nodeName];
-    if (!nodeData?.[0]?.data?.main?.[0])
+    if (!(0, execution_run_data_1.hasRunOutputData)(nodeData))
         return undefined;
-    const items = nodeData[0].data.main[0];
+    const items = (0, execution_run_data_1.sampleRunItems)(nodeData, Math.max(itemsLimit, 1));
     const rawSamples = items.slice(0, itemsLimit);
     const sanitizedSamples = rawSamples.map((item) => sanitizeData(item));
     return {
         nodeName,
         nodeType: '',
-        itemCount: items.length,
+        itemCount: (0, execution_run_data_1.countRunItems)(nodeData),
         sampleItems: sanitizedSamples,
         dataStructure: extractStructure(items[0])
     };
@@ -149,13 +150,13 @@ function buildExecutionPath(errorNodeName, runData, workflow) {
         for (const nodeName of upstreamNodes) {
             const nodeData = runData[nodeName];
             const runs = nodeData;
-            const hasError = runs?.[0]?.error;
-            const itemCount = runs?.[0]?.data?.main?.[0]?.length || 0;
+            const hasError = (0, execution_run_data_1.getRunError)(runs);
+            const itemCount = (0, execution_run_data_1.countRunItems)(runs);
             path.push({
                 nodeName,
                 status: hasError ? 'error' : (runs ? 'success' : 'skipped'),
                 itemCount,
-                executionTime: runs?.[0]?.executionTime
+                executionTime: (0, execution_run_data_1.totalExecutionTime)(runs)
             });
         }
         const errorNodeData = runData[errorNodeName];
@@ -163,7 +164,7 @@ function buildExecutionPath(errorNodeName, runData, workflow) {
             nodeName: errorNodeName,
             status: 'error',
             itemCount: 0,
-            executionTime: errorNodeData?.[0]?.executionTime
+            executionTime: (0, execution_run_data_1.totalExecutionTime)(errorNodeData)
         });
     }
     else {
@@ -171,15 +172,15 @@ function buildExecutionPath(errorNodeName, runData, workflow) {
             .map(([name, data]) => ({
             name,
             data: data,
-            startTime: data?.[0]?.startTime || 0
+            startTime: (0, execution_run_data_1.latestStartTime)(data)
         }))
             .sort((a, b) => a.startTime - b.startTime);
         for (const { name, data } of nodesByTime) {
             path.push({
                 nodeName: name,
-                status: data?.[0]?.error ? 'error' : 'success',
-                itemCount: data?.[0]?.data?.main?.[0]?.length || 0,
-                executionTime: data?.[0]?.executionTime
+                status: (0, execution_run_data_1.getRunError)(data) ? 'error' : 'success',
+                itemCount: (0, execution_run_data_1.countRunItems)(data),
+                executionTime: (0, execution_run_data_1.totalExecutionTime)(data)
             });
         }
     }
@@ -191,7 +192,7 @@ function findAdditionalErrors(primaryErrorNode, runData) {
         if (nodeName === primaryErrorNode)
             continue;
         const runs = data;
-        const error = runs?.[0]?.error;
+        const error = (0, execution_run_data_1.getRunError)(runs);
         if (error) {
             additional.push({
                 nodeName,

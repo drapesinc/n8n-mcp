@@ -1,4 +1,4 @@
-import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, TestRunSummary, TestRunListParams, TestCaseListParams, TestRunListResponse, TestCaseListResponse, TestRunTriggerResult, TestRunCancelResult, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, SourceControlStatus, SourceControlPullResult, SourceControlPushResult, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams } from '../types/n8n-api';
+import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, TestRunSummary, TestRunListParams, TestCaseListParams, TestRunListResponse, TestCaseListResponse, TestRunTriggerResult, TestRunCancelResult, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, SourceControlStatus, SourceControlPullResult, SourceControlPushResult, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams, Folder, FolderListParams, FolderListResponse, Project } from '../types/n8n-api';
 export interface N8nApiClientConfig {
     baseUrl: string;
     apiKey: string;
@@ -17,11 +17,19 @@ export declare class N8nApiClient {
     private baseUrl;
     private versionInfo;
     private versionPromise;
+    private personalProjectId;
     private pinnedAgentsPromise;
+    private pinnedAgentsResolvedAt;
+    private static readonly PINNED_AGENTS_TTL_MS;
     private cfClientId?;
     private cfClientSecret?;
     private groupSupport;
+    private rejectedSettings;
+    private modernPublishRoute;
     constructor(config: N8nApiClientConfig);
+    private tryRetry;
+    private isRetryableConnectionError;
+    private extractErrorCodes;
     private getPinnedAgents;
     getVersion(): Promise<N8nVersionInfo | null>;
     private cfAccessHeaders;
@@ -32,6 +40,8 @@ export declare class N8nApiClient {
     refreshVersion(): Promise<N8nVersionInfo | null>;
     healthCheck(): Promise<HealthCheckResponse>;
     private sendWorkflowWrite;
+    private sendWorkflowWriteWithSettingsFallback;
+    private sendWorkflowWriteWithGroupFallback;
     private degradeGroupsAfterRejection;
     private putOrPatchWorkflow;
     private repairGroupsForWrite;
@@ -40,6 +50,8 @@ export declare class N8nApiClient {
     updateWorkflow(id: string, workflow: Partial<Workflow>, options?: WorkflowWriteOptions): Promise<Workflow>;
     deleteWorkflow(id: string): Promise<Workflow>;
     transferWorkflow(id: string, destinationProjectId: string): Promise<void>;
+    private postPublishRoute;
+    private confirmModernPublishRoute;
     activateWorkflow(id: string): Promise<Workflow>;
     deactivateWorkflow(id: string): Promise<Workflow>;
     listWorkflows(params?: WorkflowListParams): Promise<WorkflowListResponse>;
@@ -98,7 +110,20 @@ export declare class N8nApiClient {
     updateDataTableRows(id: string, params: DataTableUpdateRowsParams): Promise<any>;
     upsertDataTableRow(id: string, params: DataTableUpsertRowParams): Promise<any>;
     deleteDataTableRows(id: string, params: DataTableDeleteRowsParams): Promise<any>;
-    private serializeDataTableParams;
+    createFolder(projectId: string, data: {
+        name: string;
+        parentFolderId?: string;
+    }): Promise<Folder>;
+    listFolders(projectId: string, params?: FolderListParams): Promise<FolderListResponse>;
+    getFolder(projectId: string, folderId: string): Promise<Folder>;
+    updateFolder(projectId: string, folderId: string, data: {
+        name?: string;
+        parentFolderId?: string;
+    }): Promise<Folder>;
+    deleteFolder(projectId: string, folderId: string, transferToFolderId?: string): Promise<void>;
+    listProjects(limit?: number): Promise<Project[]>;
+    resolvePersonalProjectId(): Promise<string>;
+    private serializeQueryParams;
     private validateListResponse;
 }
 //# sourceMappingURL=n8n-api-client.d.ts.map

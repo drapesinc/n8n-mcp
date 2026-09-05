@@ -8,6 +8,7 @@ export declare class N8NDocumentationMCPServer {
     private server;
     private db;
     private repository;
+    private breakingChangeDetector;
     private templateService;
     private initialized;
     private cache;
@@ -44,6 +45,7 @@ export declare class N8NDocumentationMCPServer {
     private resolveContextFromArgs;
     private validateExtractedArgs;
     private coerceStringifiedJsonParams;
+    private listExecutionsInsteadOfGet;
     private listNodes;
     private getNodeInfo;
     private searchNodes;
@@ -67,6 +69,8 @@ export declare class N8NDocumentationMCPServer {
     private getVersionSummary;
     private versionMetadataUnavailable;
     private getVersionHistory;
+    private analyzeVersionUpgrade;
+    private defaultTargetVersion;
     private compareVersions;
     private getBreakingChanges;
     private getMigrations;

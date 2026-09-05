@@ -174,7 +174,7 @@ function renderRemediationPlaybook(findings, builtinAudit) {
         lines.push('### Requires review');
         if (byCat['error_handling']?.length) {
             const wfCount = uniqueWorkflows(byCat['error_handling']);
-            lines.push(`**Error handling gaps** (${wfCount} workflow${wfCount !== 1 ? 's' : ''}): Add Error Trigger nodes or set continueOnFail on critical nodes.`);
+            lines.push(`**Error handling gaps** (${wfCount} workflow${wfCount !== 1 ? 's' : ''}): Assign a shared error workflow via settings.errorWorkflow, add Error Trigger nodes, or set continueOnFail on critical nodes.`);
         }
         if (piiFindings.length > 0) {
             lines.push(`**PII in parameters** (${piiFindings.length} finding${piiFindings.length !== 1 ? 's' : ''}): Review whether hardcoded PII (emails, phones) is necessary or should use expressions.`);

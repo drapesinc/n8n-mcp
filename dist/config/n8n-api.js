@@ -6,6 +6,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getN8nApiConfig = getN8nApiConfig;
 exports.isN8nApiConfigured = isN8nApiConfigured;
 exports.getN8nApiConfigFromContext = getN8nApiConfigFromContext;
+exports.isValidMcpAccessToken = isValidMcpAccessToken;
+exports.deriveOfficialMcpEndpoint = deriveOfficialMcpEndpoint;
+exports.getOfficialMcpConfigFromContext = getOfficialMcpConfigFromContext;
+exports.getOfficialMcpConfig = getOfficialMcpConfig;
+exports.isOfficialMcpConfigured = isOfficialMcpConfigured;
 const zod_1 = require("zod");
 const dotenv_1 = __importDefault(require("dotenv"));
 const n8nApiConfigSchema = zod_1.z.object({
@@ -55,5 +60,37 @@ function getN8nApiConfigFromContext(context) {
         cfClientId: undefined,
         cfClientSecret: undefined,
     };
+}
+const MCP_ACCESS_TOKEN_MAX_BYTES = 4096;
+function isValidMcpAccessToken(token) {
+    return typeof token === 'string'
+        && token.length > 0
+        && !/\s/.test(token)
+        && Buffer.byteLength(token, 'utf8') <= MCP_ACCESS_TOKEN_MAX_BYTES;
+}
+function deriveOfficialMcpEndpoint(instanceUrl) {
+    return new URL(instanceUrl).origin + '/mcp-server/http';
+}
+function getOfficialMcpConfigFromContext(context) {
+    if (!context.n8nApiUrl || !isValidMcpAccessToken(context.n8nMcpAccessToken))
+        return null;
+    try {
+        return { endpoint: deriveOfficialMcpEndpoint(context.n8nApiUrl), token: context.n8nMcpAccessToken };
+    }
+    catch {
+        return null;
+    }
+}
+function getOfficialMcpConfig() {
+    const api = getN8nApiConfig();
+    if (!api)
+        return null;
+    return getOfficialMcpConfigFromContext({
+        n8nApiUrl: api.baseUrl,
+        n8nMcpAccessToken: process.env.N8N_MCP_ACCESS_TOKEN,
+    });
+}
+function isOfficialMcpConfigured() {
+    return getOfficialMcpConfig() !== null;
 }
 //# sourceMappingURL=n8n-api.js.map

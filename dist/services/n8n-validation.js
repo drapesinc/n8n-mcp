@@ -3,7 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.defaultWorkflowSettings = exports.workflowSettingsSchema = exports.workflowConnectionSchema = exports.workflowNodeSchema = void 0;
+exports.defaultWorkflowSettings = exports.workflowSettingsSchema = exports.workflowConnectionSchema = exports.WRITABLE_NODE_PROPERTIES = exports.workflowNodeSchema = void 0;
+exports.cleanNodeForApi = cleanNodeForApi;
 exports.validateWorkflowNode = validateWorkflowNode;
 exports.validateWorkflowConnections = validateWorkflowConnections;
 exports.validateWorkflowSettings = validateWorkflowSettings;
@@ -20,9 +21,10 @@ exports.getWorkflowFixSuggestions = getWorkflowFixSuggestions;
 const crypto_1 = __importDefault(require("crypto"));
 const zod_1 = require("zod");
 const node_type_utils_1 = require("../utils/node-type-utils");
+const workflow_settings_1 = require("../constants/workflow-settings");
 const node_classification_1 = require("../utils/node-classification");
 const mcp_input_normalizer_1 = require("../utils/mcp-input-normalizer");
-exports.workflowNodeSchema = zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowNode, zod_1.z.object({
+const workflowNodeObjectSchema = zod_1.z.object({
     id: zod_1.z.string(),
     name: zod_1.z.string(),
     type: zod_1.z.string(),
@@ -34,12 +36,23 @@ exports.workflowNodeSchema = zod_1.z.preprocess(mcp_input_normalizer_1.normalize
     notes: zod_1.z.string().optional(),
     notesInFlow: zod_1.z.boolean().optional(),
     continueOnFail: zod_1.z.boolean().optional(),
+    onError: zod_1.z.enum(['continueRegularOutput', 'continueErrorOutput', 'stopWorkflow']).optional(),
     retryOnFail: zod_1.z.boolean().optional(),
     maxTries: zod_1.z.number().optional(),
     waitBetweenTries: zod_1.z.number().optional(),
     alwaysOutputData: zod_1.z.boolean().optional(),
     executeOnce: zod_1.z.boolean().optional(),
-}));
+    webhookId: zod_1.z.string().optional(),
+    customTelemetryTags: zod_1.z
+        .object({ tag: zod_1.z.array(zod_1.z.object({ key: zod_1.z.string(), value: zod_1.z.string() })).optional() })
+        .optional(),
+});
+exports.workflowNodeSchema = zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowNode, workflowNodeObjectSchema);
+exports.WRITABLE_NODE_PROPERTIES = new Set(Object.keys(workflowNodeObjectSchema.shape));
+function cleanNodeForApi(node) {
+    const cleaned = Object.entries(node).filter(([key]) => exports.WRITABLE_NODE_PROPERTIES.has(key));
+    return Object.fromEntries(cleaned);
+}
 const connectionArraySchema = zod_1.z.array(zod_1.z.array(zod_1.z.object({
     node: zod_1.z.string(),
     type: zod_1.z.string(),
@@ -63,8 +76,15 @@ exports.workflowSettingsSchema = zod_1.z.object({
     saveExecutionProgress: zod_1.z.boolean().default(true),
     executionTimeout: zod_1.z.number().optional(),
     errorWorkflow: zod_1.z.string().optional(),
-    callerPolicy: zod_1.z.enum(['any', 'workflowsFromSameOwner', 'workflowsFromAList']).optional(),
+    callerPolicy: zod_1.z.enum(['any', 'none', 'workflowsFromSameOwner', 'workflowsFromAList']).optional(),
+    callerIds: zod_1.z.string().optional(),
+    timeSavedMode: zod_1.z.enum(['fixed', 'dynamic']).optional(),
+    timeSavedPerExecution: zod_1.z.number().optional(),
+    redactionPolicy: zod_1.z.enum(['none', 'non-manual', 'manual-only', 'all']).optional(),
     availableInMCP: zod_1.z.boolean().optional(),
+    customTelemetryTags: zod_1.z
+        .array(zod_1.z.object({ key: zod_1.z.string(), value: zod_1.z.string() }))
+        .optional(),
 });
 exports.defaultWorkflowSettings = {
     executionOrder: 'v1',
@@ -97,12 +117,21 @@ function ensureWebhookIds(nodes) {
         }
     }
 }
+function stripDerivedSettings(settings) {
+    return Object.fromEntries(Object.entries(settings).filter(([key]) => !workflow_settings_1.DERIVED_SETTINGS_PROPERTIES.has(key)));
+}
 function cleanWorkflowForCreate(workflow) {
     const { id, createdAt, updatedAt, versionId, meta, active, tags, ...cleanedWorkflow } = workflow;
+    if (cleanedWorkflow.settings && typeof cleanedWorkflow.settings === 'object') {
+        cleanedWorkflow.settings = stripDerivedSettings(cleanedWorkflow.settings);
+    }
     if (!cleanedWorkflow.settings || Object.keys(cleanedWorkflow.settings).length === 0) {
         cleanedWorkflow.settings = exports.defaultWorkflowSettings;
     }
     ensureWebhookIds(cleanedWorkflow.nodes);
+    if (cleanedWorkflow.nodes) {
+        cleanedWorkflow.nodes = cleanedWorkflow.nodes.map(cleanNodeForApi);
+    }
     return cleanedWorkflow;
 }
 function cleanWorkflowForUpdate(workflow) {
@@ -118,27 +147,10 @@ function cleanWorkflowForUpdate(workflow) {
         cleanedWorkflow.nodeGroups = source.nodeGroups;
     if (source.settings !== undefined)
         cleanedWorkflow.settings = source.settings;
-    const ALL_KNOWN_SETTINGS_PROPERTIES = new Set([
-        'saveExecutionProgress',
-        'saveManualExecutions',
-        'saveDataErrorExecution',
-        'saveDataSuccessExecution',
-        'executionTimeout',
-        'errorWorkflow',
-        'timezone',
-        'executionOrder',
-        'callerPolicy',
-        'callerIds',
-        'timeSavedPerExecution',
-        'availableInMCP',
-    ]);
+    if (source.parentFolderId !== undefined)
+        cleanedWorkflow.parentFolderId = source.parentFolderId;
     if (cleanedWorkflow.settings && typeof cleanedWorkflow.settings === 'object') {
-        const filteredSettings = {};
-        for (const [key, value] of Object.entries(cleanedWorkflow.settings)) {
-            if (ALL_KNOWN_SETTINGS_PROPERTIES.has(key)) {
-                filteredSettings[key] = value;
-            }
-        }
+        const filteredSettings = stripDerivedSettings(cleanedWorkflow.settings);
         if (Object.keys(filteredSettings).length > 0) {
             cleanedWorkflow.settings = filteredSettings;
         }
@@ -150,6 +162,9 @@ function cleanWorkflowForUpdate(workflow) {
         cleanedWorkflow.settings = { executionOrder: 'v1' };
     }
     ensureWebhookIds(cleanedWorkflow.nodes);
+    if (cleanedWorkflow.nodes) {
+        cleanedWorkflow.nodes = cleanedWorkflow.nodes.map(cleanNodeForApi);
+    }
     return cleanedWorkflow;
 }
 function validateWorkflowStructure(workflow) {

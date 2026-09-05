@@ -36,6 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleUpdatePartialWorkflow = handleUpdatePartialWorkflow;
 const zod_1 = require("zod");
 const crypto_1 = require("crypto");
+const node_util_1 = require("node:util");
 const workflow_diff_engine_1 = require("../services/workflow-diff-engine");
 const handlers_n8n_manager_1 = require("./handlers-n8n-manager");
 const n8n_errors_1 = require("../utils/n8n-errors");
@@ -58,6 +59,28 @@ function compareVersions(a, b) {
         return a.updatedAt === b.updatedAt ? 'same' : 'changed';
     }
     return 'unknown';
+}
+function nodesWithoutWebhookId(workflow) {
+    return (workflow.nodes ?? []).filter(node => node.id && !node.webhookId).map(node => node.id);
+}
+function writableShape(workflow, ignoreWebhookIdOf) {
+    const cleaned = (0, n8n_validation_1.cleanWorkflowForUpdate)(structuredClone(workflow));
+    if (Array.isArray(cleaned.nodes)) {
+        for (const node of cleaned.nodes) {
+            if (ignoreWebhookIdOf.has(node.id))
+                delete node.webhookId;
+        }
+    }
+    return cleaned;
+}
+function sameWritableContent(a, b) {
+    try {
+        const generated = new Set([...nodesWithoutWebhookId(a), ...nodesWithoutWebhookId(b)]);
+        return (0, node_util_1.isDeepStrictEqual)(writableShape(a, generated), writableShape(b, generated));
+    }
+    catch {
+        return false;
+    }
 }
 function getValidator(repository) {
     if (!cachedValidator) {
@@ -98,6 +121,7 @@ const workflowDiffSchema = zod_1.z.object({
         tag: zod_1.z.string().optional(),
         nodeGroups: zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpJsonValue, zod_1.z.any()).optional(),
         destinationProjectId: zod_1.z.string().min(1).optional(),
+        parentFolderId: zod_1.z.string().min(1).nullable().optional(),
         id: zod_1.z.string().optional(),
     }).transform((op) => {
         if (NODE_TARGETING_OPERATIONS.has(op.type)) {
@@ -362,6 +386,7 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                         throw updateError;
                     }
                     let rollbackPerformed = false;
+                    let rollbackVerifiedAfterError = false;
                     let rollbackErrorMessage;
                     try {
                         await client.updateWorkflow(input.id, workflowBefore, {
@@ -375,16 +400,36 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     }
                     catch (rollbackErr) {
                         rollbackErrorMessage = rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr);
-                        logger_1.logger.error('updateWorkflow failed AND rollback failed', {
-                            workflowId: input.id,
-                            originalError: updateError instanceof Error ? updateError.message : String(updateError),
-                            rollbackError: rollbackErrorMessage,
-                        });
+                        try {
+                            const afterRollback = await client.getWorkflow(input.id);
+                            if (sameWritableContent(afterRollback, workflowBefore)) {
+                                rollbackPerformed = true;
+                                rollbackVerifiedAfterError = true;
+                                logger_1.logger.warn('rollback PUT errored but content matches the prior state; treating as rolled back', {
+                                    workflowId: input.id,
+                                    rollbackError: rollbackErrorMessage,
+                                });
+                                rollbackErrorMessage = undefined;
+                            }
+                        }
+                        catch (verifyErr) {
+                            logger_1.logger.debug('post-rollback verification GET failed', verifyErr);
+                        }
+                        if (!rollbackPerformed) {
+                            logger_1.logger.error('updateWorkflow failed AND rollback failed', {
+                                workflowId: input.id,
+                                originalError: updateError instanceof Error ? updateError.message : String(updateError),
+                                rollbackError: rollbackErrorMessage,
+                            });
+                        }
                     }
                     if (updateError instanceof n8n_errors_1.N8nApiError) {
+                        const folderMoveInPayload = diffResult.workflow?.parentFolderId !== undefined;
                         const augmentedDetails = {
                             ...(updateError.details ?? {}),
                             rollbackPerformed,
+                            ...(rollbackVerifiedAfterError ? { rollbackVerifiedAfterError: true } : {}),
+                            ...(folderMoveInPayload && rollbackPerformed ? { folderMoveMayHavePersisted: true } : {}),
                             ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
                             ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),
                             ...(groupWarnings.length > 0
@@ -392,7 +437,9 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                                 : {}),
                         };
                         const suffix = rollbackPerformed
-                            ? ' (workflow restored to prior state)'
+                            ? (folderMoveInPayload
+                                ? ' (workflow restored to prior state; a folder move in the failed update may have persisted — n8n cannot report or restore folder placement)'
+                                : ' (workflow restored to prior state)')
                             : (rollbackErrorMessage
                                 ? ' (rollback also failed; workflow may be in a broken state — try n8n_workflow_versions for a backup)'
                                 : '');
@@ -649,6 +696,10 @@ function inferIntentFromOperations(operations) {
                 return 'Deactivate workflow';
             case 'transferWorkflow':
                 return `Transfer workflow to project ${op.destinationProjectId || ''}`.trim();
+            case 'moveToFolder':
+                return op.parentFolderId === null
+                    ? 'Move workflow to project root'
+                    : `Move workflow to folder ${op.parentFolderId || ''}`.trim();
             default:
                 return `Workflow ${op.type}`;
         }

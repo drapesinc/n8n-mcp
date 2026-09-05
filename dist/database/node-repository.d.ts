@@ -84,31 +84,16 @@ export declare class NodeRepository {
         addedProperties?: string[];
         releasedAt?: Date;
     }): void;
+    private versionLookupType;
     getNodeVersions(nodeType: string): any[];
     getLatestNodeVersion(nodeType: string): any | null;
     getNodeVersion(nodeType: string, version: string): any | null;
-    savePropertyChange(changeData: {
-        nodeType: string;
-        fromVersion: string;
-        toVersion: string;
-        propertyName: string;
-        changeType: 'added' | 'removed' | 'renamed' | 'type_changed' | 'requirement_changed' | 'default_changed';
-        isBreaking?: boolean;
-        oldValue?: string;
-        newValue?: string;
-        migrationHint?: string;
-        autoMigratable?: boolean;
-        migrationStrategy?: any;
-        severity?: 'LOW' | 'MEDIUM' | 'HIGH';
-    }): void;
-    getPropertyChanges(nodeType: string, fromVersion: string, toVersion: string): any[];
-    getBreakingChanges(nodeType: string, fromVersion: string, toVersion?: string): any[];
-    getAutoMigratableChanges(nodeType: string, fromVersion: string, toVersion: string): any[];
     hasVersionMetadata(nodeType: string): boolean;
     hasVersionUpgradePath(nodeType: string, fromVersion: string, toVersion: string): boolean;
     getVersionedNodesCount(): number;
     private parseNodeVersionRow;
-    private parsePropertyChangeRow;
+    private compressJson;
+    private decompressJson;
     createWorkflowVersion(data: {
         instanceId: string;
         workflowId: string;

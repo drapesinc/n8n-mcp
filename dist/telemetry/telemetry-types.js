@@ -2,11 +2,12 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelemetryErrorType = exports.TELEMETRY_BACKEND = exports.TELEMETRY_CONFIG = void 0;
 exports.TELEMETRY_CONFIG = {
-    BATCH_FLUSH_INTERVAL: 5000,
+    BATCH_FLUSH_INTERVAL: 60000,
     EVENT_QUEUE_THRESHOLD: 10,
     WORKFLOW_QUEUE_THRESHOLD: 5,
     OPERATION_TIMEOUT: 5000,
     FETCH_TIMEOUT_MS: 2000,
+    SHUTDOWN_FLUSH_TIMEOUT_MS: 2500,
     RATE_LIMIT_WINDOW: 60000,
     RATE_LIMIT_MAX_EVENTS: 100,
     MAX_QUEUE_SIZE: 1000,
@@ -14,7 +15,7 @@ exports.TELEMETRY_CONFIG = {
 };
 exports.TELEMETRY_BACKEND = {
     URL: 'https://ydyufsohxdfpopqbubwk.supabase.co',
-    ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlkeXVmc29oeGRmcG9wcWJ1YndrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg3OTYyMDAsImV4cCI6MjA3NDM3MjIwMH0.xESphg6h5ozaDsm4Vla3QnDJGc6Nc_cpfoqTHRynkCk'
+    ANON_KEY: 'sb_publishable_UbVUTyXgIyvemM9b15auQg_YzGa47Gq'
 };
 var TelemetryErrorType;
 (function (TelemetryErrorType) {

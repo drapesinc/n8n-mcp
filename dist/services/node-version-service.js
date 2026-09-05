@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeVersionService = void 0;
+const node_parser_1 = require("../parsers/node-parser");
 class NodeVersionService {
     constructor(nodeRepository, breakingChangeDetector) {
         this.nodeRepository = nodeRepository;
@@ -178,8 +179,8 @@ class NodeVersionService {
         };
     }
     versionExists(nodeType, version) {
-        const versions = this.getAvailableVersions(nodeType);
-        return versions.some(v => v.version === version);
+        const wanted = (0, node_parser_1.normalizeNodeVersion)(version);
+        return this.getAvailableVersions(nodeType).some(v => (0, node_parser_1.normalizeNodeVersion)(v.version) === wanted);
     }
     getVersionMetadata(nodeType, version) {
         const versionData = this.nodeRepository.getNodeVersion(nodeType, version);

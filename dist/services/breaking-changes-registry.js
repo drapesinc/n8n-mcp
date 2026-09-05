@@ -140,18 +140,13 @@ exports.BREAKING_CHANGES_REGISTRY = [
     }
 ];
 function getBreakingChangesForNode(nodeType, fromVersion, toVersion) {
-    return exports.BREAKING_CHANGES_REGISTRY.filter(change => {
-        const nodeMatches = change.nodeType === nodeType || change.nodeType === '*';
-        const versionMatches = compareVersions(fromVersion, change.fromVersion) >= 0 &&
-            compareVersions(toVersion, change.toVersion) <= 0;
-        return nodeMatches && versionMatches && change.isBreaking;
-    });
+    return getAllChangesForNode(nodeType, fromVersion, toVersion).filter(change => change.isBreaking);
 }
 function getAllChangesForNode(nodeType, fromVersion, toVersion) {
     return exports.BREAKING_CHANGES_REGISTRY.filter(change => {
         const nodeMatches = change.nodeType === nodeType || change.nodeType === '*';
-        const versionMatches = compareVersions(fromVersion, change.fromVersion) >= 0 &&
-            compareVersions(toVersion, change.toVersion) <= 0;
+        const versionMatches = compareVersions(change.fromVersion, fromVersion) >= 0 &&
+            compareVersions(change.toVersion, toVersion) <= 0;
         return nodeMatches && versionMatches;
     });
 }

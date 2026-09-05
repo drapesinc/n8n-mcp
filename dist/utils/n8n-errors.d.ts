@@ -22,6 +22,9 @@ export declare class N8nServerError extends N8nApiError {
 export declare function handleN8nApiError(error: unknown): N8nApiError;
 export declare function formatExecutionError(executionId: string, workflowId?: string): string;
 export declare function formatNoExecutionError(): string;
+export declare function unknownSettingsKeysNamedBy(error: unknown): string[];
+export declare function isUnknownSettingsPropertyError(error: unknown): boolean;
+export declare function enrichUnknownPropertyError(error: N8nApiError, sentBody: Record<string, unknown>): N8nApiError;
 export declare function getUserFriendlyErrorMessage(error: N8nApiError): string;
 export declare function logN8nError(error: N8nApiError, context?: string): void;
 //# sourceMappingURL=n8n-errors.d.ts.map

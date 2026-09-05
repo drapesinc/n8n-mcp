@@ -8,46 +8,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 process.env.MCP_MODE = 'stdio';
 process.env.DISABLE_CONSOLE_OUTPUT = 'true';
 process.env.LOG_LEVEL = 'error';
-const originalConsoleLog = console.log;
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
-const originalConsoleInfo = console.info;
-const originalConsoleDebug = console.debug;
-const originalConsoleTrace = console.trace;
-const originalConsoleDir = console.dir;
-const originalConsoleTime = console.time;
-const originalConsoleTimeEnd = console.timeEnd;
-console.log = () => { };
-console.error = () => { };
-console.warn = () => { };
-console.info = () => { };
-console.debug = () => { };
-console.trace = () => { };
-console.dir = () => { };
-console.time = () => { };
-console.timeEnd = () => { };
-console.timeLog = () => { };
-console.group = () => { };
-console.groupEnd = () => { };
-console.table = () => { };
-console.clear = () => { };
-console.count = () => { };
-console.countReset = () => { };
-const originalStdoutWrite = process.stdout.write.bind(process.stdout);
-const stderrWrite = process.stderr.write.bind(process.stderr);
-process.stdout.write = function (chunk, encodingOrCallback, callback) {
-    const str = typeof chunk === 'string' ? chunk : chunk.toString();
-    const trimmed = str.trimStart();
-    if (trimmed.startsWith('{') && trimmed.includes('"jsonrpc"')) {
-        return originalStdoutWrite(chunk, encodingOrCallback, callback);
-    }
-    return stderrWrite(chunk, encodingOrCallback, callback);
-};
-const server_1 = require("./server");
+const { installStdioGuard } = require('../utils/stdio-guard');
+const originalConsoleError = installStdioGuard({ silenceConsole: true }).error;
+const { N8NDocumentationMCPServer } = require('./server');
 let server = null;
 async function main() {
     try {
-        server = new server_1.N8NDocumentationMCPServer();
+        server = new N8NDocumentationMCPServer();
         await server.run();
     }
     catch (error) {

@@ -783,6 +783,12 @@ class WorkflowAutoFixer {
             const latestVersion = analysis.latestVersion;
             try {
                 const migrationResult = await this.migrationService.migrateNode(node, currentVersion, latestVersion);
+                if (!migrationResult.success) {
+                    logger.info(`Skipping automatic upgrade for ${node.name}: manual migration steps remain`, {
+                        remainingIssues: migrationResult.remainingIssues.length
+                    });
+                    continue;
+                }
                 fixes.push({
                     node: node.name,
                     field: 'typeVersion',

@@ -45,11 +45,20 @@ export declare function handleInsertRows(args: unknown, context?: InstanceContex
 export declare function handleUpdateRows(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleUpsertRows(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDeleteRows(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleAddColumn(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleDeleteColumn(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleRenameColumn(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleListCredentials(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleGetCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleCreateCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleUpdateCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleDeleteCredential(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleGetCredentialSchema(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleCreateFolder(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleListFolders(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleGetFolder(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleRenameFolder(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleMoveFolder(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
+export declare function handleDeleteFolder(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 export declare function handleAuditInstance(args: unknown, context?: InstanceContext): Promise<McpToolResponse>;
 //# sourceMappingURL=handlers-n8n-manager.d.ts.map

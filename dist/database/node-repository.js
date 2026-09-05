@@ -1,6 +1,41 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeRepository = void 0;
+const zlib = __importStar(require("zlib"));
+const node_parser_1 = require("../parsers/node-parser");
 const sqlite_storage_service_1 = require("../services/sqlite-storage-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
 const logger_1 = require("../utils/logger");
@@ -523,93 +558,47 @@ class NodeRepository {
         released_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(versionData.nodeType, versionData.version, versionData.packageName, versionData.displayName, versionData.description || null, versionData.category || null, versionData.isCurrentMax ? 1 : 0, versionData.propertiesSchema ? JSON.stringify(versionData.propertiesSchema) : null, versionData.operations ? JSON.stringify(versionData.operations) : null, versionData.credentialsRequired ? JSON.stringify(versionData.credentialsRequired) : null, versionData.outputs ? JSON.stringify(versionData.outputs) : null, versionData.minimumN8nVersion || null, versionData.breakingChanges ? JSON.stringify(versionData.breakingChanges) : null, versionData.deprecatedProperties ? JSON.stringify(versionData.deprecatedProperties) : null, versionData.addedProperties ? JSON.stringify(versionData.addedProperties) : null, versionData.releasedAt || null);
+        stmt.run(versionData.nodeType, versionData.version, versionData.packageName, versionData.displayName, versionData.description || null, versionData.category || null, versionData.isCurrentMax ? 1 : 0, versionData.propertiesSchema ? this.compressJson(versionData.propertiesSchema) : null, versionData.operations ? JSON.stringify(versionData.operations) : null, versionData.credentialsRequired ? JSON.stringify(versionData.credentialsRequired) : null, versionData.outputs ? JSON.stringify(versionData.outputs) : null, versionData.minimumN8nVersion || null, versionData.breakingChanges ? JSON.stringify(versionData.breakingChanges) : null, versionData.deprecatedProperties ? JSON.stringify(versionData.deprecatedProperties) : null, versionData.addedProperties ? JSON.stringify(versionData.addedProperties) : null, versionData.releasedAt || null);
+    }
+    versionLookupType(nodeType) {
+        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
+        const row = this.db.prepare(`
+      SELECT tool_variant_of FROM nodes WHERE node_type = ? AND is_tool_variant = 1
+    `).get(normalizedType);
+        return row?.tool_variant_of || normalizedType;
     }
     getNodeVersions(nodeType) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
         const rows = this.db.prepare(`
       SELECT * FROM node_versions
       WHERE node_type = ?
-      ORDER BY version DESC
-    `).all(normalizedType);
-        return rows.map(row => this.parseNodeVersionRow(row));
+    `).all(this.versionLookupType(nodeType));
+        return rows
+            .map(row => this.parseNodeVersionRow(row))
+            .sort((a, b) => Number(b.version) - Number(a.version));
     }
     getLatestNodeVersion(nodeType) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
         const row = this.db.prepare(`
       SELECT * FROM node_versions
       WHERE node_type = ? AND is_current_max = 1
       LIMIT 1
-    `).get(normalizedType);
+    `).get(this.versionLookupType(nodeType));
         if (!row)
             return null;
         return this.parseNodeVersionRow(row);
     }
     getNodeVersion(nodeType, version) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
         const row = this.db.prepare(`
       SELECT * FROM node_versions
       WHERE node_type = ? AND version = ?
-    `).get(normalizedType, version);
+    `).get(this.versionLookupType(nodeType), (0, node_parser_1.normalizeNodeVersion)(version));
         if (!row)
             return null;
         return this.parseNodeVersionRow(row);
     }
-    savePropertyChange(changeData) {
-        const stmt = this.db.prepare(`
-      INSERT INTO version_property_changes (
-        node_type, from_version, to_version, property_name, change_type,
-        is_breaking, old_value, new_value, migration_hint, auto_migratable,
-        migration_strategy, severity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-        stmt.run(changeData.nodeType, changeData.fromVersion, changeData.toVersion, changeData.propertyName, changeData.changeType, changeData.isBreaking ? 1 : 0, changeData.oldValue || null, changeData.newValue || null, changeData.migrationHint || null, changeData.autoMigratable ? 1 : 0, changeData.migrationStrategy ? JSON.stringify(changeData.migrationStrategy) : null, changeData.severity || 'MEDIUM');
-    }
-    getPropertyChanges(nodeType, fromVersion, toVersion) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
-        const rows = this.db.prepare(`
-      SELECT * FROM version_property_changes
-      WHERE node_type = ? AND from_version = ? AND to_version = ?
-      ORDER BY severity DESC, property_name
-    `).all(normalizedType, fromVersion, toVersion);
-        return rows.map(row => this.parsePropertyChangeRow(row));
-    }
-    getBreakingChanges(nodeType, fromVersion, toVersion) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
-        let sql = `
-      SELECT * FROM version_property_changes
-      WHERE node_type = ? AND is_breaking = 1
-    `;
-        const params = [normalizedType];
-        if (toVersion) {
-            sql += ` AND from_version >= ? AND to_version <= ?`;
-            params.push(fromVersion, toVersion);
-        }
-        else {
-            sql += ` AND from_version >= ?`;
-            params.push(fromVersion);
-        }
-        sql += ` ORDER BY from_version, to_version, severity DESC`;
-        const rows = this.db.prepare(sql).all(...params);
-        return rows.map(row => this.parsePropertyChangeRow(row));
-    }
-    getAutoMigratableChanges(nodeType, fromVersion, toVersion) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
-        const rows = this.db.prepare(`
-      SELECT * FROM version_property_changes
-      WHERE node_type = ?
-        AND from_version = ?
-        AND to_version = ?
-        AND auto_migratable = 1
-      ORDER BY severity DESC
-    `).all(normalizedType, fromVersion, toVersion);
-        return rows.map(row => this.parsePropertyChangeRow(row));
-    }
     hasVersionMetadata(nodeType) {
-        const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
         const row = this.db.prepare(`
       SELECT 1 FROM node_versions WHERE node_type = ? LIMIT 1
-    `).get(normalizedType);
+    `).get(this.versionLookupType(nodeType));
         return !!row;
     }
     hasVersionUpgradePath(nodeType, fromVersion, toVersion) {
@@ -637,7 +626,7 @@ class NodeRepository {
             description: row.description,
             category: row.category,
             isCurrentMax: Number(row.is_current_max) === 1,
-            propertiesSchema: row.properties_schema ? this.safeJsonParse(row.properties_schema, []) : null,
+            propertiesSchema: row.properties_schema ? this.decompressJson(row.properties_schema, []) : null,
             operations: row.operations ? this.safeJsonParse(row.operations, []) : null,
             credentialsRequired: row.credentials_required ? this.safeJsonParse(row.credentials_required, []) : null,
             outputs: row.outputs ? this.safeJsonParse(row.outputs, null) : null,
@@ -649,23 +638,21 @@ class NodeRepository {
             createdAt: row.created_at
         };
     }
-    parsePropertyChangeRow(row) {
-        return {
-            id: row.id,
-            nodeType: row.node_type,
-            fromVersion: row.from_version,
-            toVersion: row.to_version,
-            propertyName: row.property_name,
-            changeType: row.change_type,
-            isBreaking: Number(row.is_breaking) === 1,
-            oldValue: row.old_value,
-            newValue: row.new_value,
-            migrationHint: row.migration_hint,
-            autoMigratable: Number(row.auto_migratable) === 1,
-            migrationStrategy: row.migration_strategy ? this.safeJsonParse(row.migration_strategy, null) : null,
-            severity: row.severity,
-            createdAt: row.created_at
-        };
+    compressJson(value) {
+        return zlib.gzipSync(JSON.stringify(value)).toString('base64');
+    }
+    decompressJson(stored, fallback) {
+        const trimmed = stored.trimStart();
+        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+            return this.safeJsonParse(stored, fallback);
+        }
+        try {
+            return JSON.parse(zlib.gunzipSync(Buffer.from(stored, 'base64')).toString('utf8'));
+        }
+        catch (error) {
+            logger_1.logger.warn('Failed to decompress stored schema', { error: error.message });
+            return fallback;
+        }
     }
     createWorkflowVersion(data) {
         const stmt = this.db.prepare(`

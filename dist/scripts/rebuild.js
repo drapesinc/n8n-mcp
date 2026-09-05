@@ -55,7 +55,11 @@ async function rebuild() {
     const toolVariantGenerator = new tool_variant_generator_1.ToolVariantGenerator();
     const schema = fs.readFileSync(path.join(__dirname, '../../src/database/schema.sql'), 'utf8');
     db.exec(schema);
+    db.exec(`DELETE FROM node_versions WHERE node_type IN (
+    SELECT node_type FROM nodes WHERE is_community = 0 OR is_community IS NULL
+  )`);
     db.exec('DELETE FROM nodes WHERE is_community = 0 OR is_community IS NULL');
+    db.exec('DROP TABLE IF EXISTS version_property_changes');
     console.log('🗑️  Cleared core/base nodes (community nodes preserved)\n');
     const nodes = await loader.loadAllNodes();
     console.log(`📦 Loaded ${nodes.length} nodes from packages\n`);
@@ -68,7 +72,8 @@ async function rebuild() {
         withProperties: 0,
         withOperations: 0,
         withDocs: 0,
-        toolVariants: 0
+        toolVariants: 0,
+        versionRows: 0
     };
     console.log('🔄 Processing nodes...');
     const processedNodes = [];
@@ -83,6 +88,7 @@ async function rebuild() {
             }
             const docs = await mapper.fetchDocumentation(parsed.nodeType);
             parsed.documentation = docs || undefined;
+            const versions = parser.parseVersions(NodeClass, packageName);
             if (parsed.isAITool && !parsed.isTrigger) {
                 const toolVariant = toolVariantGenerator.generateToolVariant(parsed);
                 if (toolVariant) {
@@ -90,12 +96,13 @@ async function rebuild() {
                     processedNodes.push({
                         parsed: toolVariant,
                         docs: undefined,
-                        nodeName: `${nodeName}Tool`
+                        nodeName: `${nodeName}Tool`,
+                        versions: []
                     });
                     stats.toolVariants++;
                 }
             }
-            processedNodes.push({ parsed, docs: docs || undefined, nodeName });
+            processedNodes.push({ parsed, docs: docs || undefined, nodeName, versions });
         }
         catch (error) {
             stats.failed++;
@@ -105,10 +112,30 @@ async function rebuild() {
     }
     console.log(`\n💾 Saving ${processedNodes.length} processed nodes to database...`);
     let saved = 0;
-    for (const { parsed, docs, nodeName } of processedNodes) {
+    for (const { parsed, docs, nodeName, versions } of processedNodes) {
         try {
-            repository.saveNode(parsed);
+            db.transaction(() => {
+                repository.saveNode(parsed);
+                for (const version of versions) {
+                    repository.saveNodeVersion({
+                        nodeType: version.nodeType,
+                        version: version.version,
+                        packageName: version.packageName,
+                        displayName: version.displayName,
+                        description: version.description,
+                        category: version.category,
+                        isCurrentMax: version.isCurrentMax,
+                        propertiesSchema: version.properties,
+                        operations: version.operations,
+                        credentialsRequired: version.credentials,
+                        outputs: version.outputs,
+                        addedProperties: version.addedProperties,
+                        deprecatedProperties: version.deprecatedProperties
+                    });
+                }
+            });
             saved++;
+            stats.versionRows += versions.length;
             stats.successful++;
             if (parsed.isAITool)
                 stats.aiTools++;
@@ -165,6 +192,14 @@ async function rebuild() {
     console.log(`   Failed: ${stats.failed}`);
     console.log(`   AI Tools: ${stats.aiTools}`);
     console.log(`   Tool Variants: ${stats.toolVariants}`);
+    console.log(`   Version rows: ${stats.versionRows}`);
+    db.exec('VACUUM');
+    const inconsistent = db.prepare(`
+    SELECT node_type FROM node_versions GROUP BY node_type HAVING SUM(is_current_max) != 1
+  `).all();
+    if (inconsistent.length > 0) {
+        throw new Error(`Version rows without exactly one current version: ${inconsistent.map(r => r.node_type).join(', ')}`);
+    }
     console.log(`   Triggers: ${stats.triggers}`);
     console.log(`   Webhooks: ${stats.webhooks}`);
     console.log(`   With Properties: ${stats.withProperties}`);

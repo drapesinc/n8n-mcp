@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import { InstanceContext } from './types/instance-context';
 import { SessionState } from './types/session-state';
 import type { AdditionalTool } from './types/additional-tools';
+export { probeOfficialMcp } from './services/n8n-official-mcp-client';
+export type { OfficialMcpCapabilities, OfficialMcpErrorCode } from './services/n8n-official-mcp-client';
 export interface EngineHealth {
     status: 'healthy' | 'unhealthy';
     uptime: number;

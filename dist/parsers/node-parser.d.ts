@@ -21,10 +21,27 @@ export interface ParsedNode {
     toolVariantOf?: string;
     hasToolVariant?: boolean;
 }
+export interface ParsedNodeVersion {
+    nodeType: string;
+    version: string;
+    packageName: string;
+    displayName: string;
+    description?: string;
+    category?: string;
+    isCurrentMax: boolean;
+    properties: any[];
+    operations: any[];
+    credentials: any[];
+    outputs?: any[];
+    addedProperties: string[];
+    deprecatedProperties: string[];
+}
+export declare function normalizeNodeVersion(version: unknown): string;
 export declare class NodeParser {
     private propertyExtractor;
     private currentNodeClass;
     parse(nodeClass: NodeClass, packageName: string): ParsedNode;
+    parseVersions(nodeClass: NodeClass, packageName: string): ParsedNodeVersion[];
     private getNodeDescription;
     private detectStyle;
     private extractNodeType;
