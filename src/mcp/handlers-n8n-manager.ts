@@ -2945,9 +2945,16 @@ export async function handleDiagnostic(request: any, context?: InstanceContext):
   const isMultiWorkspace = workspaceManager.isMultiWorkspace();
 
   // Check API configuration (single-instance fallback)
-  const apiConfig = getN8nApiConfig();
-  // In multi-workspace mode, API is considered configured if we have at least one workspace
-  const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
+  // Context-aware and fail-closed, matching upstream's fix for
+  // GHSA-jxx9-px88-pj69. This fork previously called the context-blind
+  // getN8nApiConfig() here and treated "any workspace exists" as configured,
+  // which reported the operator's own n8n URL to a caller that supplied no
+  // context — the exact disclosure the advisory is about. Harmless over stdio
+  // where we are the operator, but this server can also be served over HTTP.
+  // The real path is unaffected: server.ts passes resolveContextFromArgs(args),
+  // so a configured workspace still resolves and still reports as configured.
+  const apiConfig = resolveN8nApiConfigForResponse(context);
+  const apiConfigured = apiConfig !== null;
   const apiClient = getN8nApiClient(context);
 
   // Test API connectivity if configured

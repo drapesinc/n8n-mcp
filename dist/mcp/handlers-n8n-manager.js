@@ -2118,8 +2118,8 @@ async function handleDiagnostic(request, context) {
     const availableWorkspaces = workspaceManager.getAvailableWorkspaces();
     const defaultWorkspace = workspaceManager.getDefaultWorkspace();
     const isMultiWorkspace = workspaceManager.isMultiWorkspace();
-    const apiConfig = (0, n8n_api_1.getN8nApiConfig)();
-    const apiConfigured = apiConfig !== null || availableWorkspaces.length > 0;
+    const apiConfig = resolveN8nApiConfigForResponse(context);
+    const apiConfigured = apiConfig !== null;
     const apiClient = getN8nApiClient(context);
     let apiStatus = {
         configured: apiConfigured,

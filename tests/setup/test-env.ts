@@ -9,14 +9,69 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { existsSync } from 'fs';
 
+/**
+ * Environment variables that carry REAL credentials for a live n8n instance.
+ *
+ * Unit tests must never see these. This machine exports N8N_TOKEN_* / N8N_URL_*
+ * into every shell (1Password injection at login), and loadTestEnvironment()
+ * additionally reads .env, so a unit test process silently inherited working
+ * production credentials. Two consequences, both observed on 2026-09-04:
+ *   - handleDiagnostic reported a real, configured API instead of the
+ *     "not configured" state its security test (GHSA-jxx9-px88-pj69) asserts;
+ *   - a failing assertion in agent-call-defaults rendered a live n8n API token
+ *     into the test output.
+ * Beyond the noise, unit tests holding live credentials can reach the real
+ * instance, which is not something a unit run should ever be able to do.
+ *
+ * Integration tests DO need the real thing, so they opt in explicitly by
+ * setting N8N_MCP_TEST_REAL_CREDENTIALS=true (see vitest.config.integration.ts).
+ */
+const REAL_CREDENTIAL_PREFIXES = ['N8N_URL_', 'N8N_TOKEN_'];
+const REAL_CREDENTIAL_KEYS = [
+  'N8N_API_URL',
+  'N8N_API_KEY',
+  'N8N_MCP_ACCESS_TOKEN',
+  'N8N_WEBHOOK_USERNAME',
+  'N8N_WEBHOOK_PASSWORD',
+];
+
+export function usingRealCredentials(): boolean {
+  return process.env.N8N_MCP_TEST_REAL_CREDENTIALS === 'true';
+}
+
+/**
+ * Remove inherited real credentials. Returns the names (never the values) of
+ * what was removed, so a run can be explained without printing a secret.
+ */
+export function scrubRealCredentials(): string[] {
+  const removed: string[] = [];
+  for (const key of Object.keys(process.env)) {
+    const isPrefixed = REAL_CREDENTIAL_PREFIXES.some((prefix) => key.startsWith(prefix));
+    if (isPrefixed || REAL_CREDENTIAL_KEYS.includes(key)) {
+      delete process.env[key];
+      removed.push(key);
+    }
+  }
+  return removed;
+}
+
 // Load test environment variables
 export function loadTestEnvironment(): void {
   // CI Debug logging
   const isCI = process.env.CI === 'true';
 
-  // First, load the main .env file (for integration tests that need real credentials)
+  // Drop anything real that leaked in from the shell before a single test runs.
+  if (!usingRealCredentials()) {
+    const removed = scrubRealCredentials();
+    if (removed.length > 0 && isCI) {
+      console.log('[CI-DEBUG] Scrubbed inherited credential vars:', removed.join(', '));
+    }
+  }
+
+  // Load the main .env file ONLY for runs that opted into real credentials.
+  // Reading it unconditionally is what let unit tests authenticate for real.
   const mainEnvPath = path.resolve(process.cwd(), '.env');
-  if (existsSync(mainEnvPath)) {
+  if (usingRealCredentials() && existsSync(mainEnvPath)) {
     dotenv.config({ path: mainEnvPath });
     if (isCI) {
       console.log('[CI-DEBUG] Loaded .env file from:', mainEnvPath);
