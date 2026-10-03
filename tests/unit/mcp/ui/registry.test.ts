@@ -187,11 +187,11 @@ describe('UIAppRegistry', () => {
         expect(UIAppRegistry.getAppForTool('n8n_autofix_workflow')!.config.id).toBe('operation-result');
       });
 
-      it('should not map disabled tools', () => {
-        expect(UIAppRegistry.getAppForTool('n8n_deploy_template')).toBeNull();
-        expect(UIAppRegistry.getAppForTool('n8n_list_workflows')).toBeNull();
-        expect(UIAppRegistry.getAppForTool('n8n_executions')).toBeNull();
-        expect(UIAppRegistry.getAppForTool('n8n_health_check')).toBeNull();
+      it('should map restored tools to their result views', () => {
+        expect(UIAppRegistry.getAppForTool('n8n_deploy_template')!.config.id).toBe('operation-result');
+        expect(UIAppRegistry.getAppForTool('n8n_list_workflows')!.config.id).toBe('workflow-list');
+        expect(UIAppRegistry.getAppForTool('n8n_executions')!.config.id).toBe('execution-history');
+        expect(UIAppRegistry.getAppForTool('n8n_health_check')!.config.id).toBe('health-dashboard');
       });
 
       it('should map validate_node to validation-summary', () => {

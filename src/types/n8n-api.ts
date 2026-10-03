@@ -37,11 +37,14 @@ export interface WorkflowNode {
 
 export interface WorkflowConnection {
   [sourceNodeId: string]: {
+    // A null branch is n8n's own "nothing wired to this output", matching its
+    // `NodeInputConnections = Array<IConnection[] | null>`; the Public API stores one
+    // verbatim, so a workflow read back can carry one (#1096).
     [outputType: string]: Array<Array<{
       node: string;
       type: string;
       index: number;
-    }>>;
+    }> | null>;
   };
 }
 
@@ -272,49 +275,6 @@ export interface WorkflowImport {
   pinData?: Record<string, unknown>;
 }
 
-// Source Control Types
-export interface SourceControlStatus {
-  ahead: number;
-  behind: number;
-  conflicted: string[];
-  created: string[];
-  current: string;
-  deleted: string[];
-  detached: boolean;
-  files: Array<{
-    path: string;
-    status: string;
-  }>;
-  modified: string[];
-  notAdded: string[];
-  renamed: Array<{
-    from: string;
-    to: string;
-  }>;
-  staged: string[];
-  tracking: string;
-}
-
-export interface SourceControlPullResult {
-  conflicts: string[];
-  files: Array<{
-    path: string;
-    status: string;
-  }>;
-  mergeConflicts: boolean;
-  pullResult: 'success' | 'conflict' | 'error';
-}
-
-export interface SourceControlPushResult {
-  ahead: number;
-  conflicts: string[];
-  files: Array<{
-    path: string;
-    status: string;
-  }>;
-  pushResult: 'success' | 'conflict' | 'error';
-}
-
 // Health Check Types
 export interface HealthCheckResponse {
   status: 'ok' | 'error';
@@ -416,7 +376,8 @@ export interface TestCaseExecution {
   errorDetails: Record<string, unknown> | null;
   inputs: Record<string, unknown> | null;
   outputs: Record<string, unknown> | null;
-  executionId: string | null;
+  // n8n 2.42+ documents this as an integer; earlier releases declared a string.
+  executionId: number | string | null;
 }
 
 // Returned by the trigger/cancel routes (n8n Public API >= 2.32), which answer
@@ -456,7 +417,6 @@ export interface TestCaseListResponse {
 export interface CredentialListParams {
   limit?: number;
   cursor?: string;
-  filter?: Record<string, unknown>;
 }
 
 export interface CredentialListResponse {
@@ -505,6 +465,9 @@ export interface McpToolResponse {
   hint?: string;
   officialError?: unknown;
   truncated?: boolean;
+  // n8n_manage_agents: the personal project ID filled in for an omitted or
+  // `personal` args.projectId.
+  defaultedProjectId?: string;
   // n8n_list_catalog: which catalog was listed ('projects' | 'tags') and
   // which backend answered ('public-api' | 'official-mcp' | 'n8n-mcp').
   kind?: string;

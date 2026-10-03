@@ -85,6 +85,39 @@ function countOccurrences(str, search) {
     }
     return count;
 }
+function describeValueType(value) {
+    if (value === null)
+        return 'null';
+    if (value === undefined)
+        return 'nothing';
+    if (Array.isArray(value))
+        return 'an array';
+    return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
+}
+function branchConnections(branch) {
+    return Array.isArray(branch) ? branch : [];
+}
+function filterBranch(branch, keep) {
+    return Array.isArray(branch) ? branch.filter(keep) : branch;
+}
+function trimTrailingEmptyBranches(branches) {
+    while (branches.length > 0 && branchConnections(branches[branches.length - 1]).length === 0) {
+        branches.pop();
+    }
+}
+function validateAddNodeShape(node) {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+        return `addNode requires a node object, received ${describeValueType(node)}`;
+    }
+    const candidate = node;
+    if (typeof candidate.name !== 'string') {
+        return `addNode requires a string "name" on the node, received ${describeValueType(candidate.name)}`;
+    }
+    if (typeof candidate.type !== 'string') {
+        return `addNode requires a string "type" on the node, received ${describeValueType(candidate.type)}`;
+    }
+    return null;
+}
 const JS_CODE_FIELD_NAMES = new Set(['jsCode', 'functionCode']);
 const AsyncFunctionCtor = (async () => { }).constructor;
 const MAX_SYNTAX_CHECKED_LENGTH = 1000000;
@@ -124,6 +157,9 @@ function assertPatchedJsSyntax(operation, fieldPath, patched, original) {
         `which is not syntax-checked.`);
 }
 function operationReferencesAddedNode(operation, addedNode) {
+    if (!addedNode || typeof addedNode !== 'object') {
+        return false;
+    }
     if (operation.type === 'addConnection') {
         return operation.source === addedNode.name
             || operation.source === addedNode.id
@@ -439,6 +475,10 @@ class WorkflowDiffEngine {
     }
     validateAddNode(workflow, operation) {
         const { node } = operation;
+        const shapeError = validateAddNodeShape(node);
+        if (shapeError) {
+            return shapeError;
+        }
         const normalizedNewName = this.normalizeNodeName(node.name);
         const duplicate = workflow.nodes.find(n => this.normalizeNodeName(n.name) === normalizedNewName);
         if (duplicate) {
@@ -458,7 +498,7 @@ class WorkflowDiffEngine {
             return this.formatNodeNotFoundError(workflow, operation.nodeId || operation.nodeName || '', 'removeNode');
         }
         const hasConnections = Object.values(workflow.connections).some(conn => {
-            return Object.values(conn).some(outputs => outputs.some(connections => connections.some(c => c.node === node.name)));
+            return Object.values(conn).some(outputs => outputs.some(connections => branchConnections(connections).some(c => c.node === node.name)));
         });
         if (hasConnections || workflow.connections[node.name]) {
             logger.warn(`Removing node "${node.name}" will break existing connections`);
@@ -473,12 +513,18 @@ class WorkflowDiffEngine {
         if (!operation.updates) {
             return `Missing required parameter 'updates'. The updateNode operation requires an 'updates' object. Correct structure: {type: "updateNode", nodeId: "abc-123" OR nodeName: "My Node", updates: {name: "New Name", "parameters.url": "https://example.com"}}`;
         }
+        if (typeof operation.updates !== 'object' || Array.isArray(operation.updates)) {
+            return `The updateNode operation requires 'updates' to be an object of field paths, received ${describeValueType(operation.updates)}. Example: {type: "updateNode", nodeName: "My Node", updates: {"parameters.url": "https://example.com"}}`;
+        }
         const node = this.findNode(workflow, operation.nodeId, operation.nodeName);
         if (!node) {
             return this.formatNodeNotFoundError(workflow, operation.nodeId || operation.nodeName || '', 'updateNode');
         }
         if ('id' in operation.updates && operation.updates.id !== node.id) {
             return `Cannot change the id of node "${node.name}": node IDs are immutable because canvas groups and pinned data reference them. Remove and re-add the node instead.`;
+        }
+        if ('name' in operation.updates && typeof operation.updates.name !== 'string') {
+            return `Cannot rename node "${node.name}": 'updates.name' must be a string, received ${describeValueType(operation.updates.name)}.`;
         }
         if (operation.updates.name && operation.updates.name !== node.name) {
             const normalizedNewName = this.normalizeNodeName(operation.updates.name);
@@ -684,7 +730,7 @@ class WorkflowDiffEngine {
         if (!connections) {
             return `No connections found from "${sourceNode.name}"`;
         }
-        const hasConnection = connections.some(conns => conns.some(c => c.node === targetNode.name));
+        const hasConnection = connections.some(conns => branchConnections(conns).some(c => c.node === targetNode.name));
         if (!hasConnection) {
             return `No connection exists from "${sourceNode.name}" to "${targetNode.name}"`;
         }
@@ -765,11 +811,9 @@ class WorkflowDiffEngine {
         delete workflow.connections[node.name];
         for (const [sourceName, sourceConnections] of Object.entries(workflow.connections)) {
             for (const [outputName, outputConns] of Object.entries(sourceConnections)) {
-                sourceConnections[outputName] = outputConns.map(connections => connections.filter(conn => conn.node !== node.name));
+                sourceConnections[outputName] = outputConns.map(branch => filterBranch(branch, conn => conn.node !== node.name));
                 const trimmed = sourceConnections[outputName];
-                while (trimmed.length > 0 && trimmed[trimmed.length - 1].length === 0) {
-                    trimmed.pop();
-                }
+                trimTrailingEmptyBranches(trimmed);
                 if (trimmed.length === 0) {
                     delete sourceConnections[outputName];
                 }
@@ -987,11 +1031,9 @@ class WorkflowDiffEngine {
         const connections = workflow.connections[sourceNode.name]?.[sourceOutput];
         if (!connections)
             return;
-        workflow.connections[sourceNode.name][sourceOutput] = connections.map(conns => conns.filter(conn => conn.node !== targetNode.name));
+        workflow.connections[sourceNode.name][sourceOutput] = connections.map(branch => filterBranch(branch, conn => conn.node !== targetNode.name));
         const outputConnections = workflow.connections[sourceNode.name][sourceOutput];
-        while (outputConnections.length > 0 && outputConnections[outputConnections.length - 1].length === 0) {
-            outputConnections.pop();
-        }
+        trimTrailingEmptyBranches(outputConnections);
         if (outputConnections.length === 0) {
             delete workflow.connections[sourceNode.name][sourceOutput];
         }
@@ -1225,15 +1267,32 @@ class WorkflowDiffEngine {
         return null;
     }
     validateReplaceConnections(workflow, operation) {
+        if (!operation.connections || typeof operation.connections !== 'object' || Array.isArray(operation.connections)) {
+            return `The replaceConnections operation requires a 'connections' object, received ${describeValueType(operation.connections)}`;
+        }
         const nodeNames = new Set(workflow.nodes.map(n => n.name));
         for (const [sourceName, outputs] of Object.entries(operation.connections)) {
             if (!nodeNames.has(sourceName)) {
                 return `Source node not found in connections: ${sourceName}`;
             }
+            if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) {
+                return `Connections for "${sourceName}" must be an object keyed by output name, received ${describeValueType(outputs)}`;
+            }
             for (const outputName of Object.keys(outputs)) {
                 const connections = outputs[outputName];
+                if (!Array.isArray(connections)) {
+                    return `Connections for "${sourceName}" output "${outputName}" must be an array of output arrays, received ${describeValueType(connections)}`;
+                }
                 for (const conns of connections) {
+                    if (conns === null)
+                        continue;
+                    if (!Array.isArray(conns)) {
+                        return `Connections for "${sourceName}" output "${outputName}" must contain arrays of connections, received ${describeValueType(conns)}`;
+                    }
                     for (const conn of conns) {
+                        if (!conn || typeof conn !== 'object' || typeof conn.node !== 'string') {
+                            return `Each connection from "${sourceName}" output "${outputName}" must be an object with a string "node", received ${describeValueType(conn)}`;
+                        }
                         if (!nodeNames.has(conn.node)) {
                             return `Target node not found in connections: ${conn.node}`;
                         }
@@ -1251,7 +1310,7 @@ class WorkflowDiffEngine {
                 if (!nodeNames.has(sourceName)) {
                     for (const [outputName, connections] of Object.entries(outputs)) {
                         for (const conns of connections) {
-                            for (const conn of conns) {
+                            for (const conn of branchConnections(conns)) {
                                 staleConnections.push({ from: sourceName, to: conn.node });
                             }
                         }
@@ -1260,7 +1319,7 @@ class WorkflowDiffEngine {
                 else {
                     for (const [outputName, connections] of Object.entries(outputs)) {
                         for (const conns of connections) {
-                            for (const conn of conns) {
+                            for (const conn of branchConnections(conns)) {
                                 if (!nodeNames.has(conn.node)) {
                                     staleConnections.push({ from: sourceName, to: conn.node });
                                 }
@@ -1276,7 +1335,7 @@ class WorkflowDiffEngine {
             if (!nodeNames.has(sourceName)) {
                 for (const [outputName, connections] of Object.entries(outputs)) {
                     for (const conns of connections) {
-                        for (const conn of conns) {
+                        for (const conn of branchConnections(conns)) {
                             staleConnections.push({ from: sourceName, to: conn.node });
                         }
                     }
@@ -1285,16 +1344,14 @@ class WorkflowDiffEngine {
                 continue;
             }
             for (const [outputName, connections] of Object.entries(outputs)) {
-                const filteredConnections = connections.map(conns => conns.filter(conn => {
+                const filteredConnections = connections.map(branch => filterBranch(branch, conn => {
                     if (!nodeNames.has(conn.node)) {
                         staleConnections.push({ from: sourceName, to: conn.node });
                         return false;
                     }
                     return true;
                 }));
-                while (filteredConnections.length > 0 && filteredConnections[filteredConnections.length - 1].length === 0) {
-                    filteredConnections.pop();
-                }
+                trimTrailingEmptyBranches(filteredConnections);
                 if (filteredConnections.length === 0) {
                     delete outputs[outputName];
                 }
@@ -1331,7 +1388,7 @@ class WorkflowDiffEngine {
         for (const [sourceName, outputs] of Object.entries(updatedConnections)) {
             for (const [outputType, connections] of Object.entries(outputs)) {
                 for (let outputIndex = 0; outputIndex < connections.length; outputIndex++) {
-                    const connectionsAtIndex = connections[outputIndex];
+                    const connectionsAtIndex = branchConnections(connections[outputIndex]);
                     for (let connIndex = 0; connIndex < connectionsAtIndex.length; connIndex++) {
                         const connection = connectionsAtIndex[connIndex];
                         if (renames.has(connection.node)) {

@@ -4,6 +4,7 @@ exports.DocumentationBatchProcessor = void 0;
 const community_node_fetcher_1 = require("./community-node-fetcher");
 const documentation_generator_1 = require("./documentation-generator");
 const logger_1 = require("../utils/logger");
+const npm_readme_1 = require("../constants/npm-readme");
 class DocumentationBatchProcessor {
     constructor(repository, fetcher, generator) {
         this.repository = repository;
@@ -82,7 +83,9 @@ class DocumentationBatchProcessor {
             const readme = readmeMap.get(node.npmPackageName);
             if (readme) {
                 try {
-                    this.repository.updateNodeReadme(node.nodeType, readme);
+                    this.repository.updateNodeReadme(node.nodeType, readme, {
+                        clearSummary: node.npmReadme === npm_readme_1.NPM_MISSING_README_PLACEHOLDER,
+                    });
                     fetched++;
                 }
                 catch (error) {
@@ -92,6 +95,14 @@ class DocumentationBatchProcessor {
                 }
             }
             else {
+                if (node.npmReadme === npm_readme_1.NPM_MISSING_README_PLACEHOLDER) {
+                    try {
+                        this.repository.clearNodeReadme(node.nodeType);
+                    }
+                    catch (error) {
+                        errors.push(`Failed to clear the README placeholder for ${node.nodeType}: ${error}`);
+                    }
+                }
                 failed++;
             }
         }
@@ -102,7 +113,7 @@ class DocumentationBatchProcessor {
         const { skipExisting = false, limit, concurrency = 3, progressCallback } = options;
         let nodes = skipExisting
             ? this.repository.getCommunityNodesWithoutAISummary()
-            : this.repository.getCommunityNodes({ orderBy: 'downloads' }).filter((n) => n.npmReadme && n.npmReadme.length > 0);
+            : this.repository.getCommunityNodes({ orderBy: 'downloads' }).filter((n) => n.npmReadme && n.npmReadme.length > 0 && n.npmReadme !== npm_readme_1.NPM_MISSING_README_PLACEHOLDER);
         if (limit) {
             nodes = nodes.slice(0, limit);
         }

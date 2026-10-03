@@ -5,7 +5,7 @@ exports.AGENT_MODEL_PROVIDER_CREDENTIAL_TYPES = {
     openai: ['openAiApi'],
     anthropic: ['anthropicApi'],
     google: ['googlePalmApi'],
-    'azure-openai': ['azureOpenAiApi'],
+    'azure-openai': ['azureOpenAiApi', 'azureEntraCognitiveServicesOAuth2Api'],
     'aws-bedrock': ['aws'],
     xai: ['xAiApi'],
     groq: ['groqApi'],
@@ -15,10 +15,14 @@ exports.AGENT_MODEL_PROVIDER_CREDENTIAL_TYPES = {
     mistral: ['mistralCloudApi'],
     vercel: ['vercelAiGatewayApi'],
     nvidia: ['nvidiaApi'],
+    moonshotai: ['moonshotApi'],
+    alibaba: ['alibabaCloudApi'],
+    minimax: ['minimaxApi'],
 };
 exports.AGENT_UNSUPPORTED_CREDENTIAL_TYPES = {
-    azureOpenAiApi: 'not mapped in LLM_PROVIDER_DEFAULTS (verified on n8n 2.36.7)',
-    aws: 'not mapped in LLM_PROVIDER_DEFAULTS (verified on n8n 2.36.7)',
+    azureOpenAiApi: 'not mapped in LLM_PROVIDER_DEFAULTS (verified on n8n 2.41.5)',
+    azureEntraCognitiveServicesOAuth2Api: 'not mapped in LLM_PROVIDER_DEFAULTS (verified on n8n 2.41.5)',
+    aws: 'not mapped in LLM_PROVIDER_DEFAULTS (verified on n8n 2.41.5)',
 };
 exports.AGENT_SUPPORTED_CREDENTIAL_TYPES = Object.values(exports.AGENT_MODEL_PROVIDER_CREDENTIAL_TYPES)
     .flat()

@@ -2357,14 +2357,14 @@ badRequest('request/body/nodeGroups/0 must NOT have additional properties')
       expect(result).toEqual(created);
     });
 
-    it('should update tag', async () => {
-      const updates = { name: 'Updated Tag' };
-      const updated = { id: '123', ...updates };
-      mockAxiosInstance.patch.mockResolvedValue({ data: updated });
+    it('should update tag with PUT and a name-only body', async () => {
+      const updated = { id: '123', name: 'Updated Tag' };
+      mockAxiosInstance.put.mockResolvedValue({ data: updated });
       
-      const result = await client.updateTag('123', updates);
+      const result = await client.updateTag('123', 'Updated Tag');
       
-      expect(mockAxiosInstance.patch).toHaveBeenCalledWith('/tags/123', updates);
+      expect(mockAxiosInstance.put).toHaveBeenCalledWith('/tags/123', { name: 'Updated Tag' });
+      expect(mockAxiosInstance.patch).not.toHaveBeenCalled();
       expect(result).toEqual(updated);
     });
 
@@ -2374,47 +2374,6 @@ badRequest('request/body/nodeGroups/0 must NOT have additional properties')
       await client.deleteTag('123');
       
       expect(mockAxiosInstance.delete).toHaveBeenCalledWith('/tags/123');
-    });
-  });
-
-  describe('source control management', () => {
-    beforeEach(() => {
-      client = new N8nApiClient(defaultConfig);
-    });
-
-    it('should get source control status', async () => {
-      const status = { connected: true, branch: 'main' };
-      mockAxiosInstance.get.mockResolvedValue({ data: status });
-      
-      const result = await client.getSourceControlStatus();
-      
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/source-control/status');
-      expect(result).toEqual(status);
-    });
-
-    it('should pull source control changes', async () => {
-      const pullResult = { pulled: 5, conflicts: 0 };
-      mockAxiosInstance.post.mockResolvedValue({ data: pullResult });
-      
-      const result = await client.pullSourceControl(true);
-      
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/source-control/pull', { 
-        force: true 
-      });
-      expect(result).toEqual(pullResult);
-    });
-
-    it('should push source control changes', async () => {
-      const pushResult = { pushed: 3 };
-      mockAxiosInstance.post.mockResolvedValue({ data: pushResult });
-      
-      const result = await client.pushSourceControl('Update workflows', ['workflow1.json']);
-      
-      expect(mockAxiosInstance.post).toHaveBeenCalledWith('/source-control/push', {
-        message: 'Update workflows',
-        fileNames: ['workflow1.json'],
-      });
-      expect(result).toEqual(pushResult);
     });
   });
 

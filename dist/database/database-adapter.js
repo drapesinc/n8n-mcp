@@ -37,6 +37,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createDatabaseAdapter = createDatabaseAdapter;
+exports.createSQLJSAdapter = createSQLJSAdapter;
 const fs_1 = require("fs");
 const fsSync = __importStar(require("fs"));
 const path_1 = __importDefault(require("path"));

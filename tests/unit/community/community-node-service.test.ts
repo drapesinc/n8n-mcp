@@ -1124,7 +1124,8 @@ describe('CommunityNodeService', () => {
       ]);
       expect(mockRepository.updateNodeReadme).toHaveBeenCalledWith(
         'n8n-nodes-globals.globalConstants',
-        '# Globals'
+        '# Globals',
+        { clearSummary: false }
       );
       expect(mockRepository.updateNodeAISummary).toHaveBeenCalledWith(
         'n8n-nodes-globals.globalConstants',
@@ -1179,13 +1180,56 @@ describe('CommunityNodeService', () => {
       expect(mockRepository.updateNodeReadme).toHaveBeenCalledTimes(1);
       expect(mockRepository.updateNodeReadme).toHaveBeenCalledWith(
         'n8n-nodes-globals.globalVars',
-        '# Globals'
+        '# Globals',
+        { clearSummary: false }
       );
       expect(mockRepository.updateNodeAISummary).toHaveBeenCalledTimes(1);
       expect(mockRepository.updateNodeAISummary).toHaveBeenCalledWith(
         'n8n-nodes-globals.globalVars',
         { summary: 'existing summary' }
       );
+    });
+
+    it("should not carry npm's README placeholder or its summary to a new row", async () => {
+      (mockRepository.getNodesByNpmPackage as any).mockReturnValue([
+        { ...staleRow, npmReadme: 'ERROR: No README data found!' },
+      ]);
+
+      await service.syncNpmNodes();
+
+      expect(mockRepository.updateNodeReadme).not.toHaveBeenCalled();
+      expect(mockRepository.updateNodeAISummary).not.toHaveBeenCalled();
+    });
+
+    it("should replace a sibling row's README placeholder and its summary with the package docs", async () => {
+      mockFetcher.fetchPackageJson.mockResolvedValue({
+        n8n: {
+          nodes: [
+            'dist/nodes/GlobalConstants/GlobalConstants.node.js',
+            'dist/nodes/GlobalVars/GlobalVars.node.js',
+          ],
+        },
+      });
+      (mockRepository.getNodesByNpmPackage as any).mockReturnValue([
+        { ...staleRow, nodeType: 'n8n-nodes-globals.globalConstants' },
+        {
+          ...staleRow,
+          nodeType: 'n8n-nodes-globals.globalVars',
+          npmReadme: 'ERROR: No README data found!',
+          aiDocumentationSummary: { summary: 'guessed from the placeholder' },
+        },
+      ]);
+
+      await service.syncNpmNodes();
+
+      expect(mockRepository.updateNodeReadme).toHaveBeenCalledTimes(1);
+      expect(mockRepository.updateNodeReadme).toHaveBeenCalledWith('n8n-nodes-globals.globalVars', '# Globals', {
+        clearSummary: true,
+      });
+      expect(mockRepository.updateNodeAISummary).toHaveBeenCalledTimes(1);
+      expect(mockRepository.updateNodeAISummary).toHaveBeenCalledWith('n8n-nodes-globals.globalVars', {
+        summary: 'existing summary',
+      });
     });
 
     it('should re-key even when skipExisting is set', async () => {

@@ -2,7 +2,6 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MCPEngine = void 0;
 const property_filter_1 = require("./services/property-filter");
-const config_validator_1 = require("./services/config-validator");
 const enhanced_config_validator_1 = require("./services/enhanced-config-validator");
 const workflow_validator_1 = require("./services/workflow-validator");
 class MCPEngine {
@@ -49,8 +48,7 @@ class MCPEngine {
                 hiddenProperties: []
             };
         }
-        const userProvidedKeys = new Set(Object.keys(args.config || {}));
-        return config_validator_1.ConfigValidator.validate(args.nodeType, args.config, node.properties || [], userProvidedKeys);
+        return enhanced_config_validator_1.EnhancedConfigValidator.validateWithMode(args.nodeType, args.config || {}, node.properties || [], args.mode ?? 'operation', args.profile ?? 'ai-friendly');
     }
     async validateNodeMinimal(args) {
         const node = await this.repository.getNodeByType(args.nodeType);

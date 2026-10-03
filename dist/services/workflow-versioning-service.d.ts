@@ -33,6 +33,8 @@ export interface RestoreResult {
     backupVersionId?: number;
     validationErrors?: string[];
     warnings?: string[];
+    code?: string;
+    draftVersionId?: string;
 }
 export interface BackupResult {
     versionId: number;

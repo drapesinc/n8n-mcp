@@ -2,7 +2,7 @@ import { StartupCheckpoint } from './startup-checkpoints';
 export declare class EarlyErrorLogger {
     private static instance;
     private enabled;
-    private supabase;
+    private ingestClient;
     private userId;
     private checkpoints;
     private startTime;

@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CommunityNodeService = void 0;
 const logger_1 = require("../utils/logger");
+const npm_readme_1 = require("../constants/npm-readme");
 const typeversion_1 = require("../utils/typeversion");
 const community_node_fetcher_1 = require("./community-node-fetcher");
 const NPM_MANIFEST_FETCH = { maxRetries: 1, timeout: 5000 };
@@ -267,18 +268,20 @@ class CommunityNodeService {
         return removed;
     }
     carryOverPackageDocs(existingRows, nodeTypes) {
-        const readme = existingRows.find((row) => row.npmReadme)?.npmReadme;
-        const summary = existingRows.find((row) => row.aiDocumentationSummary)?.aiDocumentationSummary;
+        const documentedRows = existingRows.filter((row) => row.npmReadme !== npm_readme_1.NPM_MISSING_README_PLACEHOLDER);
+        const readme = documentedRows.find((row) => row.npmReadme)?.npmReadme;
+        const summary = documentedRows.find((row) => row.aiDocumentationSummary)?.aiDocumentationSummary;
         if (!readme && !summary) {
             return;
         }
         const storedByType = new Map(existingRows.map((row) => [row.nodeType, row]));
         for (const nodeType of nodeTypes) {
             const stored = storedByType.get(nodeType);
-            if (readme && !stored?.npmReadme) {
-                this.repository.updateNodeReadme(nodeType, readme);
+            const storesPlaceholder = stored?.npmReadme === npm_readme_1.NPM_MISSING_README_PLACEHOLDER;
+            if (readme && (!stored?.npmReadme || storesPlaceholder)) {
+                this.repository.updateNodeReadme(nodeType, readme, { clearSummary: storesPlaceholder });
             }
-            if (summary && !stored?.aiDocumentationSummary) {
+            if (summary && (!stored?.aiDocumentationSummary || storesPlaceholder)) {
                 this.repository.updateNodeAISummary(nodeType, summary);
             }
         }

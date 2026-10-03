@@ -1,12 +1,13 @@
 export declare class TelemetryManager {
     private static instance;
-    private supabase;
+    private ingestClient;
     private configManager;
     private eventTracker;
     private batchProcessor;
     private performanceMonitor;
     private errorAggregator;
     private isInitialized;
+    private serverDisabled;
     private constructor();
     static getInstance(): TelemetryManager;
     private ensureInitialized;

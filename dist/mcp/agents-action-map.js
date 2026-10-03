@@ -11,7 +11,7 @@ exports.AGENT_ACTION_MAP = {
     reference: { tools: ['get_agent_builder_reference'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
     search: { tools: ['search_agents'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
     get: { tools: ['get_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
-    create: { tools: ['create_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
+    create: { tools: ['create_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false, defaultsToPersonalProject: true },
     mutate: { tools: ['mutate_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
     validate: { tools: ['validate_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
     call: { tools: ['call_agent'], defaultTimeoutMs: exports.CALL_TIMEOUT_MS, destructive: true, idempotent: false },
@@ -20,8 +20,8 @@ exports.AGENT_ACTION_MAP = {
     revert: { tools: ['revert_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
     versions: { tools: ['list_agent_versions'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
     delete: { tools: ['delete_agent'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
-    discover_assets: { tools: ['discover_agent_assets'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
-    verify_mcp_server: { tools: ['verify_agent_mcp_server'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
+    discover_assets: { tools: ['discover_agent_assets'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true, defaultsToPersonalProject: true },
+    verify_mcp_server: { tools: ['verify_agent_mcp_server'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true, defaultsToPersonalProject: true },
     update_integration: { tools: ['update_agent_integration'], defaultTimeoutMs: exports.DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
 };
 exports.AGENT_ACTIONS = Object.keys(exports.AGENT_ACTION_MAP);

@@ -12,10 +12,13 @@ exports.TELEMETRY_CONFIG = {
     RATE_LIMIT_MAX_EVENTS: 100,
     MAX_QUEUE_SIZE: 1000,
     MAX_BATCH_SIZE: 50,
+    MAX_BATCH_BYTES_EVENTS: 256 * 1024,
+    MAX_BATCH_BYTES_WORKFLOWS: 1024 * 1024,
+    MAX_BATCH_BYTES_MUTATIONS: 2 * 1024 * 1024,
 };
 exports.TELEMETRY_BACKEND = {
-    URL: 'https://ydyufsohxdfpopqbubwk.supabase.co',
-    ANON_KEY: 'sb_publishable_UbVUTyXgIyvemM9b15auQg_YzGa47Gq'
+    URL: 'https://telemetry.n8n-mcp.com',
+    KEY: 'ntk_pub_245fefa7e96617d0e8015056'
 };
 var TelemetryErrorType;
 (function (TelemetryErrorType) {

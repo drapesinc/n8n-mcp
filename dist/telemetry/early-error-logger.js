@@ -1,12 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EarlyErrorLogger = void 0;
-const supabase_js_1 = require("@supabase/supabase-js");
+const ingest_client_1 = require("./ingest-client");
 const config_manager_1 = require("./config-manager");
 const telemetry_types_1 = require("./telemetry-types");
 const startup_checkpoints_1 = require("./startup-checkpoints");
 const error_sanitization_utils_1 = require("./error-sanitization-utils");
-const telemetry_fetch_1 = require("./telemetry-fetch");
 const logger_1 = require("../utils/logger");
 async function withTimeout(promise, timeoutMs, operation) {
     let timer;
@@ -30,7 +29,7 @@ async function withTimeout(promise, timeoutMs, operation) {
 class EarlyErrorLogger {
     constructor() {
         this.enabled = false;
-        this.supabase = null;
+        this.ingestClient = null;
         this.userId = null;
         this.checkpoints = [];
         this.startTime = Date.now();
@@ -44,7 +43,7 @@ class EarlyErrorLogger {
     }
     async initialize() {
         try {
-            if (!telemetry_types_1.TELEMETRY_BACKEND.URL || !telemetry_types_1.TELEMETRY_BACKEND.ANON_KEY) {
+            if (!telemetry_types_1.TELEMETRY_BACKEND.URL || !telemetry_types_1.TELEMETRY_BACKEND.KEY) {
                 logger_1.logger.debug('Telemetry backend not configured, early error logger disabled');
                 this.enabled = false;
                 return;
@@ -56,13 +55,18 @@ class EarlyErrorLogger {
                 this.enabled = false;
                 return;
             }
-            this.supabase = (0, supabase_js_1.createClient)(telemetry_types_1.TELEMETRY_BACKEND.URL, telemetry_types_1.TELEMETRY_BACKEND.ANON_KEY, {
-                auth: {
-                    persistSession: false,
-                    autoRefreshToken: false,
-                },
-                global: {
-                    fetch: telemetry_fetch_1.telemetryFetch,
+            const url = process.env.N8N_MCP_TELEMETRY_URL || telemetry_types_1.TELEMETRY_BACKEND.URL;
+            const key = process.env.N8N_MCP_TELEMETRY_KEY || telemetry_types_1.TELEMETRY_BACKEND.KEY;
+            const version = configManager.getPackageVersion();
+            this.ingestClient = new ingest_client_1.IngestClient({
+                url,
+                key,
+                version,
+                onControl: (signal) => {
+                    if (signal.kind === 'disable_version') {
+                        configManager.recordServerDisable(version);
+                    }
+                    this.enabled = false;
                 },
             });
             this.userId = configManager.getUserId();
@@ -72,7 +76,7 @@ class EarlyErrorLogger {
         catch (error) {
             logger_1.logger.debug('Early error logger initialization failed:', error);
             this.enabled = false;
-            this.supabase = null;
+            this.ingestClient = null;
             this.userId = null;
         }
     }
@@ -96,7 +100,7 @@ class EarlyErrorLogger {
         }
     }
     logStartupError(checkpoint, error) {
-        if (!this.enabled || !this.supabase || !this.userId) {
+        if (!this.enabled || !this.ingestClient || !this.userId) {
             return;
         }
         this.logStartupErrorAsync(checkpoint, error).catch((logError) => {
@@ -144,14 +148,12 @@ class EarlyErrorLogger {
                 created_at: new Date().toISOString(),
             };
             const insertOperation = async () => {
-                return await this.supabase
-                    .from('events')
-                    .insert(event)
-                    .select()
-                    .single();
+                return await this.ingestClient
+                    .from('telemetry_events')
+                    .insert(event);
             };
             const result = await withTimeout(insertOperation(), 5000, 'Startup error insert');
-            if (result && 'error' in result && result.error) {
+            if (result?.error) {
                 logger_1.logger.debug('Failed to insert startup error event:', result.error);
             }
             else if (result) {
@@ -190,7 +192,7 @@ class EarlyErrorLogger {
         };
     }
     isEnabled() {
-        return this.enabled && this.supabase !== null && this.userId !== null;
+        return this.enabled && this.ingestClient !== null && this.userId !== null;
     }
 }
 exports.EarlyErrorLogger = EarlyErrorLogger;

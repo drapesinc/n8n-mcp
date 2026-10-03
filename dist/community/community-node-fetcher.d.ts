@@ -92,11 +92,17 @@ export interface NpmPackageWithReadme {
     'dist-tags'?: {
         latest?: string;
     };
+    versions?: Record<string, {
+        dist?: {
+            tarball?: string;
+        };
+    }>;
 }
 export declare class CommunityNodeFetcher {
     private readonly strapiBaseUrl;
     private readonly npmSearchUrl;
     private readonly npmRegistryUrl;
+    private readonly npmRegistryHost;
     private readonly maxRetries;
     private readonly retryDelay;
     private readonly strapiPageSize;
@@ -114,6 +120,8 @@ export declare class CommunityNodeFetcher {
     }): Promise<any | null>;
     getPackageTarballUrl(packageName: string, version?: string): Promise<string | null>;
     fetchPackageWithReadme(packageName: string): Promise<NpmPackageWithReadme | null>;
+    private fetchReadmeFromTarball;
+    private isRegistryUrl;
     fetchReadmesBatch(packageNames: string[], progressCallback?: (message: string, current: number, total: number) => void, concurrency?: number): Promise<Map<string, string | null>>;
     getPackageDownloads(packageName: string, period?: 'last-week' | 'last-month'): Promise<number | null>;
     private sleep;

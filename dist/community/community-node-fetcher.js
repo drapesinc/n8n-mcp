@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.CommunityNodeFetcher = void 0;
 const axios_1 = __importDefault(require("axios"));
 const logger_1 = require("../utils/logger");
+const npm_readme_1 = require("./npm-readme");
 const FETCH_CONFIG = {
     STRAPI_TIMEOUT: 30000,
     NPM_REGISTRY_TIMEOUT: 15000,
@@ -14,11 +15,15 @@ const FETCH_CONFIG = {
     MAX_RETRIES: 3,
     RATE_LIMIT_DELAY: 300,
     RATE_LIMIT_429_DELAY: 60000,
+    NPM_TARBALL_TIMEOUT: 30000,
+    NPM_TARBALL_MAX_BYTES: 20 * 1024 * 1024,
+    NPM_TARBALL_MAX_RETRIES: 2,
 };
 class CommunityNodeFetcher {
     constructor(environment = 'production') {
         this.npmSearchUrl = 'https://registry.npmjs.org/-/v1/search';
         this.npmRegistryUrl = 'https://registry.npmjs.org';
+        this.npmRegistryHost = new URL(this.npmRegistryUrl).host;
         this.maxRetries = FETCH_CONFIG.MAX_RETRIES;
         this.retryDelay = FETCH_CONFIG.RETRY_DELAY;
         this.strapiPageSize = 25;
@@ -198,6 +203,41 @@ class CommunityNodeFetcher {
             return response.data;
         }, `Fetching package with README for ${packageName}`);
     }
+    async fetchReadmeFromTarball(packageName, data) {
+        const latest = data['dist-tags']?.latest;
+        const tarballUrl = latest ? data.versions?.[latest]?.dist?.tarball : undefined;
+        if (!tarballUrl)
+            return null;
+        if (!this.isRegistryUrl(tarballUrl)) {
+            logger_1.logger.warn(`Skipping README tarball for ${packageName}: not an https URL on the npm registry host`);
+            return null;
+        }
+        const tarball = await this.retryWithBackoff(async () => {
+            const response = await axios_1.default.get(tarballUrl, {
+                responseType: 'arraybuffer',
+                timeout: FETCH_CONFIG.NPM_TARBALL_TIMEOUT,
+                maxContentLength: FETCH_CONFIG.NPM_TARBALL_MAX_BYTES,
+                maxRedirects: 0,
+            });
+            return Buffer.from(response.data);
+        }, `Fetching README tarball for ${packageName}@${latest}`, FETCH_CONFIG.NPM_TARBALL_MAX_RETRIES);
+        if (!tarball)
+            return null;
+        const readme = (0, npm_readme_1.normalizeRegistryReadme)((0, npm_readme_1.extractReadmeFromTarball)(tarball));
+        if (readme) {
+            logger_1.logger.info(`README for ${packageName}@${latest} read from its tarball (the registry has none)`);
+        }
+        return readme;
+    }
+    isRegistryUrl(url) {
+        try {
+            const parsed = new URL(url);
+            return parsed.protocol === 'https:' && parsed.host === this.npmRegistryHost;
+        }
+        catch {
+            return false;
+        }
+    }
     async fetchReadmesBatch(packageNames, progressCallback, concurrency = 1) {
         const results = new Map();
         const total = packageNames.length;
@@ -206,7 +246,10 @@ class CommunityNodeFetcher {
             const batch = packageNames.slice(i, i + concurrency);
             const batchPromises = batch.map(async (packageName) => {
                 const data = await this.fetchPackageWithReadme(packageName);
-                return { packageName, readme: data?.readme || null };
+                if (!data)
+                    return { packageName, readme: null };
+                const readme = (0, npm_readme_1.normalizeRegistryReadme)(data.readme) ?? (await this.fetchReadmeFromTarball(packageName, data));
+                return { packageName, readme };
             });
             const batchResults = await Promise.all(batchPromises);
             for (const { packageName, readme } of batchResults) {

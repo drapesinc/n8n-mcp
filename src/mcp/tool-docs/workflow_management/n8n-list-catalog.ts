@@ -34,7 +34,7 @@ query filters items by a case-insensitive substring match on name; limit caps th
       'n8n_list_catalog({kind: "tags", query: "prod", limit: 20})',
     ],
     useCases: [
-      'Resolve a projectId before n8n_manage_agents create or n8n_manage_datatable create',
+      'Resolve a team projectId for n8n_manage_agents (which defaults to the personal project) or before n8n_manage_datatable create',
       'Find the caller\'s personal project on an instance without team projects',
       'Look up a tag id by name before filtering workflows',
     ],

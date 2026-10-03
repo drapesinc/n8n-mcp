@@ -5,9 +5,14 @@ export default mergeConfig(
   baseConfig,
   defineConfig({
     test: {
-      // Include global setup, but NOT integration-setup.ts for n8n-api tests
-      // (they need real network requests, not MSW mocks)
-      setupFiles: ['./tests/setup/global-setup.ts'],
+      // setupFiles comes from the base config; mergeConfig concatenates the
+      // array, so repeating it here registered every hook twice per file.
+      // Runs once before the integration suite (not per test file, and not
+      // on a plain `npm test`, which may be selected down to unit files - the base config intentionally
+      // omits this) to sweep orphaned n8n integration-test workflows without
+      // racing running tests. See tests/setup/integration-global-setup.ts
+      // and issue #1102.
+      globalSetup: ['./tests/setup/integration-global-setup.ts'],
       // Integration tests talk to a real n8n, so they opt INTO the real
       // credentials that unit runs now scrub. See tests/setup/test-env.ts.
       env: {

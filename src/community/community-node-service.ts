@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger';
+import { NPM_MISSING_README_PLACEHOLDER } from '../constants/npm-readme';
 import { NodeRepository, CommunityNodeFields } from '../database/node-repository';
 import { ParsedNode } from '../parsers/node-parser';
 import { parseTypeVersion } from '../utils/typeversion';
@@ -546,8 +547,10 @@ export class CommunityNodeService {
    * node type. Seed those rows from whatever the package already had.
    */
   private carryOverPackageDocs(existingRows: any[], nodeTypes: string[]): void {
-    const readme = existingRows.find((row) => row.npmReadme)?.npmReadme;
-    const summary = existingRows.find((row) => row.aiDocumentationSummary)?.aiDocumentationSummary;
+    // npm's missing-README placeholder is not documentation, and neither is a summary generated from it.
+    const documentedRows = existingRows.filter((row) => row.npmReadme !== NPM_MISSING_README_PLACEHOLDER);
+    const readme = documentedRows.find((row) => row.npmReadme)?.npmReadme;
+    const summary = documentedRows.find((row) => row.aiDocumentationSummary)?.aiDocumentationSummary;
     if (!readme && !summary) {
       return;
     }
@@ -555,10 +558,12 @@ export class CommunityNodeService {
     const storedByType = new Map(existingRows.map((row) => [row.nodeType, row]));
     for (const nodeType of nodeTypes) {
       const stored = storedByType.get(nodeType);
-      if (readme && !stored?.npmReadme) {
-        this.repository.updateNodeReadme(nodeType, readme);
+      // A row that stores the placeholder has no real docs: its README and summary are replaced.
+      const storesPlaceholder = stored?.npmReadme === NPM_MISSING_README_PLACEHOLDER;
+      if (readme && (!stored?.npmReadme || storesPlaceholder)) {
+        this.repository.updateNodeReadme(nodeType, readme, { clearSummary: storesPlaceholder });
       }
-      if (summary && !stored?.aiDocumentationSummary) {
+      if (summary && (!stored?.aiDocumentationSummary || storesPlaceholder)) {
         this.repository.updateNodeAISummary(nodeType, summary);
       }
     }

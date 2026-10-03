@@ -76,6 +76,24 @@ export function handleN8nApiError(error: unknown): N8nApiError {
           return new N8nNotFoundError(message || 'Resource');
         case 400:
           return new N8nValidationError(message, data);
+        case 403:
+          // n8n 2.39+: PUT /workflows/{id} on a published workflow answers 403
+          // with { message, reason, versionId } when the caller may edit but
+          // not publish. n8n has already saved the change as a draft; the
+          // published version is untouched. Surface this with its own code so
+          // callers can give an accurate, non-misleading explanation instead
+          // of the generic 403 message.
+          if (
+            (data?.reason === 'insufficient_api_key_scope' ||
+              data?.reason === 'insufficient_permissions') &&
+            typeof data?.versionId === 'string'
+          ) {
+            // n8n's WorkflowPublishForbiddenError always carries versionId (the draft
+            // it just saved); requiring it here avoids misclassifying an unrelated 403
+            // that merely happens to reuse one of these reason strings.
+            return new N8nApiError(message, 403, 'PUBLISH_FORBIDDEN', data);
+          }
+          return new N8nApiError(message, status, 'API_ERROR', data);
         case 429:
           const retryAfter = axiosError.response.headers['retry-after'];
           return new N8nRateLimitError(retryAfter ? parseInt(retryAfter) : undefined);
@@ -316,6 +334,11 @@ export function getUserFriendlyErrorMessage(error: N8nApiError): string {
       return `Invalid request: ${error.message}${folderPlacementHint(error)}`;
     case 'RATE_LIMIT_ERROR':
       return 'Too many requests. Please wait a moment and try again.';
+    case 'PUBLISH_FORBIDDEN':
+      // Keep n8n's own message intact — it already states the reason
+      // (missing scope or permission). Callers building a tool response
+      // add the draft/rollback context themselves.
+      return error.message;
     case 'NO_RESPONSE': {
       // #978/#989/#990: append the connection detail from the enriched
       // message (e.g. "(ECONNREFUSED 127.0.0.1:5678)") when present, so the

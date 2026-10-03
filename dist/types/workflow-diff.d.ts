@@ -8,7 +8,7 @@ export interface AddNodeOperation extends DiffOperation {
     node: Partial<WorkflowNode> & {
         name: string;
         type: string;
-        position: [number, number];
+        position?: [number, number];
     };
 }
 export interface RemoveNodeOperation extends DiffOperation {
@@ -136,7 +136,7 @@ export interface ReplaceConnectionsOperation extends DiffOperation {
                 node: string;
                 type: string;
                 index: number;
-            }>>;
+            }> | null>;
         };
     };
 }

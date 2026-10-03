@@ -147,6 +147,7 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
     let workflowBefore = null;
     let validationBefore = null;
     let validationAfter = null;
+    let partialRestorationObservedWorkflow;
     try {
         let processedArgs = args;
         if (typeof args === 'string') {
@@ -373,11 +374,32 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     const versionState = serverState
                         ? compareVersions(serverState, workflowBefore)
                         : 'unknown';
-                    if (versionState === 'same') {
+                    const isPublishForbidden = updateError instanceof n8n_errors_1.N8nApiError && updateError.code === 'PUBLISH_FORBIDDEN';
+                    const nothingPersisted = versionState === 'same'
+                        && (!isPublishForbidden || sameWritableContent(serverState, workflowBefore));
+                    if (nothingPersisted) {
                         logger_1.logger.debug('PUT failed before persisting; skipping rollback', {
                             workflowId: input.id,
                         });
                         if (updateError instanceof n8n_errors_1.N8nApiError) {
+                            if (updateError.code === 'PUBLISH_FORBIDDEN') {
+                                const body = updateError.details;
+                                const folderMoveInPayload = diffResult.workflow?.parentFolderId !== undefined;
+                                const message = [
+                                    `n8n reports it saved draft ${body?.versionId}, but the workflow's version is unchanged, so what persisted could not be confirmed.`,
+                                    'The published version is unchanged.',
+                                    folderMoveInPayload
+                                        ? 'A folder move in this update may have persisted regardless — n8n cannot report or restore folder placement.'
+                                        : '',
+                                    'Retrying with the same credentials will not publish it — the API key needs the workflow:activate scope, and the user needs workflow:publish permission on this workflow.',
+                                ].filter(Boolean).join(' ');
+                                throw new n8n_errors_1.N8nApiError(message, updateError.statusCode, updateError.code, {
+                                    reason: body?.reason,
+                                    draftVersionId: body?.versionId,
+                                    rollbackPerformed: false,
+                                    ...(folderMoveInPayload ? { folderMoveMayHavePersisted: true } : {}),
+                                });
+                            }
                             throw new n8n_errors_1.N8nApiError(updateError.message, updateError.statusCode, updateError.code, {
                                 ...(updateError.details ?? {}),
                                 rollbackPerformed: false,
@@ -388,11 +410,16 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     let rollbackPerformed = false;
                     let rollbackVerifiedAfterError = false;
                     let rollbackErrorMessage;
+                    let restoredDraftVersionId;
+                    let rollbackVerificationFailed = false;
+                    let partialRestoration = false;
+                    let observedDraftVersionId;
                     try {
-                        await client.updateWorkflow(input.id, workflowBefore, {
+                        const restored = await client.updateWorkflow(input.id, workflowBefore, {
                             onWarning: (message) => groupWarnings.push(message),
                         });
                         rollbackPerformed = true;
+                        restoredDraftVersionId = restored?.versionId;
                         logger_1.logger.warn('updateWorkflow failed; rolled back to prior state', {
                             workflowId: input.id,
                             originalError: updateError instanceof Error ? updateError.message : String(updateError),
@@ -405,15 +432,26 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                             if (sameWritableContent(afterRollback, workflowBefore)) {
                                 rollbackPerformed = true;
                                 rollbackVerifiedAfterError = true;
+                                restoredDraftVersionId = afterRollback?.versionId;
                                 logger_1.logger.warn('rollback PUT errored but content matches the prior state; treating as rolled back', {
                                     workflowId: input.id,
                                     rollbackError: rollbackErrorMessage,
                                 });
                                 rollbackErrorMessage = undefined;
                             }
+                            else if (!diffResult.workflow || !sameWritableContent(afterRollback, diffResult.workflow)) {
+                                partialRestoration = true;
+                                observedDraftVersionId = afterRollback?.versionId;
+                                partialRestorationObservedWorkflow = afterRollback;
+                                logger_1.logger.warn('rollback PUT errored and the readback matches neither the prior nor the attempted content', {
+                                    workflowId: input.id,
+                                    rollbackError: rollbackErrorMessage,
+                                });
+                            }
                         }
                         catch (verifyErr) {
                             logger_1.logger.debug('post-rollback verification GET failed', verifyErr);
+                            rollbackVerificationFailed = true;
                         }
                         if (!rollbackPerformed) {
                             logger_1.logger.error('updateWorkflow failed AND rollback failed', {
@@ -425,16 +463,71 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                     }
                     if (updateError instanceof n8n_errors_1.N8nApiError) {
                         const folderMoveInPayload = diffResult.workflow?.parentFolderId !== undefined;
+                        const folderMoveDetail = folderMoveInPayload && rollbackPerformed
+                            ? { folderMoveMayHavePersisted: true }
+                            : {};
+                        const rollbackErrorDetail = rollbackErrorMessage
+                            ? { rollbackError: rollbackErrorMessage }
+                            : {};
+                        const priorVersionDetail = workflowBefore.versionId
+                            ? { priorVersionId: workflowBefore.versionId }
+                            : {};
+                        const warningsDetail = groupWarnings.length > 0
+                            ? { warnings: groupWarnings.map(message => ({ operation: -1, message })) }
+                            : {};
+                        if (updateError.code === 'PUBLISH_FORBIDDEN') {
+                            const body = updateError.details;
+                            const rolledBackCleanly = rollbackPerformed;
+                            let outcomeSentence;
+                            let outcomeDetails;
+                            if (rolledBackCleanly) {
+                                outcomeSentence = 'The attempted change was rolled back, so the current draft matches the content from before this update.';
+                                outcomeDetails = {
+                                    supersededDraftVersionId: body?.versionId,
+                                    ...(restoredDraftVersionId ? { restoredDraftVersionId } : {}),
+                                };
+                            }
+                            else if (rollbackVerificationFailed) {
+                                outcomeSentence = 'The rollback could not be confirmed — the draft may hold the attempted change or the content from before this update. Use n8n_workflow_versions to check the current draft, or restore from a backup.';
+                                outcomeDetails = { attemptedDraftVersionId: body?.versionId };
+                            }
+                            else if (partialRestoration) {
+                                outcomeSentence = 'The restore did not complete: the draft holds neither the attempted change nor the content from before this update. Use n8n_workflow_versions to check the current draft, or restore from a backup.';
+                                outcomeDetails = observedDraftVersionId ? { observedDraftVersionId } : {};
+                            }
+                            else {
+                                outcomeSentence = 'The change remains as an unpublished draft, and rollback did not complete. Use n8n_workflow_versions to check the current draft, or restore from a backup.';
+                                outcomeDetails = { draftVersionId: body?.versionId, changeRetained: true };
+                            }
+                            const message = [
+                                `n8n refused to publish the change${body?.reason ? ` (${body.reason})` : ''}.`,
+                                'The published version is unchanged.',
+                                outcomeSentence,
+                                'Retrying with the same credentials will not publish it — the API key needs the workflow:activate scope, and the user needs workflow:publish permission on this workflow.',
+                                folderMoveInPayload
+                                    ? 'A folder move in the failed update may have persisted — n8n cannot report or restore folder placement.'
+                                    : '',
+                            ].filter(Boolean).join(' ');
+                            const publishForbiddenDetails = {
+                                reason: body?.reason,
+                                ...outcomeDetails,
+                                ...priorVersionDetail,
+                                rollbackPerformed,
+                                ...(rollbackVerifiedAfterError ? { rollbackVerifiedAfterError: true } : {}),
+                                ...(folderMoveInPayload ? { folderMoveMayHavePersisted: true } : {}),
+                                ...rollbackErrorDetail,
+                                ...warningsDetail,
+                            };
+                            throw new n8n_errors_1.N8nApiError(message, updateError.statusCode, updateError.code, publishForbiddenDetails);
+                        }
                         const augmentedDetails = {
                             ...(updateError.details ?? {}),
                             rollbackPerformed,
                             ...(rollbackVerifiedAfterError ? { rollbackVerifiedAfterError: true } : {}),
-                            ...(folderMoveInPayload && rollbackPerformed ? { folderMoveMayHavePersisted: true } : {}),
-                            ...(rollbackErrorMessage ? { rollbackError: rollbackErrorMessage } : {}),
-                            ...(workflowBefore.versionId ? { priorVersionId: workflowBefore.versionId } : {}),
-                            ...(groupWarnings.length > 0
-                                ? { warnings: groupWarnings.map(message => ({ operation: -1, message })) }
-                                : {}),
+                            ...folderMoveDetail,
+                            ...rollbackErrorDetail,
+                            ...priorVersionDetail,
+                            ...warningsDetail,
                         };
                         const suffix = rollbackPerformed
                             ? (folderMoveInPayload
@@ -610,13 +703,21 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
         }
         catch (error) {
             if (workflowBefore && !input.validateOnly) {
+                const details = error instanceof n8n_errors_1.N8nApiError && error.code === 'PUBLISH_FORBIDDEN'
+                    ? error.details
+                    : undefined;
+                const workflowAfterOverride = details?.changeRetained === true && diffResult?.workflow
+                    ? { workflowAfter: diffResult.workflow }
+                    : partialRestorationObservedWorkflow !== undefined
+                        ? { workflowAfter: partialRestorationObservedWorkflow }
+                        : { workflowAfter: workflowBefore };
                 void trackWorkflowMutation({
                     sessionId,
                     toolName: 'n8n_update_partial_workflow',
                     userIntent: input.intent || 'Partial workflow update',
                     operations: input.operations,
                     workflowBefore,
-                    workflowAfter: workflowBefore,
+                    ...workflowAfterOverride,
                     validationBefore,
                     validationAfter: validationBefore,
                     mutationSuccess: false,

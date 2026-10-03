@@ -27,9 +27,6 @@ import {
   WebhookRequest,
   WorkflowExport,
   WorkflowImport,
-  SourceControlStatus,
-  SourceControlPullResult,
-  SourceControlPushResult,
   DataTable,
   DataTableColumn,
   DataTableListParams,
@@ -1444,9 +1441,10 @@ export class N8nApiClient {
     }
   }
 
-  async updateTag(id: string, tag: Partial<Tag>): Promise<Tag> {
+  // n8n exposes only PUT /tags/{id}, and since 2.41 its body DTO is strict: send the name alone.
+  async updateTag(id: string, name: string): Promise<Tag> {
     try {
-      const response = await this.client.patch(`/tags/${encodeApiPathSegment(id, 'tagId')}`, tag);
+      const response = await this.client.put(`/tags/${encodeApiPathSegment(id, 'tagId')}`, { name });
       return response.data;
     } catch (error) {
       throw handleN8nApiError(error);
@@ -1470,41 +1468,7 @@ export class N8nApiClient {
     }
   }
 
-  // Source Control Management (Enterprise feature)
-  async getSourceControlStatus(): Promise<SourceControlStatus> {
-    try {
-      const response = await this.client.get('/source-control/status');
-      return response.data;
-    } catch (error) {
-      throw handleN8nApiError(error);
-    }
-  }
-
-  async pullSourceControl(force = false): Promise<SourceControlPullResult> {
-    try {
-      const response = await this.client.post('/source-control/pull', { force });
-      return response.data;
-    } catch (error) {
-      throw handleN8nApiError(error);
-    }
-  }
-
-  async pushSourceControl(
-    message: string,
-    fileNames?: string[]
-  ): Promise<SourceControlPushResult> {
-    try {
-      const response = await this.client.post('/source-control/push', {
-        message,
-        fileNames,
-      });
-      return response.data;
-    } catch (error) {
-      throw handleN8nApiError(error);
-    }
-  }
-
-  // Variable Management (via Source Control API)
+  // Variable Management
   async getVariables(): Promise<Variable[]> {
     try {
       const response = await this.client.get('/variables');

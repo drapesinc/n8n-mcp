@@ -871,6 +871,10 @@ export class N8NDocumentationMCPServer {
     // Handle tool execution
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
+      const isAdditionalTool = this.additionalToolsByName.has(name);
+      const resultMeta = !isAdditionalTool && UIAppRegistry.getAppForTool(name)?.html
+        ? { _meta: { 'n8n-mcp/toolName': name } }
+        : {};
       
       // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
       logger.info('Tool call received', {
@@ -885,6 +889,7 @@ export class N8NDocumentationMCPServer {
       if (disabledTools.has(name)) {
         logger.warn(`Attempted to call disabled tool: ${name}`);
         return {
+          ...resultMeta,
           content: [{
             type: 'text',
             text: JSON.stringify({
@@ -975,6 +980,7 @@ export class N8NDocumentationMCPServer {
           if (requestedOp && disabledOpsForTool.has(String(requestedOp).toLowerCase())) {
             logger.warn(`Attempted to call disabled operation: ${name}.${requestedOp}`);
             return {
+              ...resultMeta,
               content: [{
                 type: 'text',
                 text: JSON.stringify({
@@ -990,8 +996,6 @@ export class N8NDocumentationMCPServer {
           }
         }
       }
-
-      const isAdditionalTool = this.additionalToolsByName.has(name);
 
       try {
         // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
@@ -1047,6 +1051,7 @@ export class N8NDocumentationMCPServer {
         
         // Build MCP response with strict schema compliance
         const mcpResponse: any = {
+          ...resultMeta,
           content: [
             {
               type: 'text' as const,
@@ -1125,6 +1130,7 @@ export class N8NDocumentationMCPServer {
         } catch { /* ignore diagnostic errors */ }
 
         return {
+          ...resultMeta,
           content: [
             {
               type: 'text',
@@ -3991,6 +3997,18 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     return result;
   }
   
+  /**
+   * The typeVersion the validators see for a single-node config: the caller's `@version` when
+   * it is a finite number (or numeric string), else the node's version from the database.
+   */
+  private resolveConfigVersion(requested: unknown, nodeVersion: unknown): number {
+    const numeric = typeof requested === 'number' ? requested
+      : typeof requested === 'string' && requested.trim() !== '' ? Number(requested) : NaN;
+    if (Number.isFinite(numeric)) return numeric;
+    const fallback = Number(nodeVersion);
+    return Number.isFinite(fallback) && fallback > 0 ? fallback : 1;
+  }
+
   private async validateNodeConfig(
     nodeType: string, 
     config: Record<string, any>, 
@@ -4030,10 +4048,11 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Get properties
     const properties = node.properties || [];
 
-    // Add @version to config for displayOptions evaluation (supports _cnd operators)
+    // Add @version to config for displayOptions evaluation (supports _cnd operators). A
+    // caller may pin a version, but only a real one; anything else keeps the node's version.
     const configWithVersion = {
-      '@version': node.version || 1,
-      ...config
+      ...config,
+      '@version': this.resolveConfigVersion(config['@version'], node.version)
     };
 
     // Use enhanced validator with operation mode by default
@@ -4288,10 +4307,11 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
     // Get properties
     const properties = node.properties || [];
 
-    // Add @version to config for displayOptions evaluation (supports _cnd operators)
+    // Add @version to config for displayOptions evaluation (supports _cnd operators). A
+    // caller may pin a version, but only a real one; anything else keeps the node's version.
     const configWithVersion = {
-      '@version': node.version || 1,
-      ...(config || {})
+      ...(config || {}),
+      '@version': this.resolveConfigVersion(config?.['@version'], node.version)
     };
 
     // Find missing required fields
@@ -4716,144 +4736,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         valid: false,
         error: error instanceof Error ? error.message : 'Unknown error validating workflow',
         tip: 'Ensure the workflow JSON includes nodes array and connections object'
-      };
-    }
-  }
-
-  private async validateWorkflowConnections(workflow: any): Promise<any> {
-    await this.ensureInitialized();
-    if (!this.repository) throw new Error('Repository not initialized');
-    
-    // Create workflow validator instance
-    const validator = new WorkflowValidator(
-      this.repository,
-      EnhancedConfigValidator
-    );
-    
-    try {
-      // Validate only connections
-      const result = await validator.validateWorkflow(workflow, {
-        validateNodes: false,
-        validateConnections: true,
-        validateExpressions: false
-      });
-      
-      const response: any = {
-        valid: result.errors.length === 0,
-        statistics: {
-          totalNodes: result.statistics.totalNodes,
-          triggerNodes: result.statistics.triggerNodes,
-          validConnections: result.statistics.validConnections,
-          invalidConnections: result.statistics.invalidConnections
-        }
-      };
-      
-      // Filter to only connection-related issues
-      const connectionErrors = result.errors.filter(e => 
-        e.message.includes('connection') || 
-        e.message.includes('cycle') ||
-        e.message.includes('orphaned')
-      );
-      
-      const connectionWarnings = result.warnings.filter(w => 
-        w.message.includes('connection') || 
-        w.message.includes('orphaned') ||
-        w.message.includes('trigger')
-      );
-      
-      if (connectionErrors.length > 0) {
-        response.errors = connectionErrors.map(e => ({
-          node: e.nodeName || 'workflow',
-          message: e.message
-        }));
-      }
-      
-      if (connectionWarnings.length > 0) {
-        response.warnings = connectionWarnings.map(w => ({
-          node: w.nodeName || 'workflow',
-          message: w.message
-        }));
-      }
-      
-      return response;
-    } catch (error) {
-      logger.error('Error validating workflow connections:', error);
-      return {
-        valid: false,
-        error: error instanceof Error ? error.message : 'Unknown error validating connections'
-      };
-    }
-  }
-
-  private async validateWorkflowExpressions(workflow: any): Promise<any> {
-    await this.ensureInitialized();
-    if (!this.repository) throw new Error('Repository not initialized');
-    
-    // Create workflow validator instance
-    const validator = new WorkflowValidator(
-      this.repository,
-      EnhancedConfigValidator
-    );
-    
-    try {
-      // Validate only expressions
-      const result = await validator.validateWorkflow(workflow, {
-        validateNodes: false,
-        validateConnections: false,
-        validateExpressions: true
-      });
-      
-      const response: any = {
-        valid: result.errors.length === 0,
-        statistics: {
-          totalNodes: result.statistics.totalNodes,
-          expressionsValidated: result.statistics.expressionsValidated
-        }
-      };
-      
-      // Filter to only expression-related issues
-      const expressionErrors = result.errors.filter(e => 
-        e.message.includes('Expression') || 
-        e.message.includes('$') ||
-        e.message.includes('{{')
-      );
-      
-      const expressionWarnings = result.warnings.filter(w => 
-        w.message.includes('Expression') || 
-        w.message.includes('$') ||
-        w.message.includes('{{')
-      );
-      
-      if (expressionErrors.length > 0) {
-        response.errors = expressionErrors.map(e => ({
-          node: e.nodeName || 'workflow',
-          message: e.message
-        }));
-      }
-      
-      if (expressionWarnings.length > 0) {
-        response.warnings = expressionWarnings.map(w => ({
-          node: w.nodeName || 'workflow',
-          message: w.message
-        }));
-      }
-      
-      // Add tips for common expression issues
-      if (expressionErrors.length > 0 || expressionWarnings.length > 0) {
-        response.tips = [
-          'Use {{ }} to wrap expressions',
-          'Reference data with $json.propertyName',
-          'Reference other nodes with $node["Node Name"].json',
-          'Use $input.item for input data in loops'
-        ];
-      }
-      
-      return response;
-    } catch (error) {
-      logger.error('Error validating workflow expressions:', error);
-      return {
-        valid: false,
-        error: error instanceof Error ? error.message : 'Unknown error validating expressions'
       };
     }
   }

@@ -79,6 +79,7 @@ export declare class N8NDocumentationMCPServer {
     private searchNodeProperties;
     private getPropertyValue;
     private listTasks;
+    private resolveConfigVersion;
     private validateNodeConfig;
     private getPropertyDependencies;
     private getOutputDescriptions;
@@ -97,8 +98,6 @@ export declare class N8NDocumentationMCPServer {
     private searchTemplatesByMetadata;
     private getTaskDescription;
     private validateWorkflow;
-    private validateWorkflowConnections;
-    private validateWorkflowExpressions;
     run(): Promise<void>;
     shutdown(): Promise<void>;
 }

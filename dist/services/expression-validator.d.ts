@@ -13,11 +13,13 @@ interface ExpressionContext {
 }
 export declare class ExpressionValidator {
     private static readonly BARE_EXPRESSION_PATTERNS;
+    private static readonly MAX_JMESPATH_SCAN_LENGTH;
     private static readonly VARIABLE_PATTERNS;
     static validateExpression(expression: string, context: ExpressionContext): ExpressionValidationResult;
     private static checkSyntaxErrors;
     private static extractExpressions;
     private static validateSingleExpression;
+    private static checkJmespathCalls;
     private static checkCommonMistakes;
     private static checkNodeReferences;
     static validateNodeExpressions(parameters: any, context: ExpressionContext): ExpressionValidationResult;

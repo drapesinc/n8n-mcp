@@ -34,19 +34,19 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.telemetry = exports.TelemetryManager = void 0;
-const supabase_js_1 = require("@supabase/supabase-js");
+const ingest_client_1 = require("./ingest-client");
 const config_manager_1 = require("./config-manager");
 const event_tracker_1 = require("./event-tracker");
 const batch_processor_1 = require("./batch-processor");
 const performance_monitor_1 = require("./performance-monitor");
 const telemetry_types_1 = require("./telemetry-types");
 const telemetry_error_1 = require("./telemetry-error");
-const telemetry_fetch_1 = require("./telemetry-fetch");
 const logger_1 = require("../utils/logger");
 class TelemetryManager {
     constructor() {
-        this.supabase = null;
+        this.ingestClient = null;
         this.isInitialized = false;
+        this.serverDisabled = false;
         if (TelemetryManager.instance) {
             throw new Error('Use TelemetryManager.getInstance() instead of new TelemetryManager()');
         }
@@ -72,24 +72,25 @@ class TelemetryManager {
             logger_1.logger.debug('Telemetry disabled by user preference');
             return;
         }
-        const supabaseUrl = process.env.SUPABASE_URL || telemetry_types_1.TELEMETRY_BACKEND.URL;
-        const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || telemetry_types_1.TELEMETRY_BACKEND.ANON_KEY;
+        const url = process.env.N8N_MCP_TELEMETRY_URL || telemetry_types_1.TELEMETRY_BACKEND.URL;
+        const key = process.env.N8N_MCP_TELEMETRY_KEY || telemetry_types_1.TELEMETRY_BACKEND.KEY;
+        const version = this.configManager.getPackageVersion();
         try {
-            this.supabase = (0, supabase_js_1.createClient)(supabaseUrl, supabaseAnonKey, {
-                auth: {
-                    persistSession: false,
-                    autoRefreshToken: false,
-                },
-                realtime: {
-                    params: {
-                        eventsPerSecond: 1,
-                    },
-                },
-                global: {
-                    fetch: telemetry_fetch_1.telemetryFetch,
+            this.ingestClient = new ingest_client_1.IngestClient({
+                url,
+                key,
+                version,
+                onControl: (signal) => {
+                    if (signal.kind === 'disable_version') {
+                        this.configManager.recordServerDisable(version);
+                        this.batchProcessor.stop();
+                    }
+                    else if (signal.kind === 'disable_process') {
+                        this.serverDisabled = true;
+                    }
                 },
             });
-            this.batchProcessor = new batch_processor_1.TelemetryBatchProcessor(this.supabase, () => this.isEnabled(), {
+            this.batchProcessor = new batch_processor_1.TelemetryBatchProcessor(this.ingestClient, () => this.isEnabled(), {
                 onFlushRequested: () => this.flush(),
             });
             this.isInitialized = true;
@@ -186,7 +187,7 @@ class TelemetryManager {
     }
     async flush() {
         this.ensureInitialized();
-        if (!this.isEnabled() || !this.supabase)
+        if (!this.isEnabled() || !this.ingestClient)
             return;
         this.performanceMonitor.startOperation('flush');
         const events = this.eventTracker.getEventQueue();
@@ -233,7 +234,7 @@ class TelemetryManager {
     }
     async flushMutations() {
         this.ensureInitialized();
-        if (!this.isEnabled() || !this.supabase)
+        if (!this.isEnabled() || !this.ingestClient)
             return;
         const mutations = this.eventTracker.getMutationQueue();
         this.eventTracker.clearMutationQueue();
@@ -242,13 +243,13 @@ class TelemetryManager {
         }
     }
     isEnabled() {
-        return this.isInitialized && this.configManager.isEnabled();
+        return this.isInitialized && !this.serverDisabled && this.configManager.isEnabled();
     }
     disable() {
         this.configManager.disable();
         this.batchProcessor.stop();
         this.isInitialized = false;
-        this.supabase = null;
+        this.ingestClient = null;
     }
     enable() {
         this.configManager.enable();

@@ -41,6 +41,12 @@ export interface AgentActionSpec {
    * create/mutate/call could run it a second time.
    */
   idempotent: boolean;
+  /**
+   * The official tool requires `projectId`. When `args.projectId` is omitted
+   * or is the alias `personal`, the handler fills in the personal project of
+   * the MCP token's user.
+   */
+  defaultsToPersonalProject?: boolean;
 }
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -58,7 +64,7 @@ export const AGENT_ACTION_MAP: Record<AgentAction, AgentActionSpec> = {
   reference: { tools: ['get_agent_builder_reference'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
   search: { tools: ['search_agents'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
   get: { tools: ['get_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
-  create: { tools: ['create_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
+  create: { tools: ['create_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false, defaultsToPersonalProject: true },
   mutate: { tools: ['mutate_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
   validate: { tools: ['validate_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
   call: { tools: ['call_agent'], defaultTimeoutMs: CALL_TIMEOUT_MS, destructive: true, idempotent: false },
@@ -67,8 +73,8 @@ export const AGENT_ACTION_MAP: Record<AgentAction, AgentActionSpec> = {
   revert: { tools: ['revert_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
   versions: { tools: ['list_agent_versions'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
   delete: { tools: ['delete_agent'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
-  discover_assets: { tools: ['discover_agent_assets'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
-  verify_mcp_server: { tools: ['verify_agent_mcp_server'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true },
+  discover_assets: { tools: ['discover_agent_assets'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true, defaultsToPersonalProject: true },
+  verify_mcp_server: { tools: ['verify_agent_mcp_server'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: false, idempotent: true, defaultsToPersonalProject: true },
   update_integration: { tools: ['update_agent_integration'], defaultTimeoutMs: DEFAULT_TIMEOUT_MS, destructive: true, idempotent: false },
 };
 

@@ -376,7 +376,9 @@ async function handleCreateWorkflow(args, context) {
         const input = createWorkflowSchema.parse(args);
         const shortFormErrors = [];
         input.nodes?.forEach((node, index) => {
-            if (node.type?.startsWith('nodes-base.') || node.type?.startsWith('nodes-langchain.')) {
+            if (typeof node?.type !== 'string')
+                return;
+            if (node.type.startsWith('nodes-base.') || node.type.startsWith('nodes-langchain.')) {
                 const fullForm = node.type.startsWith('nodes-base.')
                     ? node.type.replace('nodes-base.', 'n8n-nodes-base.')
                     : node.type.replace('nodes-langchain.', '@n8n/n8n-nodes-langchain.');
@@ -746,6 +748,7 @@ async function handleUpdateWorkflow(args, repository, context) {
     let workflowBefore = null;
     let userIntent = 'Full workflow update';
     let sentParentFolderId = false;
+    let attemptedWorkflow = null;
     try {
         const client = ensureApiConfigured(context);
         const input = updateWorkflowSchema.parse(args);
@@ -763,6 +766,8 @@ async function handleUpdateWorkflow(args, repository, context) {
                 currentByName.set(node.name, node);
             }
             for (const node of updateData.nodes) {
+                if (!node || typeof node !== 'object')
+                    continue;
                 const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
                 if (!hasCredentials) {
                     const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
@@ -787,6 +792,7 @@ async function handleUpdateWorkflow(args, repository, context) {
         if (nodeGroupsUpdate !== undefined) {
             fullWorkflow.nodeGroups = nodeGroupsUpdate;
         }
+        attemptedWorkflow = fullWorkflow;
         if (updateData.nodes || updateData.connections || nodeGroupsUpdate !== undefined) {
             if (createBackup !== false) {
                 try {
@@ -850,13 +856,16 @@ async function handleUpdateWorkflow(args, repository, context) {
     }
     catch (error) {
         if (workflowBefore) {
+            const isPublishForbidden = error instanceof n8n_errors_1.N8nApiError && error.code === 'PUBLISH_FORBIDDEN';
             void trackWorkflowMutationForFullUpdate({
                 sessionId,
                 toolName: 'n8n_update_full_workflow',
                 userIntent,
                 operations: [],
                 workflowBefore,
-                workflowAfter: workflowBefore,
+                ...(isPublishForbidden
+                    ? (attemptedWorkflow ? { workflowAfter: attemptedWorkflow } : {})
+                    : { workflowAfter: workflowBefore }),
                 mutationSuccess: false,
                 mutationError: error instanceof Error ? error.message : 'Unknown error',
                 durationMs: Date.now() - startTime,
@@ -869,6 +878,23 @@ async function handleUpdateWorkflow(args, repository, context) {
                 success: false,
                 error: 'Invalid input',
                 details: { errors: error.errors }
+            };
+        }
+        if (error instanceof n8n_errors_1.N8nApiError && error.code === 'PUBLISH_FORBIDDEN') {
+            const body = error.details;
+            return {
+                success: false,
+                error: 'n8n did not publish this change. The published version is unchanged; ' +
+                    `the change was saved as a draft${body?.versionId ? ` (id: ${body.versionId})` : ''}. ` +
+                    'Retrying with the same credentials will save another draft without publishing it. ' +
+                    'The API key needs the workflow:activate scope, and the user needs workflow:publish permission on this workflow.',
+                code: error.code,
+                details: {
+                    reason: body?.reason,
+                    draftVersionId: body?.versionId,
+                    publishedVersionUnchanged: true,
+                    ...(sentParentFolderId ? { folderMoveMayHavePersisted: true } : {})
+                }
             };
         }
         if (error instanceof n8n_errors_1.N8nApiError) {
@@ -1183,9 +1209,11 @@ async function handleAutofixWorkflow(args, repository, context) {
                 return {
                     success: false,
                     error: 'Failed to apply fixes',
+                    ...(updateResult.code ? { code: updateResult.code } : {}),
                     details: {
                         fixes: fixResult.fixes,
-                        updateError: updateResult.error
+                        updateError: updateResult.error,
+                        ...(updateResult.details ? { updateDetails: updateResult.details } : {})
                     }
                 };
             }
@@ -2508,8 +2536,10 @@ async function handleLocalWorkflowVersions(input, versionId, toVersionId, reposi
                 success: result.success,
                 data: result.success ? result : undefined,
                 error: result.success ? undefined : result.message,
+                code: result.success ? undefined : result.code,
                 details: result.success ? undefined : {
-                    validationErrors: result.validationErrors
+                    validationErrors: result.validationErrors,
+                    ...(result.draftVersionId ? { draftVersionId: result.draftVersionId } : {})
                 }
             };
         }
@@ -2772,6 +2802,14 @@ async function handleDeployTemplate(args, templateService, repository, context) 
                         fixesApplied = fixData.fixes || [];
                         fixSummary = ` Auto-fixed ${fixData.fixesApplied} issue(s).`;
                     }
+                }
+                else {
+                    autoFixStatus = 'failed';
+                    fixSummary = ' Auto-fix failed (workflow deployed successfully).';
+                    logger_1.logger.warn('Auto-fix failed after template deployment', {
+                        workflowId: createdWorkflow.id,
+                        error: autofixResult.error || 'No autofix result returned'
+                    });
                 }
             }
             catch (fixError) {

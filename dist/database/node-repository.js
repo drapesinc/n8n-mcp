@@ -1,44 +1,12 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeRepository = void 0;
-const zlib = __importStar(require("zlib"));
+const compressed_column_1 = require("./compressed-column");
 const node_parser_1 = require("../parsers/node-parser");
 const sqlite_storage_service_1 = require("../services/sqlite-storage-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
 const logger_1 = require("../utils/logger");
+const npm_readme_1 = require("../constants/npm-readme");
 const DEFAULT_WORKFLOW_VERSION_RETENTION_DAYS = 30;
 class NodeRepository {
     constructor(dbOrService) {
@@ -82,7 +50,7 @@ class NodeRepository {
         npm_readme, ai_documentation_summary, ai_summary_generated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(node.nodeType, node.packageName, node.displayName, node.description, node.category, node.style, node.isAITool ? 1 : 0, node.isTrigger ? 1 : 0, node.isWebhook ? 1 : 0, node.isVersioned ? 1 : 0, node.isToolVariant ? 1 : 0, node.toolVariantOf || null, node.hasToolVariant ? 1 : 0, node.version, node.documentation || null, JSON.stringify(node.properties, null, 2), JSON.stringify(node.operations, null, 2), JSON.stringify(node.credentials, null, 2), node.outputs ? JSON.stringify(node.outputs, null, 2) : null, node.outputNames ? JSON.stringify(node.outputNames, null, 2) : null, node.isCommunity ? 1 : 0, node.isVerified ? 1 : 0, node.authorName || null, node.authorGithubUrl || null, node.npmPackageName || null, node.npmVersion || null, node.npmDownloads || 0, node.communityFetchedAt || null, existing?.npm_readme || null, existing?.ai_documentation_summary || null, existing?.ai_summary_generated_at || null);
+        stmt.run(node.nodeType, node.packageName, node.displayName, node.description, node.category, node.style, node.isAITool ? 1 : 0, node.isTrigger ? 1 : 0, node.isWebhook ? 1 : 0, node.isVersioned ? 1 : 0, node.isToolVariant ? 1 : 0, node.toolVariantOf || null, node.hasToolVariant ? 1 : 0, node.version, node.documentation || null, (0, compressed_column_1.compressColumnJson)(node.properties), JSON.stringify(node.operations), JSON.stringify(node.credentials), node.outputs ? JSON.stringify(node.outputs) : null, node.outputNames ? JSON.stringify(node.outputNames) : null, node.isCommunity ? 1 : 0, node.isVerified ? 1 : 0, node.authorName || null, node.authorGithubUrl || null, node.npmPackageName || null, node.npmVersion || null, node.npmDownloads || 0, node.communityFetchedAt || null, existing?.npm_readme || null, existing?.ai_documentation_summary || null, existing?.ai_summary_generated_at || null);
     }
     getNode(nodeType) {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
@@ -277,7 +245,7 @@ class NodeRepository {
             toolVariantOf: row.tool_variant_of || null,
             hasToolVariant: Number(row.has_tool_variant) === 1,
             version: row.version,
-            properties: this.safeJsonParse(row.properties_schema, []),
+            properties: (0, compressed_column_1.decompressColumnJson)(row.properties_schema, []),
             operations: this.safeJsonParse(row.operations, []),
             credentials: this.safeJsonParse(row.credentials_required, []),
             hasDocumentation: !!row.documentation,
@@ -291,7 +259,7 @@ class NodeRepository {
             npmVersion: row.npm_version || null,
             npmDownloads: row.npm_downloads || 0,
             communityFetchedAt: row.community_fetched_at || null,
-            npmReadme: row.npm_readme || null,
+            npmReadme: row.npm_readme ? (0, compressed_column_1.decompressColumnText)(row.npm_readme) : null,
             aiDocumentationSummary: row.ai_documentation_summary
                 ? this.safeJsonParse(row.ai_documentation_summary, null)
                 : null,
@@ -504,11 +472,45 @@ class NodeRepository {
         const result = this.db.prepare('DELETE FROM nodes WHERE is_community = 1').run();
         return result.changes;
     }
-    updateNodeReadme(nodeType, readme) {
-        const stmt = this.db.prepare(`
-      UPDATE nodes SET npm_readme = ? WHERE node_type = ?
-    `);
-        stmt.run(readme, nodeType);
+    updateNodeReadme(nodeType, readme, options = {}) {
+        const stmt = this.db.prepare(options.clearSummary
+            ? 'UPDATE nodes SET npm_readme = ?, ai_documentation_summary = NULL, ai_summary_generated_at = NULL WHERE node_type = ?'
+            : 'UPDATE nodes SET npm_readme = ? WHERE node_type = ?');
+        stmt.run((0, compressed_column_1.compressColumnText)(readme), nodeType);
+    }
+    clearNodeReadme(nodeType) {
+        this.db.prepare(`
+      UPDATE nodes SET npm_readme = NULL, ai_documentation_summary = NULL, ai_summary_generated_at = NULL
+      WHERE node_type = ?
+    `).run(nodeType);
+    }
+    compressStoredColumns() {
+        const rows = this.db.prepare(`
+      SELECT node_type, properties_schema, npm_readme FROM nodes
+      WHERE properties_schema IS NOT NULL OR npm_readme IS NOT NULL
+    `).all();
+        let rewritten = 0;
+        this.transaction(() => {
+            for (const row of rows) {
+                const packedSchema = row.properties_schema && this.repackStoredJson(row.properties_schema);
+                const packedReadme = row.npm_readme && (0, compressed_column_1.compressColumnText)(row.npm_readme);
+                if (packedSchema === row.properties_schema && packedReadme === row.npm_readme)
+                    continue;
+                this.db.prepare('UPDATE nodes SET properties_schema = ?, npm_readme = ? WHERE node_type = ?').run(packedSchema, packedReadme, row.node_type);
+                rewritten++;
+            }
+        });
+        return { rewritten };
+    }
+    repackStoredJson(stored) {
+        if ((0, compressed_column_1.isCompressedColumn)(stored))
+            return stored;
+        try {
+            return (0, compressed_column_1.compressColumnJson)(JSON.parse(stored));
+        }
+        catch {
+            return (0, compressed_column_1.compressColumnText)(stored);
+        }
     }
     updateNodeAISummary(nodeType, summary) {
         const stmt = this.db.prepare(`
@@ -521,25 +523,25 @@ class NodeRepository {
     getCommunityNodesWithoutReadme() {
         const rows = this.db.prepare(`
       SELECT * FROM nodes
-      WHERE is_community = 1 AND (npm_readme IS NULL OR npm_readme = '')
+      WHERE is_community = 1 AND (npm_readme IS NULL OR npm_readme = '' OR npm_readme = ?)
       ORDER BY npm_downloads DESC
-    `).all();
+    `).all(npm_readme_1.NPM_MISSING_README_PLACEHOLDER);
         return rows.map(row => this.parseNodeRow(row));
     }
     getCommunityNodesWithoutAISummary() {
         const rows = this.db.prepare(`
       SELECT * FROM nodes
       WHERE is_community = 1
-        AND npm_readme IS NOT NULL AND npm_readme != ''
+        AND npm_readme IS NOT NULL AND npm_readme != '' AND npm_readme != ?
         AND (ai_documentation_summary IS NULL OR ai_documentation_summary = '')
       ORDER BY npm_downloads DESC
-    `).all();
+    `).all(npm_readme_1.NPM_MISSING_README_PLACEHOLDER);
         return rows.map(row => this.parseNodeRow(row));
     }
     getDocumentationStats() {
         const total = this.db.prepare('SELECT COUNT(*) as count FROM nodes WHERE is_community = 1').get().count;
-        const withReadme = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE is_community = 1 AND npm_readme IS NOT NULL AND npm_readme != ''").get().count;
-        const withAISummary = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE is_community = 1 AND ai_documentation_summary IS NOT NULL AND ai_documentation_summary != ''").get().count;
+        const withReadme = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE is_community = 1 AND npm_readme IS NOT NULL AND npm_readme != '' AND npm_readme != ?").get(npm_readme_1.NPM_MISSING_README_PLACEHOLDER).count;
+        const withAISummary = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE is_community = 1 AND npm_readme IS NOT NULL AND npm_readme != '' AND npm_readme != ? AND ai_documentation_summary IS NOT NULL AND ai_documentation_summary != ''").get(npm_readme_1.NPM_MISSING_README_PLACEHOLDER).count;
         return {
             total,
             withReadme,
@@ -558,7 +560,7 @@ class NodeRepository {
         released_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-        stmt.run(versionData.nodeType, versionData.version, versionData.packageName, versionData.displayName, versionData.description || null, versionData.category || null, versionData.isCurrentMax ? 1 : 0, versionData.propertiesSchema ? this.compressJson(versionData.propertiesSchema) : null, versionData.operations ? JSON.stringify(versionData.operations) : null, versionData.credentialsRequired ? JSON.stringify(versionData.credentialsRequired) : null, versionData.outputs ? JSON.stringify(versionData.outputs) : null, versionData.minimumN8nVersion || null, versionData.breakingChanges ? JSON.stringify(versionData.breakingChanges) : null, versionData.deprecatedProperties ? JSON.stringify(versionData.deprecatedProperties) : null, versionData.addedProperties ? JSON.stringify(versionData.addedProperties) : null, versionData.releasedAt || null);
+        stmt.run(versionData.nodeType, versionData.version, versionData.packageName, versionData.displayName, versionData.description || null, versionData.category || null, versionData.isCurrentMax ? 1 : 0, versionData.propertiesSchema ? (0, compressed_column_1.compressColumnJson)(versionData.propertiesSchema) : null, versionData.operations ? JSON.stringify(versionData.operations) : null, versionData.credentialsRequired ? JSON.stringify(versionData.credentialsRequired) : null, versionData.outputs ? JSON.stringify(versionData.outputs) : null, versionData.minimumN8nVersion || null, versionData.breakingChanges ? JSON.stringify(versionData.breakingChanges) : null, versionData.deprecatedProperties ? JSON.stringify(versionData.deprecatedProperties) : null, versionData.addedProperties ? JSON.stringify(versionData.addedProperties) : null, versionData.releasedAt || null);
     }
     versionLookupType(nodeType) {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(nodeType);
@@ -626,7 +628,7 @@ class NodeRepository {
             description: row.description,
             category: row.category,
             isCurrentMax: Number(row.is_current_max) === 1,
-            propertiesSchema: row.properties_schema ? this.decompressJson(row.properties_schema, []) : null,
+            propertiesSchema: row.properties_schema ? (0, compressed_column_1.decompressColumnJson)(row.properties_schema, []) : null,
             operations: row.operations ? this.safeJsonParse(row.operations, []) : null,
             credentialsRequired: row.credentials_required ? this.safeJsonParse(row.credentials_required, []) : null,
             outputs: row.outputs ? this.safeJsonParse(row.outputs, null) : null,
@@ -637,22 +639,6 @@ class NodeRepository {
             releasedAt: row.released_at,
             createdAt: row.created_at
         };
-    }
-    compressJson(value) {
-        return zlib.gzipSync(JSON.stringify(value)).toString('base64');
-    }
-    decompressJson(stored, fallback) {
-        const trimmed = stored.trimStart();
-        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-            return this.safeJsonParse(stored, fallback);
-        }
-        try {
-            return JSON.parse(zlib.gunzipSync(Buffer.from(stored, 'base64')).toString('utf8'));
-        }
-        catch (error) {
-            logger_1.logger.warn('Failed to decompress stored schema', { error: error.message });
-            return fallback;
-        }
     }
     createWorkflowVersion(data) {
         const stmt = this.db.prepare(`

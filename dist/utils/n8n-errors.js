@@ -76,6 +76,13 @@ function handleN8nApiError(error) {
                     return new N8nNotFoundError(message || 'Resource');
                 case 400:
                     return new N8nValidationError(message, data);
+                case 403:
+                    if ((data?.reason === 'insufficient_api_key_scope' ||
+                        data?.reason === 'insufficient_permissions') &&
+                        typeof data?.versionId === 'string') {
+                        return new N8nApiError(message, 403, 'PUBLISH_FORBIDDEN', data);
+                    }
+                    return new N8nApiError(message, status, 'API_ERROR', data);
                 case 429:
                     const retryAfter = axiosError.response.headers['retry-after'];
                     return new N8nRateLimitError(retryAfter ? parseInt(retryAfter) : undefined);
@@ -224,6 +231,8 @@ function getUserFriendlyErrorMessage(error) {
             return `Invalid request: ${error.message}${folderPlacementHint(error)}`;
         case 'RATE_LIMIT_ERROR':
             return 'Too many requests. Please wait a moment and try again.';
+        case 'PUBLISH_FORBIDDEN':
+            return error.message;
         case 'NO_RESPONSE': {
             const generic = 'Unable to connect to n8n. Please check the server URL and ensure n8n is running.';
             const message = error.message.trimEnd();

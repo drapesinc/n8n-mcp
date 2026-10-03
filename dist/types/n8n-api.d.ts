@@ -36,7 +36,7 @@ export interface WorkflowConnection {
             node: string;
             type: string;
             index: number;
-        }>>;
+        }> | null>;
     };
 }
 export interface WorkflowSettings {
@@ -222,45 +222,6 @@ export interface WorkflowImport {
     tags?: string[];
     pinData?: Record<string, unknown>;
 }
-export interface SourceControlStatus {
-    ahead: number;
-    behind: number;
-    conflicted: string[];
-    created: string[];
-    current: string;
-    deleted: string[];
-    detached: boolean;
-    files: Array<{
-        path: string;
-        status: string;
-    }>;
-    modified: string[];
-    notAdded: string[];
-    renamed: Array<{
-        from: string;
-        to: string;
-    }>;
-    staged: string[];
-    tracking: string;
-}
-export interface SourceControlPullResult {
-    conflicts: string[];
-    files: Array<{
-        path: string;
-        status: string;
-    }>;
-    mergeConflicts: boolean;
-    pullResult: 'success' | 'conflict' | 'error';
-}
-export interface SourceControlPushResult {
-    ahead: number;
-    conflicts: string[];
-    files: Array<{
-        path: string;
-        status: string;
-    }>;
-    pushResult: 'success' | 'conflict' | 'error';
-}
 export interface HealthCheckResponse {
     status: 'ok' | 'error';
     instanceId?: string;
@@ -338,7 +299,7 @@ export interface TestCaseExecution {
     errorDetails: Record<string, unknown> | null;
     inputs: Record<string, unknown> | null;
     outputs: Record<string, unknown> | null;
-    executionId: string | null;
+    executionId: number | string | null;
 }
 export interface TestRunTriggerResult {
     id: string;
@@ -369,7 +330,6 @@ export interface TestCaseListResponse {
 export interface CredentialListParams {
     limit?: number;
     cursor?: string;
-    filter?: Record<string, unknown>;
 }
 export interface CredentialListResponse {
     data: Credential[];
@@ -407,6 +367,7 @@ export interface McpToolResponse {
     hint?: string;
     officialError?: unknown;
     truncated?: boolean;
+    defaultedProjectId?: string;
     kind?: string;
     backend?: string;
     method?: string;

@@ -3,6 +3,7 @@ import { WorkflowVersioningService, type WorkflowVersion, type BackupResult } fr
 import { NodeRepository } from '@/database/node-repository';
 import { N8nApiClient } from '@/services/n8n-api-client';
 import { WorkflowValidator } from '@/services/workflow-validator';
+import { N8nApiError } from '@/utils/n8n-errors';
 import type { Workflow } from '@/types/n8n-api';
 
 vi.mock('@/database/node-repository');
@@ -354,6 +355,37 @@ describe('WorkflowVersioningService', () => {
       expect(result.message).toContain('Failed to restore workflow');
       expect(result.backupCreated).toBe(true);
       expect(result.backupVersionId).toBe(2);
+    });
+
+    it('should report a draft-not-published outcome when n8n refuses to publish the restore (#1118)', async () => {
+      const version = createMockVersion(1);
+      vi.spyOn(mockRepository, 'getWorkflowVersion').mockReturnValue(version);
+      vi.spyOn(mockRepository, 'getWorkflowVersions').mockReturnValue([]);
+      vi.spyOn(mockRepository, 'createWorkflowVersion').mockReturnValue(2);
+      vi.spyOn(mockRepository, 'pruneWorkflowVersions').mockReturnValue(0);
+      vi.spyOn(mockApiClient, 'getWorkflow').mockResolvedValue(createMockWorkflow('workflow-1', 'Current'));
+      vi.spyOn(mockApiClient, 'updateWorkflow').mockRejectedValue(
+        new N8nApiError(
+          "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+          403,
+          'PUBLISH_FORBIDDEN',
+          { reason: 'insufficient_api_key_scope', versionId: 'draft-1' },
+        )
+      );
+
+      const result = await service.restoreVersion('workflow-1', 1, false);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('saved as a draft but not published');
+      expect(result.message).toContain('insufficient_api_key_scope');
+      expect(result.message).toContain('published version is unchanged');
+      expect(result.message).toContain('publishing it completes the restore');
+      expect(result.backupCreated).toBe(true);
+      expect(result.backupVersionId).toBe(2);
+      // Machine-readable code and the draft's versionId must survive alongside the
+      // human-readable message, so callers can branch without parsing it.
+      expect(result.code).toBe('PUBLISH_FORBIDDEN');
+      expect(result.draftVersionId).toBe('draft-1');
     });
   });
 
