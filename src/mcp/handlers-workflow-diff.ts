@@ -161,8 +161,37 @@ const workflowDiffSchema = z.object({
   validateOnly: z.boolean().optional(),
   continueOnError: z.boolean().optional(),
   createBackup: z.boolean().optional(),
+  allowPublishDraft: z.boolean().optional(),
   intent: z.string().optional(),
 });
+
+/**
+ * Operations that only touch workflow metadata (settings, name, tags).
+ * n8n's public API has no settings-only endpoint: the update is a full PUT that
+ * carries the DRAFT nodes/connections, and for an active workflow the PUT
+ * re-publishes them. A settings-only change can therefore push unpublished
+ * draft edits live.
+ */
+const SETTINGS_ONLY_OPS = new Set(['updateSettings', 'updateName', 'addTag', 'removeTag']);
+const PUBLISHING_SETTINGS_OPS = new Set(['updateSettings', 'updateName']);
+
+/**
+ * True when a settings-only update would publish an unpublished draft:
+ * the workflow is active and its draft (versionId) differs from the
+ * published version (activeVersionId). Without both ids (n8n builds that
+ * predate draft/publish) there is no draft to leak, so this returns false.
+ */
+export function settingsUpdateWouldPublishDraft(
+  workflow: { active?: boolean; versionId?: string | null; activeVersionId?: string | null },
+  operations: Array<{ type?: string }>
+): boolean {
+  if (!operations.length) return false;
+  if (!operations.every(op => op.type && SETTINGS_ONLY_OPS.has(op.type))) return false;
+  if (!operations.some(op => op.type && PUBLISHING_SETTINGS_OPS.has(op.type))) return false;
+  if (!workflow.active) return false;
+  if (!workflow.versionId || !workflow.activeVersionId) return false;
+  return workflow.versionId !== workflow.activeVersionId;
+}
 
 export async function handleUpdatePartialWorkflow(
   args: unknown,
@@ -284,6 +313,25 @@ export async function handleUpdatePartialWorkflow(
         };
       }
       throw error;
+    }
+
+    // Refuse a settings-only update that would publish an unpublished draft
+    if (
+      !input.validateOnly &&
+      !input.allowPublishDraft &&
+      settingsUpdateWouldPublishDraft(workflow, input.operations as Array<{ type?: string }>)
+    ) {
+      return {
+        success: false,
+        saved: false,
+        code: 'UNPUBLISHED_DRAFT',
+        error:
+          `Workflow ${input.id} is active and has an unpublished draft ` +
+          `(versionId ${workflow.versionId} differs from activeVersionId ${workflow.activeVersionId}). ` +
+          'A settings/name update is saved with the full draft and re-publishes it, which would push ' +
+          'those unpublished edits live. Publish or discard the draft first, or re-run with ' +
+          'allowPublishDraft: true to publish the draft along with this change.'
+      };
     }
 
     // Create backup before modifying workflow (default: true)

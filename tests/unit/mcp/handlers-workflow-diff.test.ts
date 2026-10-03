@@ -2841,4 +2841,122 @@ describe('handlers-workflow-diff', () => {
       });
     });
   });
+
+  describe('settings-only update vs unpublished draft', () => {
+    const settingsOps = [
+      { type: 'updateSettings', settings: { errorWorkflow: 'errWf1' } },
+    ];
+
+    const arrange = (workflowOverrides: Record<string, unknown>) => {
+      const wf = createTestWorkflow(workflowOverrides);
+      const updated = { ...wf, settings: { errorWorkflow: 'errWf1' } };
+      mockApiClient.getWorkflow.mockResolvedValue(wf);
+      mockDiffEngine.applyDiff.mockResolvedValue({
+        success: true,
+        workflow: updated,
+        operationsApplied: 1,
+        message: 'ok',
+        errors: [],
+        applied: [0],
+        failed: [],
+      });
+      mockApiClient.updateWorkflow.mockResolvedValue(updated);
+      return wf;
+    };
+
+    it('refuses when the workflow is active and the draft differs from the published version', async () => {
+      arrange({ active: true, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: settingsOps, createBackup: false },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect((result as any).saved).toBe(false);
+      expect((result as any).code).toBe('UNPUBLISHED_DRAFT');
+      expect(result.error).toContain('unpublished draft');
+      expect(result.error).toContain('allowPublishDraft');
+      expect(mockApiClient.updateWorkflow).not.toHaveBeenCalled();
+      expect(mockDiffEngine.applyDiff).not.toHaveBeenCalled();
+    });
+
+    it('refuses an updateName-only change in the same situation', async () => {
+      arrange({ active: true, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: [{ type: 'updateName', name: 'Renamed' }], createBackup: false },
+        mockRepository
+      );
+
+      expect(result.success).toBe(false);
+      expect(mockApiClient.updateWorkflow).not.toHaveBeenCalled();
+    });
+
+    it('allows the update when allowPublishDraft is true', async () => {
+      arrange({ active: true, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: settingsOps, allowPublishDraft: true, createBackup: false },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes when the draft equals the published version', async () => {
+      arrange({ active: true, versionId: 'v1', activeVersionId: 'v1' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: settingsOps, createBackup: false },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes for a non-active workflow even when versions differ', async () => {
+      arrange({ active: false, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: settingsOps, createBackup: false },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockApiClient.updateWorkflow).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not guard updates that also change nodes (the draft is being edited on purpose)', async () => {
+      arrange({ active: true, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        {
+          id: 'test-workflow-id',
+          operations: [
+            ...settingsOps,
+            { type: 'updateNode', nodeName: 'HTTP Request', updates: { 'parameters.url': 'https://x.test' } },
+          ],
+          createBackup: false,
+        },
+        mockRepository
+      );
+
+      expect(result.success).toBe(true);
+    });
+
+    it('still allows validateOnly on a draft-divergent workflow', async () => {
+      arrange({ active: true, versionId: 'v2-draft', activeVersionId: 'v1-published' });
+
+      const result = await handleUpdatePartialWorkflow(
+        { id: 'test-workflow-id', operations: settingsOps, validateOnly: true },
+        mockRepository
+      );
+
+      expect((result as any).code).not.toBe('UNPUBLISHED_DRAFT');
+      expect(mockApiClient.updateWorkflow).not.toHaveBeenCalled();
+    });
+  });
 });
