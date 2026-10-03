@@ -13,6 +13,7 @@ import { McpToolResponse, Workflow } from '../types/n8n-api';
 import { getDisabledTools, isOperationDisabled } from '../mcp/tool-policy';
 import { InstanceContext } from '../types/instance-context';
 import { logger } from '../utils/logger';
+import { N8nApiError } from '../utils/n8n-errors';
 
 /**
  * The start of n8n's refusal text (n8n 2.36.7, live-verified 2026-08-28):
@@ -227,12 +228,64 @@ export async function withMcpExposure(
   try {
     ({ warnings } = await enableWorkflowMcpExposure(opts.apiClient, opts.workflowId));
   } catch (err) {
-    return {
-      success: false,
-      action: opts.action,
-      code: 'EXPOSE_FAILED',
-      error: `Could not enable "Available in MCP" on workflow ${opts.workflowId}: ${err instanceof Error ? err.message : String(err)}`,
-    };
+    // PUBLISH_FORBIDDEN (n8n 2.39+): the exposure write was saved as a draft, not
+    // published, because the caller may edit but not publish. n8n's public API
+    // commits workflow content before it checks publish permission — the same
+    // persist-then-403 behavior the update handlers work around — so the PUT may
+    // have saved settings.availableInMCP on the draft despite the 403. n8n's own
+    // "is this exposed" gate reads that saved setting, not the published graph, so
+    // re-read and check before treating this as a hard failure.
+    if (err instanceof N8nApiError && err.code === 'PUBLISH_FORBIDDEN') {
+      const reason = (err.details as { reason?: string } | undefined)?.reason;
+      const missingAccess = `The API key needs the workflow:activate scope, and the user needs workflow:publish permission on this workflow.`;
+      let settingPersisted = false;
+      let readbackFailed = false;
+      try {
+        const current = await opts.apiClient.getWorkflow(opts.workflowId);
+        settingPersisted = (current.settings as Record<string, unknown> | undefined)?.availableInMCP === true;
+      } catch (verifyErr) {
+        logger.debug('Post-PUBLISH_FORBIDDEN re-read of MCP exposure setting failed', verifyErr);
+        readbackFailed = true;
+      }
+
+      if (readbackFailed) {
+        // We genuinely don't know whether the setting persisted — say so, and don't
+        // guess either way (no claim about where the setting sits).
+        return {
+          success: false,
+          action: opts.action,
+          code: 'EXPOSE_FAILED',
+          error: `Could not enable "Available in MCP" on workflow ${opts.workflowId}: the change was saved as a draft but not published${reason ? ` (${reason})` : ''}, and a follow-up read of the workflow failed, so whether "Available in MCP" persisted could not be confirmed. ${missingAccess} The published workflow is unchanged; the test was not attempted.`,
+          hint: 'Check the workflow (e.g. n8n_get_workflow) to see whether "Available in MCP" is set before retrying.',
+        };
+      }
+
+      if (!settingPersisted) {
+        // The readback confirms the setting did NOT persist — unlike the readbackFailed
+        // case, this is confirmed, so the hint must not claim it sits on a draft or that
+        // publishing would enable it (round 4, item 2b).
+        return {
+          success: false,
+          action: opts.action,
+          code: 'EXPOSE_FAILED',
+          error: `Could not enable "Available in MCP" on workflow ${opts.workflowId}: the change was saved as a draft but not published${reason ? ` (${reason})` : ''}. A follow-up read confirms "Available in MCP" was not saved. ${missingAccess} The published workflow is unchanged and is not yet exposed to MCP; the test was not attempted.`,
+        };
+      }
+
+      // The setting persisted onto the draft despite the 403 — n8n will honor it
+      // for MCP purposes, so proceed with the retry, but say the published
+      // version is unchanged and name what's missing to publish it for real.
+      warnings = [
+        `n8n did not publish this change${reason ? ` (${reason})` : ''}: "Available in MCP" was saved on the unpublished draft, not the published workflow. ${missingAccess}`,
+      ];
+    } else {
+      return {
+        success: false,
+        action: opts.action,
+        code: 'EXPOSE_FAILED',
+        error: `Could not enable "Available in MCP" on workflow ${opts.workflowId}: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
   }
 
   const second = await call();

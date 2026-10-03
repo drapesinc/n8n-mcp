@@ -39,6 +39,7 @@ const node_loader_1 = require("../loaders/node-loader");
 const node_parser_1 = require("../parsers/node-parser");
 const docs_mapper_1 = require("../mappers/docs-mapper");
 const node_repository_1 = require("../database/node-repository");
+const compressed_column_1 = require("../database/compressed-column");
 const core_node_check_1 = require("./core-node-check");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
@@ -152,7 +153,7 @@ async function rebuildOptimized() {
           node_source_code, credential_source_code, source_location, source_extracted_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
-            stmt.run(nodeData.nodeType, nodeData.packageName, nodeData.displayName, nodeData.description, nodeData.category, nodeData.developmentStyle, nodeData.isAITool ? 1 : 0, nodeData.isTrigger ? 1 : 0, nodeData.isWebhook ? 1 : 0, nodeData.isVersioned ? 1 : 0, nodeData.version, nodeData.documentation, JSON.stringify(nodeData.properties), JSON.stringify(nodeData.operations), JSON.stringify(nodeData.credentialsRequired), nodeData.nodeSourceCode, nodeData.credentialSourceCode, nodeData.sourceLocation, nodeData.sourceExtractedAt);
+            stmt.run(nodeData.nodeType, nodeData.packageName, nodeData.displayName, nodeData.description, nodeData.category, nodeData.developmentStyle, nodeData.isAITool ? 1 : 0, nodeData.isTrigger ? 1 : 0, nodeData.isWebhook ? 1 : 0, nodeData.isVersioned ? 1 : 0, nodeData.version, nodeData.documentation, (0, compressed_column_1.compressColumnJson)(nodeData.properties), JSON.stringify(nodeData.operations), JSON.stringify(nodeData.credentialsRequired), nodeData.nodeSourceCode, nodeData.credentialSourceCode, nodeData.sourceLocation, nodeData.sourceExtractedAt);
             stats.successful++;
             if (parsed.isAITool)
                 stats.aiTools++;

@@ -95,11 +95,23 @@ class TelemetryCircuitBreaker {
             logger_1.logger.debug(`Circuit breaker opened after ${this.failureCount} failures`, { error: error?.message });
         }
     }
+    canRetryNow() {
+        switch (this.state) {
+            case 'closed':
+                return true;
+            case 'open':
+                return Date.now() - this.lastFailureTime > this.resetTimeout;
+            case 'half-open':
+                return this.halfOpenCount < this.halfOpenRequests;
+            default:
+                return false;
+        }
+    }
     getState() {
         return {
             state: this.state,
             failureCount: this.failureCount,
-            canRetry: this.shouldAllow()
+            canRetry: this.canRetryNow()
         };
     }
     reset() {

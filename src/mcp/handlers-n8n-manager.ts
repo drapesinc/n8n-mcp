@@ -644,7 +644,8 @@ export async function handleCreateWorkflow(args: unknown, context?: InstanceCont
     // Proactively detect SHORT form node types (common mistake)
     const shortFormErrors: string[] = [];
     input.nodes?.forEach((node: any, index: number) => {
-      if (node.type?.startsWith('nodes-base.') || node.type?.startsWith('nodes-langchain.')) {
+      if (typeof node?.type !== 'string') return;
+      if (node.type.startsWith('nodes-base.') || node.type.startsWith('nodes-langchain.')) {
         const fullForm = node.type.startsWith('nodes-base.')
           ? node.type.replace('nodes-base.', 'n8n-nodes-base.')
           : node.type.replace('nodes-langchain.', '@n8n/n8n-nodes-langchain.');
@@ -1118,6 +1119,10 @@ export async function handleUpdateWorkflow(
   // persisted the folder move (write-only in n8n, so it can be neither read back nor
   // rolled back), and the error path below must say so.
   let sentParentFolderId = false;
+  // The merged payload sent to the failed PUT. On PUBLISH_FORBIDDEN, n8n saves this as a
+  // draft — the failure telemetry should reflect that content, not silently claim
+  // "no change" by reusing workflowBefore.
+  let attemptedWorkflow: any = null;
 
   try {
     const client = ensureApiConfigured(context);
@@ -1146,6 +1151,9 @@ export async function handleUpdateWorkflow(
         currentByName.set(node.name, node);
       }
       for (const node of updateData.nodes as any[]) {
+        // Reporting a malformed entry is validateWorkflowStructure's job, below; this loop
+        // only has to survive reaching it.
+        if (!node || typeof node !== 'object') continue;
         const hasCredentials = node.credentials && typeof node.credentials === 'object' && Object.keys(node.credentials).length > 0;
         if (!hasCredentials) {
           const match = (node.id && currentById.get(node.id)) || currentByName.get(node.name);
@@ -1189,6 +1197,7 @@ export async function handleUpdateWorkflow(
     if (nodeGroupsUpdate !== undefined) {
       fullWorkflow.nodeGroups = nodeGroupsUpdate;
     }
+    attemptedWorkflow = fullWorkflow;
 
     // Backup + structure validation when the graph or its grouping changed.
     if (updateData.nodes || updateData.connections || nodeGroupsUpdate !== undefined) {
@@ -1265,13 +1274,20 @@ export async function handleUpdateWorkflow(
   } catch (error) {
     // Track failed mutation
     if (workflowBefore) {
+      // PUBLISH_FORBIDDEN means n8n persisted the attempted payload as a draft even
+      // though the PUT threw — workflowBefore would misreport "no change". Use the
+      // attempted payload when we have one; otherwise omit workflowAfter rather than
+      // claim an unchanged state we cannot confirm.
+      const isPublishForbidden = error instanceof N8nApiError && error.code === 'PUBLISH_FORBIDDEN';
       void trackWorkflowMutationForFullUpdate({
         sessionId,
         toolName: 'n8n_update_full_workflow',
         userIntent,
         operations: [],
         workflowBefore,
-        workflowAfter: workflowBefore, // No change since it failed
+        ...(isPublishForbidden
+          ? (attemptedWorkflow ? { workflowAfter: attemptedWorkflow } : {})
+          : { workflowAfter: workflowBefore }), // No change since it failed
         mutationSuccess: false,
         mutationError: error instanceof Error ? error.message : 'Unknown error',
         durationMs: Date.now() - startTime,
@@ -1285,6 +1301,24 @@ export async function handleUpdateWorkflow(
         success: false,
         error: 'Invalid input',
         details: { errors: error.errors }
+      };
+    }
+
+    if (error instanceof N8nApiError && error.code === 'PUBLISH_FORBIDDEN') {
+      const body = error.details as { reason?: string; versionId?: string } | undefined;
+      return {
+        success: false,
+        error: 'n8n did not publish this change. The published version is unchanged; ' +
+          `the change was saved as a draft${body?.versionId ? ` (id: ${body.versionId})` : ''}. ` +
+          'Retrying with the same credentials will save another draft without publishing it. ' +
+          'The API key needs the workflow:activate scope, and the user needs workflow:publish permission on this workflow.',
+        code: error.code,
+        details: {
+          reason: body?.reason,
+          draftVersionId: body?.versionId,
+          publishedVersionUnchanged: true,
+          ...(sentParentFolderId ? { folderMoveMayHavePersisted: true } : {})
+        }
       };
     }
 
@@ -1683,9 +1717,17 @@ export async function handleAutofixWorkflow(
         return {
           success: false,
           error: 'Failed to apply fixes',
+          // Pass the partial-update failure's code through (e.g. PUBLISH_FORBIDDEN) so
+          // callers can tell a publish refusal apart from a generic update failure
+          // instead of having to parse updateError.
+          ...(updateResult.code ? { code: updateResult.code } : {}),
           details: {
             fixes: fixResult.fixes,
-            updateError: updateResult.error
+            updateError: updateResult.error,
+            // The partial-update failure's own details (e.g. PUBLISH_FORBIDDEN's
+            // draftVersionId/rollbackPerformed) — dropped before, leaving callers
+            // nothing to act on beyond the flattened error text.
+            ...(updateResult.details ? { updateDetails: updateResult.details } : {})
           }
         };
       }
@@ -3470,8 +3512,13 @@ async function handleLocalWorkflowVersions(
         success: result.success,
         data: result.success ? result : undefined,
         error: result.success ? undefined : result.message,
+        // Pass the machine-readable code through (e.g. PUBLISH_FORBIDDEN) so callers
+        // can branch on it instead of parsing `message`, and name the draft the
+        // restored content actually landed on when it wasn't published.
+        code: result.success ? undefined : result.code,
         details: result.success ? undefined : {
-          validationErrors: result.validationErrors
+          validationErrors: result.validationErrors,
+          ...(result.draftVersionId ? { draftVersionId: result.draftVersionId } : {})
         }
       };
     }
@@ -3837,6 +3884,13 @@ export async function handleDeployTemplate(
             fixesApplied = fixData.fixes || [];
             fixSummary = ` Auto-fixed ${fixData.fixesApplied} issue(s).`;
           }
+        } else {
+          autoFixStatus = 'failed';
+          fixSummary = ' Auto-fix failed (workflow deployed successfully).';
+          logger.warn('Auto-fix failed after template deployment', {
+            workflowId: createdWorkflow.id,
+            error: autofixResult.error || 'No autofix result returned'
+          });
         }
       } catch (fixError) {
         // Log but don't fail - autofix is best-effort

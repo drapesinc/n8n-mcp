@@ -1,7 +1,7 @@
-import { SupabaseClient } from '@supabase/supabase-js';
+import { IngestClient } from './ingest-client';
 import { TelemetryEvent, WorkflowTelemetry, WorkflowMutationRecord, TelemetryMetrics } from './telemetry-types';
 export declare class TelemetryBatchProcessor {
-    private supabase;
+    private ingestClient;
     private isEnabled;
     private flushTimer?;
     private flushQueue;
@@ -14,7 +14,7 @@ export declare class TelemetryBatchProcessor {
     private started;
     private readonly operationTimeout;
     private readonly onFlushRequested?;
-    constructor(supabase: SupabaseClient | null, isEnabled: () => boolean, options?: {
+    constructor(ingestClient: IngestClient | null, isEnabled: () => boolean, options?: {
         operationTimeout?: number;
         onFlushRequested?: () => void | Promise<void>;
     });
@@ -24,11 +24,15 @@ export declare class TelemetryBatchProcessor {
     private flushAndExit;
     flush(events?: TelemetryEvent[], workflows?: WorkflowTelemetry[], mutations?: WorkflowMutationRecord[]): Promise<void>;
     private flushQueuedBatch;
+    private prepareBatches;
+    private prepareEventBatches;
+    private prepareWorkflowBatches;
+    private prepareMutationBatches;
     private flushEvents;
     private flushWorkflows;
     private flushMutations;
     private executeWithTimeout;
-    private createBatches;
+    private createByteAwareBatches;
     private deduplicateWorkflows;
     private addUnsentBatchesToDeadLetterQueue;
     private addToDeadLetterQueue;

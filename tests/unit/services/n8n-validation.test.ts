@@ -297,6 +297,29 @@ describe('n8n-validation', () => {
 
         expect(() => validateWorkflowConnections(invalidConnections)).toThrow();
       });
+
+      // n8n's own type is `Array<IConnection[] | null>` and its Public API stores such a
+      // workflow verbatim (live-verified POST + GET round-trip), so rejecting the null here
+      // failed creates that validate_workflow had just passed (#1096).
+      it('accepts a null output branch, which n8n stores verbatim (#1096)', () => {
+        const connections = {
+          'Start': {
+            main: [[{ node: 'B', type: 'main', index: 0 }], null],
+          },
+        };
+
+        expect(validateWorkflowConnections(connections)).toEqual(connections);
+      });
+
+      it('still throws for a non-null, non-array branch', () => {
+        const connections = {
+          'Start': {
+            main: [[{ node: 'B', type: 'main', index: 0 }], 'nope'],
+          },
+        };
+
+        expect(() => validateWorkflowConnections(connections)).toThrow();
+      });
     });
 
     describe('validateWorkflowSettings', () => {
@@ -1105,6 +1128,492 @@ describe('n8n-validation', () => {
   });
 
   describe('validateWorkflowStructure', () => {
+    describe.each([false, true])('malformed nodes with connections: %s', (connected) => {
+      const validNode = webhookNode('2', 'Invalid Node', 'n8n-nodes-base.set');
+
+      it.each([
+        { label: 'a string', node: 'strayString', field: undefined },
+        { label: 'null', node: null, field: undefined },
+        { label: 'an array', node: [], field: undefined },
+        { label: 'a number', node: 123, field: undefined },
+        { label: 'a missing type', node: { ...validNode, type: undefined }, field: 'type' },
+        { label: 'a numeric type', node: { ...validNode, type: 123 }, field: 'type' },
+        { label: 'an object type', node: { ...validNode, type: {} }, field: 'type' },
+        { label: 'a missing name', node: { ...validNode, name: undefined }, field: 'name' },
+      ])('returns an indexed validation error for $label', ({ node, field }) => {
+        const workflow = {
+          name: 'Malformed node',
+          nodes: [webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'), node],
+          connections: connected ? {
+            Start: { main: [[{ node: 'Invalid Node', type: 'main', index: 0 }]] },
+          } : {},
+        };
+
+        const errors = validateWorkflowStructure(workflow as unknown as Partial<Workflow>);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/^Invalid node at index 1:/);
+        if (field) {
+          expect(errors[0]).toContain(`"${field}"`);
+        }
+      });
+    });
+
+    it('collects all malformed node errors before traversing the workflow', () => {
+      const workflow = {
+        name: 'Multiple malformed nodes',
+        nodes: [null, webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'), 'strayString'],
+        connections: {},
+      };
+
+      const errors = validateWorkflowStructure(workflow as unknown as Partial<Workflow>);
+
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toMatch(/^Invalid node at index 0:/);
+      expect(errors[1]).toMatch(/^Invalid node at index 2:/);
+    });
+
+    describe('malformed connections', () => {
+      const twoNodes = () => [
+        webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+        webhookNode('2', 'B', 'n8n-nodes-base.set'),
+      ];
+
+      it.each([
+        { label: 'a null source entry', connections: { Start: null }, path: '"Start"' },
+        { label: 'a string source entry', connections: { Start: 'main' }, path: '"Start"' },
+        { label: 'an array source entry', connections: { Start: [] }, path: '"Start"' },
+        { label: 'a null output map', connections: { Start: { main: null } }, path: '"Start.main"' },
+        { label: 'a string output', connections: { Start: { main: ['main'] } }, path: '"Start.main.0"' },
+        { label: 'an object output', connections: { Start: { main: [{}] } }, path: '"Start.main.0"' },
+        { label: 'a null connection entry', connections: { Start: { main: [[null]] } }, path: '"Start.main.0.0"' },
+        { label: 'a non-string target', connections: { Start: { main: [[{ node: 5, type: 'main', index: 0 }]] } }, path: '"Start.main.0.0.node"' },
+      ])('returns a path-anchored validation error for $label', ({ connections, path }) => {
+        const errors = validateWorkflowStructure({
+          name: 'Malformed connections',
+          nodes: twoNodes(),
+          connections,
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/^Invalid connections: /);
+        expect(errors[0]).toContain(path);
+      });
+
+      // A null branch is n8n's own "nothing wired to this output" and its API stores one
+      // verbatim (live-verified), so it is data to walk past, not a shape to reject (#1096).
+      it('accepts a null output branch instead of failing the create', () => {
+        const errors = validateWorkflowStructure({
+          name: 'Null branch',
+          nodes: twoNodes(),
+          connections: { Start: { main: [[{ node: 'B', type: 'main', index: 0 }], null] } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toEqual([]);
+      });
+
+      // n8n routes matched items into nothing for an output no one wired up, and 13 bundled
+      // templates rely on that for a rule they don't act on, so an empty/null branch is no
+      // longer reported (#1100).
+      it('accepts a null trailing Switch branch instead of flagging it as unconnected', () => {
+        const switchNode: any = {
+          id: '1', name: 'Switch', type: 'n8n-nodes-base.switch', typeVersion: 3.2,
+          position: [250, 300] as [number, number],
+          parameters: {
+            rules: {
+              rules: [
+                { conditions: { conditions: [] }, outputKey: 'a' },
+                { conditions: { conditions: [] }, outputKey: 'b' },
+              ],
+            },
+          },
+        };
+
+        const errors = validateWorkflowStructure({
+          name: 'Switch with a null branch',
+          nodes: [switchNode, webhookNode('2', 'B', 'n8n-nodes-base.set')],
+          connections: { Switch: { main: [[{ node: 'B', type: 'main', index: 0 }], null] } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toEqual([]);
+      });
+
+      it('reports a connection parse failure as one line rather than a serialized Zod issue array', () => {
+        const errors = validateWorkflowStructure({
+          name: 'Malformed connections',
+          nodes: twoNodes(),
+          connections: { Start: { main: [[null]] } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).not.toContain('{');
+      });
+
+      it('does not report graph findings computed over a malformed connection', () => {
+        // "B" looks disconnected only because the connection naming it is the broken one.
+        const errors = validateWorkflowStructure({
+          name: 'Malformed connections',
+          nodes: twoNodes(),
+          connections: { Start: { main: [[{ node: 'B', type: 'main', index: '0' }]] } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/^Invalid connections: /);
+        expect(errors.some(error => error.includes('Disconnected nodes'))).toBe(false);
+      });
+
+      // `rules` is caller-supplied. A string has the `.length` the branch-count check reads and
+      // no `.map`, and an object label cannot always be coerced into the message (#1094).
+      it.each([
+        { label: 'a string rules collection', rules: 'abc' },
+        { label: 'an object with a length', rules: { length: 2 } },
+        { label: 'a rule whose outputKey cannot be coerced', rules: [{ outputKey: { toString: null, valueOf: null }, conditions: { conditions: [] } }] },
+      ])('does not throw on $label', ({ rules }) => {
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { rules } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }]] },
+        };
+
+        expect(() => validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>))
+          .not.toThrow();
+      });
+
+      // n8n omits trailing branches that have no connection, so a Switch with fewer output
+      // branches than rules is how it exports a Switch whose last rules route nowhere - that
+      // is accepted. More branches than the node has outputs can only come from a caller, and
+      // that is still reported (#1100).
+      it('reports an error when a Switch has more output branches than rules', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { rules: [rule('a'), rule('b')] } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e =>
+          e.includes('has 2 rules ["a" (index 0), "b" (index 1)]') &&
+          e.includes('but 3 output branches in connections') &&
+          e.includes('Outputs are indexed 0 to 1')
+        )).toBe(true);
+      });
+
+      it('does not report an error when a Switch has fewer output branches than rules', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { values: [rule('a'), rule('b'), rule('c')] } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('rules') && e.includes('output branches'))).toBe(false);
+      });
+
+      // n8n stores the rules under `rules.values` from typeVersion 3.2 on (#1100).
+      it('reads rules from rules.values (typeVersion 3.2+) for the branch-count check', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { values: [rule('a'), rule('b'), rule('c')] } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('has 3 rules') && e.includes('4 output branches'))).toBe(true);
+      });
+
+      // `options.fallbackOutput: 'extra'` adds one output after the rule outputs; that extra
+      // output can carry a connection of its own without tripping the branch-count check (#1100).
+      it('does not report an error when options.fallbackOutput adds the extra branch', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          {
+            ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2),
+            parameters: { rules: { values: [rule('a'), rule('b'), rule('c')] }, options: { fallbackOutput: 'extra' } },
+          },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('rules') && e.includes('output branches'))).toBe(false);
+      });
+
+      it('mentions the fallback output when there are still too many branches with fallbackOutput extra', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          {
+            ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2),
+            parameters: { rules: { values: [rule('a'), rule('b'), rule('c')] }, options: { fallbackOutput: 'extra' } },
+          },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e =>
+          e.includes('has 3 rules') &&
+          e.includes('plus a fallback output') &&
+          e.includes('5 output branches')
+        )).toBe(true);
+      });
+
+      it('still counts the legacy rules.rules collection at typeVersion 3.2', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { rules: [rule('a'), rule('b')] } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('has 2 rules') && e.includes('3 output branches'))).toBe(true);
+      });
+
+      // An expression- or json-mode Switch can retain a stale hidden rule collection that n8n
+      // ignores at runtime, so the branch-count check must not read it.
+      it('does not check branch count for an expression-mode Switch', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          {
+            ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2),
+            parameters: { mode: 'expression', rules: { values: [rule('a'), rule('b')] } },
+          },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('rules') && e.includes('output branches'))).toBe(false);
+      });
+
+      // `onError: 'continueErrorOutput'` appends an error output after the natural ones, so a
+      // 2-rule Switch has room for 3 branches (2 rules + 1 error output) without tripping the
+      // branch-count check.
+      it('does not report an error when onError adds room for the extra branch', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          {
+            ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2),
+            onError: 'continueErrorOutput',
+            parameters: { rules: { values: [rule('a'), rule('b')] } },
+          },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('rules') && e.includes('output branches'))).toBe(false);
+      });
+
+      it('mentions the error output when there are still too many branches with onError set', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          {
+            ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2),
+            onError: 'continueErrorOutput',
+            parameters: { rules: { values: [rule('a'), rule('b')] } },
+          },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e =>
+          e.includes('has 2 rules') &&
+          e.includes('plus an error output') &&
+          e.includes('4 output branches')
+        )).toBe(true);
+      });
+
+      // Switch v1 has four fixed outputs whatever its rules say, so the branch-count check
+      // must not run against v1's legacy rules.rules collection at all.
+      it('does not check branch count for a typeVersion 1 Switch with legacy rules', () => {
+        const rule = (outputKey: string) => ({ outputKey, conditions: { conditions: [] } });
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 1), parameters: { rules: { rules: [rule('a'), rule('b')] } } },
+          webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+          Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [], [], []] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('rules') && e.includes('output branches'))).toBe(false);
+      });
+
+      it('still validates a well-formed workflow', () => {
+        const errors = validateWorkflowStructure({
+          name: 'Valid',
+          nodes: twoNodes(),
+          connections: { Start: { main: [[{ node: 'B', type: 'main', index: 0 }]] } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toEqual([]);
+      });
+
+      // A source key with no targets (`main: [null]`, `main: [[]]`) is how n8n stores a node
+      // whose last edge was removed. Vouching for the node that holds it let two isolated
+      // nodes pass as connected to each other (#1101).
+      it.each([
+        { label: 'a null branch', main: [null] },
+        { label: 'an empty branch', main: [[]] },
+      ])('reports both nodes as disconnected when each source key has $label and no target', ({ main }) => {
+        const errors = validateWorkflowStructure({
+          name: 'Two isolated nodes',
+          nodes: twoNodes(),
+          connections: { Start: { main }, B: { main } },
+        } as unknown as Partial<Workflow>);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain('Disconnected nodes detected');
+        expect(errors[0]).toContain('"Start"');
+        expect(errors[0]).toContain('"B"');
+
+        // With nothing connected, the suggested source falls back to some other node in the
+        // workflow, not the disconnected node itself - a self-loop is not a useful fix (#1101).
+        const suggestion = errors[0].match(/source: '([^']+)', target: '([^']+)'/);
+        expect(suggestion).toBeTruthy();
+        const [, source, target] = suggestion!;
+        expect(source).not.toBe(target);
+      });
+
+      it('does not flag a node with a real target, or an mcpTrigger reached only via inbound ai_tool', () => {
+        const nodes = [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          webhookNode('2', 'B', 'n8n-nodes-base.set'),
+          webhookNode('3', 'Tool', '@n8n/n8n-nodes-langchain.toolWorkflow', 1.3),
+          webhookNode('4', 'MCP Server', '@n8n/n8n-nodes-langchain.mcpTrigger', 1),
+        ];
+        const connections = {
+          Start: { main: [[{ node: 'B', type: 'main', index: 0 }]] },
+          Tool: { ai_tool: [[{ node: 'MCP Server', type: 'ai_tool', index: 0 }]] },
+        };
+
+        const errors = validateWorkflowStructure({ name: 'Mixed', nodes, connections } as unknown as Partial<Workflow>);
+
+        expect(errors.some(e => e.includes('Disconnected'))).toBe(false);
+      });
+    });
+
+    it('rejects a non-array nodes collection before traversing the workflow', () => {
+      const workflow = { name: 'Invalid collection', nodes: {}, connections: {} };
+
+      expect(validateWorkflowStructure(workflow as unknown as Partial<Workflow>))
+        .toEqual(['Workflow nodes must be an array']);
+    });
+
+    it('reports a parse failure as one line rather than a serialized Zod issue array', () => {
+      const workflow = {
+        name: 'Malformed node',
+        nodes: [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Invalid Node', 'n8n-nodes-base.set'), type: 123 },
+        ],
+        connections: {},
+      };
+
+      const errors = validateWorkflowStructure(workflow as unknown as Partial<Workflow>);
+
+      // The field name is ours; the reason after it is Zod's wording and may change with the
+      // major the MCP SDK resolves, so only the shape of the line is pinned.
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toMatch(/^Invalid node at index 1: "type": .+/);
+      expect(errors[0]).not.toContain('{');
+    });
+
+    it('names every offending field when a node fails on more than one', () => {
+      const workflow = {
+        name: 'Malformed node',
+        nodes: [
+          webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+          { ...webhookNode('2', 'Invalid Node', 'n8n-nodes-base.set'), type: 123, typeVersion: 'two' },
+        ],
+        connections: {},
+      };
+
+      const errors = validateWorkflowStructure(workflow as unknown as Partial<Workflow>);
+
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('"type"');
+      expect(errors[0]).toContain('"typeVersion"');
+      expect(errors[0]).not.toContain('\n');
+    });
+
+    it('uses normalized node fields without mutating the submitted workflow', () => {
+      const workflow = {
+        name: 'Serialized node',
+        nodes: [JSON.stringify({
+          ...webhookNode('1', 'Webhook', 'n8n-nodes-base.webhook'),
+          typeVersion: '2',
+          position: { '0': '250', '1': '300' },
+          parameters: '{}',
+          // Not declared by the node schema - n8n's GET echoes fields like this, and Zod
+          // strips them. The caller's copy must keep them.
+          issues: { typeUnknown: true },
+        })],
+        connections: {},
+      };
+      const original = JSON.stringify(workflow);
+
+      expect(validateWorkflowStructure(workflow as unknown as Partial<Workflow>)).toEqual([]);
+      expect(JSON.stringify(workflow)).toBe(original);
+    });
+
     it('should return no errors for valid workflow', () => {
       const workflow = new WorkflowBuilder('Valid Workflow')
         .addWebhookNode({ id: 'webhook-1', name: 'Webhook' })
@@ -2823,4 +3332,69 @@ describe('n8n-validation', () => {
       });
     });
   });
+  describe('disconnected-node suggestion (#1101)', () => {
+    it('never proposes a sticky note or a self-loop as the source', () => {
+      const errors = validateWorkflowStructure({
+        name: 'Orphans with a note',
+        nodes: [
+          { id: '1', name: 'A', type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [0, 0], parameters: {} },
+          { id: '2', name: 'B', type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [0, 0], parameters: {} },
+          { id: '3', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 0], parameters: {} },
+        ],
+        connections: { A: { main: [[]] }, B: { main: [null] } },
+      } as unknown as Partial<Workflow>);
+      const suggestion = errors.find(e => e.includes('Disconnected nodes'));
+      expect(suggestion).toContain("source: 'B', target: 'A'");
+    });
+
+    it('omits the hint when the only other node is a sticky note', () => {
+      const errors = validateWorkflowStructure({
+        name: 'Lone node with a note',
+        nodes: [
+          { id: '1', name: 'A', type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [0, 0], parameters: {} },
+          { id: '3', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 0], parameters: {} },
+        ],
+        connections: { A: { main: [[]] } },
+      } as unknown as Partial<Workflow>);
+      const message = errors.find(e => e.includes('Disconnected nodes'));
+      expect(message).toBeDefined();
+      expect(message).not.toContain('addConnection');
+    });
+  });
+
+  describe('Switch with an empty rule collection (#1100)', () => {
+    it('still counts branches against the fallback output alone', () => {
+      const nodes = [
+        webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+        { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { values: [] }, options: { fallbackOutput: 'extra' } } },
+        webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+      ];
+      const ok = validateWorkflowStructure({ name: 'Switch', nodes, connections: {
+        Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+        Switch: { main: [[{ node: 'End', type: 'main', index: 0 }]] },
+      } } as unknown as Partial<Workflow>);
+      expect(ok.some(e => e.includes('output branches in connections'))).toBe(false);
+      const tooMany = validateWorkflowStructure({ name: 'Switch', nodes, connections: {
+        Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+        Switch: { main: [[{ node: 'End', type: 'main', index: 0 }], [{ node: 'End', type: 'main', index: 0 }]] },
+      } } as unknown as Partial<Workflow>);
+      expect(tooMany.some(e => e.includes('0 rules') && e.includes('plus a fallback output'))).toBe(true);
+    });
+
+    it('describes a Switch with no outputs instead of a negative index range', () => {
+      const nodes = [
+        webhookNode('1', 'Start', 'n8n-nodes-base.manualTrigger'),
+        { ...webhookNode('2', 'Switch', 'n8n-nodes-base.switch', 3.2), parameters: { rules: { values: [] } } },
+        webhookNode('3', 'End', 'n8n-nodes-base.noOp', 1),
+      ];
+      const errors = validateWorkflowStructure({ name: 'Switch', nodes, connections: {
+        Start: { main: [[{ node: 'Switch', type: 'main', index: 0 }]] },
+        Switch: { main: [[{ node: 'End', type: 'main', index: 0 }]] },
+      } } as unknown as Partial<Workflow>);
+      const message = errors.find(e => e.includes('output branches in connections'));
+      expect(message).toContain('has no outputs');
+      expect(message).not.toContain('0 to -1');
+    });
+  });
+
 });

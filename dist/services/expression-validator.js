@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ExpressionValidator = void 0;
+const jmespath_checks_1 = require("../utils/jmespath-checks");
 const expression_utils_1 = require("../utils/expression-utils");
 class ExpressionValidator {
     static validateExpression(expression, context) {
@@ -84,10 +85,34 @@ class ExpressionValidator {
             }
         }
         this.checkCommonMistakes(expr, result);
+        this.checkJmespathCalls(expr, result);
+    }
+    static checkJmespathCalls(expr, result) {
+        if (expr.length > this.MAX_JMESPATH_SCAN_LENGTH)
+            return;
+        const seen = new Set();
+        const report = (severity, text) => {
+            if (seen.has(text))
+                return;
+            seen.add(text);
+            (severity === 'error' ? result.errors : result.warnings).push(text);
+        };
+        for (const call of (0, jmespath_checks_1.findJmespathCalls)(expr)) {
+            if (call.queryIsFirstArgument) {
+                report('error', '$jmespath arguments are reversed: use $jmespath(data, "query"); n8n resolves the expression to null');
+                continue;
+            }
+            if (call.query === undefined)
+                continue;
+            for (const finding of (0, jmespath_checks_1.checkJmespathQuery)(call.query)) {
+                const consequence = finding.severity === 'error' ? '; n8n resolves the expression to null instead of reporting the parse error' : '';
+                report(finding.severity, `${finding.message}${consequence}. ${finding.fix}`);
+            }
+        }
     }
     static checkCommonMistakes(expr, result) {
         const missingPrefixPattern = /(?<![.$\w['])\b(json|node|input|items|workflow|execution)\b(?!\s*[:''])/;
-        if (expr.match(missingPrefixPattern)) {
+        if ((0, jmespath_checks_1.blankStringLiterals)(expr).match(missingPrefixPattern)) {
             result.warnings.push('Possible missing $ prefix for variable (e.g., use $json instead of json)');
         }
     }
@@ -173,6 +198,7 @@ ExpressionValidator.BARE_EXPRESSION_PATTERNS = [
     { pattern: /^\$env\./, name: '$env' },
     { pattern: /^\$(now|today|itemIndex|runIndex)$/, name: 'built-in variable' },
 ];
+ExpressionValidator.MAX_JMESPATH_SCAN_LENGTH = 50000;
 ExpressionValidator.VARIABLE_PATTERNS = {
     json: /\$json(\.[a-zA-Z_][\w]*|\["[^"]+"\]|\['[^']+'\]|\[\d+\])*/g,
     node: /\$node\["([^"]+)"\]\.json/g,

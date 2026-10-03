@@ -47,6 +47,7 @@ export declare class EnhancedConfigValidator extends ConfigValidator {
     private static validateSwitchNodeStructure;
     private static validateIfNodeStructure;
     private static validateFilterNodeStructure;
+    private static validateConditionOperators;
     private static validateResourceAndOperation;
     private static validateSpecialTypeStructures;
     private static validateComplexTypeStructure;

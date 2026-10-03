@@ -11,6 +11,7 @@ const node_source_extractor_1 = require("../utils/node-source-extractor");
 const enhanced_documentation_fetcher_1 = require("../utils/enhanced-documentation-fetcher");
 const example_generator_1 = require("../utils/example-generator");
 const database_adapter_1 = require("../database/database-adapter");
+const compressed_column_1 = require("../database/compressed-column");
 class NodeDocumentationService {
     constructor(dbPath) {
         this.db = null;
@@ -444,7 +445,7 @@ CREATE TABLE IF NOT EXISTS extraction_stats (
             requiredScopes: row.required_scopes ? JSON.parse(row.required_scopes) : null,
             exampleWorkflow: row.example_workflow ? JSON.parse(row.example_workflow) : null,
             exampleParameters: row.example_parameters ? JSON.parse(row.example_parameters) : null,
-            propertiesSchema: row.properties_schema ? JSON.parse(row.properties_schema) : null,
+            propertiesSchema: row.properties_schema ? (0, compressed_column_1.decompressColumnJson)(row.properties_schema, null) : null,
             packageName: row.package_name,
             version: row.version,
             codexData: row.codex_data ? JSON.parse(row.codex_data) : null,

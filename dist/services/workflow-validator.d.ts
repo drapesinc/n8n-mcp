@@ -20,13 +20,14 @@ interface WorkflowNode {
     alwaysOutputData?: boolean;
     executeOnce?: boolean;
 }
+type ConnectionBranch = Array<{
+    node: string;
+    type: string;
+    index: number;
+}> | null;
 interface WorkflowConnection {
     [sourceNode: string]: {
-        [outputType: string]: Array<Array<{
-            node: string;
-            type: string;
-            index: number;
-        }>>;
+        [outputType: string]: ConnectionBranch[];
     };
 }
 interface WorkflowJson {
@@ -84,11 +85,13 @@ export declare class WorkflowValidator {
         validateExpressions?: boolean;
         profile?: 'minimal' | 'runtime' | 'ai-friendly' | 'strict';
     }): Promise<WorkflowValidationResult>;
+    private validateAINodes;
     private validateNodeGroups;
     private validateWorkflowStructure;
     private validateAllNodes;
     private validateConnections;
     private validateConnectionOutputs;
+    private describeHandlersOnSuccessOutput;
     private validateErrorOutputConfiguration;
     private validateAIToolSource;
     private pushCommunityToolUsageWarning;

@@ -55,7 +55,14 @@ export declare class NodeRepository {
     getNodesByNpmPackage(npmPackageName: string): any[];
     deleteStaleCommunityNodes(npmPackageName: string, keepNodeTypes: string[]): number;
     deleteCommunityNodes(): number;
-    updateNodeReadme(nodeType: string, readme: string): void;
+    updateNodeReadme(nodeType: string, readme: string, options?: {
+        clearSummary?: boolean;
+    }): void;
+    clearNodeReadme(nodeType: string): void;
+    compressStoredColumns(): {
+        rewritten: number;
+    };
+    private repackStoredJson;
     updateNodeAISummary(nodeType: string, summary: object): void;
     getCommunityNodesWithoutReadme(): any[];
     getCommunityNodesWithoutAISummary(): any[];
@@ -92,8 +99,6 @@ export declare class NodeRepository {
     hasVersionUpgradePath(nodeType: string, fromVersion: string, toVersion: string): boolean;
     getVersionedNodesCount(): number;
     private parseNodeVersionRow;
-    private compressJson;
-    private decompressJson;
     createWorkflowVersion(data: {
         instanceId: string;
         workflowId: string;

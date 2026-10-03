@@ -21,6 +21,7 @@ export declare class TelemetryCircuitBreaker {
     shouldAllow(): boolean;
     recordSuccess(): void;
     recordFailure(error?: Error): void;
+    private canRetryNow;
     getState(): {
         state: string;
         failureCount: number;

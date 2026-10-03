@@ -854,9 +854,9 @@ class N8nApiClient {
             throw (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
-    async updateTag(id, tag) {
+    async updateTag(id, name) {
         try {
-            const response = await this.client.patch(`/tags/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'tagId')}`, tag);
+            const response = await this.client.put(`/tags/${(0, validation_schemas_1.encodeApiPathSegment)(id, 'tagId')}`, { name });
             return response.data;
         }
         catch (error) {
@@ -874,36 +874,6 @@ class N8nApiClient {
     async updateWorkflowTags(workflowId, tagIds) {
         try {
             const response = await this.client.put(`/workflows/${(0, validation_schemas_1.encodeApiPathSegment)(workflowId, 'workflowId')}/tags`, tagIds.filter(id => id).map(id => ({ id })));
-            return response.data;
-        }
-        catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
-        }
-    }
-    async getSourceControlStatus() {
-        try {
-            const response = await this.client.get('/source-control/status');
-            return response.data;
-        }
-        catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
-        }
-    }
-    async pullSourceControl(force = false) {
-        try {
-            const response = await this.client.post('/source-control/pull', { force });
-            return response.data;
-        }
-        catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
-        }
-    }
-    async pushSourceControl(message, fileNames) {
-        try {
-            const response = await this.client.post('/source-control/push', {
-                message,
-                fileNames,
-            });
             return response.data;
         }
         catch (error) {

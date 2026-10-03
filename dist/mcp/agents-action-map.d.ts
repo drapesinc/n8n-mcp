@@ -4,6 +4,7 @@ export interface AgentActionSpec {
     defaultTimeoutMs: number;
     destructive: boolean;
     idempotent: boolean;
+    defaultsToPersonalProject?: boolean;
 }
 export declare const DEFAULT_TIMEOUT_MS = 30000;
 export declare const CALL_TIMEOUT_MS = 180000;

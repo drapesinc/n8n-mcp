@@ -1,4 +1,4 @@
-import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, TestRunSummary, TestRunListParams, TestCaseListParams, TestRunListResponse, TestCaseListResponse, TestRunTriggerResult, TestRunCancelResult, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, SourceControlStatus, SourceControlPullResult, SourceControlPushResult, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams, Folder, FolderListParams, FolderListResponse, Project } from '../types/n8n-api';
+import { Workflow, WorkflowListParams, WorkflowListResponse, Execution, ExecutionListParams, ExecutionListResponse, TestRunSummary, TestRunListParams, TestCaseListParams, TestRunListResponse, TestCaseListResponse, TestRunTriggerResult, TestRunCancelResult, Credential, CredentialListParams, CredentialListResponse, Tag, TagListParams, TagListResponse, HealthCheckResponse, N8nVersionInfo, Variable, WebhookRequest, DataTable, DataTableColumn, DataTableListParams, DataTableRow, DataTableRowListParams, DataTableInsertRowsParams, DataTableUpdateRowsParams, DataTableUpsertRowParams, DataTableDeleteRowsParams, Folder, FolderListParams, FolderListResponse, Project } from '../types/n8n-api';
 export interface N8nApiClientConfig {
     baseUrl: string;
     apiKey: string;
@@ -78,12 +78,9 @@ export declare class N8nApiClient {
     getCredentialSchema(typeName: string): Promise<any>;
     listTags(params?: TagListParams): Promise<TagListResponse>;
     createTag(tag: Partial<Tag>): Promise<Tag>;
-    updateTag(id: string, tag: Partial<Tag>): Promise<Tag>;
+    updateTag(id: string, name: string): Promise<Tag>;
     deleteTag(id: string): Promise<void>;
     updateWorkflowTags(workflowId: string, tagIds: string[]): Promise<Tag[]>;
-    getSourceControlStatus(): Promise<SourceControlStatus>;
-    pullSourceControl(force?: boolean): Promise<SourceControlPullResult>;
-    pushSourceControl(message: string, fileNames?: string[]): Promise<SourceControlPushResult>;
     getVariables(): Promise<Variable[]>;
     createVariable(variable: Partial<Variable>): Promise<Variable>;
     updateVariable(id: string, variable: Partial<Variable>): Promise<Variable>;

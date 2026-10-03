@@ -558,12 +558,13 @@ class WorkflowAutoFixer {
                 while (nodeConn['main'].length <= index) {
                     nodeConn['main'].push([]);
                 }
-                const hadExisting = nodeConn['main'][index] && nodeConn['main'][index].length > 0;
+                const hadExisting = Array.isArray(nodeConn['main'][index]) && nodeConn['main'][index].length > 0;
                 if (Array.isArray(entries)) {
                     for (const outputGroup of entries) {
                         if (Array.isArray(outputGroup)) {
+                            const existing = Array.isArray(nodeConn['main'][index]) ? nodeConn['main'][index] : [];
                             nodeConn['main'][index] = [
-                                ...nodeConn['main'][index],
+                                ...existing,
                                 ...outputGroup
                             ];
                         }

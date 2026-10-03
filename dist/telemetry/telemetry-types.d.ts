@@ -69,10 +69,13 @@ export declare const TELEMETRY_CONFIG: {
     readonly RATE_LIMIT_MAX_EVENTS: 100;
     readonly MAX_QUEUE_SIZE: 1000;
     readonly MAX_BATCH_SIZE: 50;
+    readonly MAX_BATCH_BYTES_EVENTS: number;
+    readonly MAX_BATCH_BYTES_WORKFLOWS: number;
+    readonly MAX_BATCH_BYTES_MUTATIONS: number;
 };
 export declare const TELEMETRY_BACKEND: {
-    readonly URL: "https://ydyufsohxdfpopqbubwk.supabase.co";
-    readonly ANON_KEY: "sb_publishable_UbVUTyXgIyvemM9b15auQg_YzGa47Gq";
+    readonly URL: "https://telemetry.n8n-mcp.com";
+    readonly KEY: "ntk_pub_245fefa7e96617d0e8015056";
 };
 export interface TelemetryMetrics {
     eventsTracked: number;

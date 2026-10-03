@@ -9,6 +9,7 @@ const os_2 = require("os");
 class TelemetryConfigManager {
     constructor() {
         this.config = null;
+        this.cachedPackageVersion = null;
         this.configDir = (0, path_1.join)((0, os_1.homedir)(), '.n8n-mcp');
         this.configPath = (0, path_1.join)(this.configDir, 'telemetry.json');
     }
@@ -156,7 +157,16 @@ class TelemetryConfigManager {
             return false;
         }
         const config = this.loadConfig();
+        if (config.disabledByServer && config.disabledByServer.version === this.getPackageVersion()) {
+            return false;
+        }
         return config.enabled;
+    }
+    recordServerDisable(version) {
+        const config = this.loadConfig();
+        config.disabledByServer = { version, at: new Date().toISOString() };
+        this.config = config;
+        this.saveConfig();
     }
     isDisabledByEnvironment() {
         const envVars = [
@@ -263,6 +273,16 @@ For Docker: Set N8N_MCP_TELEMETRY_DISABLED=true
         process.stderr.write(`\n${lines.join('\n')}\n`);
     }
     getPackageVersion() {
+        if (this.cachedPackageVersion !== null) {
+            return this.cachedPackageVersion;
+        }
+        const version = this.resolvePackageVersion();
+        if (version !== 'unknown') {
+            this.cachedPackageVersion = version;
+        }
+        return version;
+    }
+    resolvePackageVersion() {
         try {
             const possiblePaths = [
                 (0, path_1.resolve)(__dirname, '..', '..', 'package.json'),

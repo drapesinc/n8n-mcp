@@ -16,7 +16,7 @@ export declare class MCPEngine {
         common: import("./services/property-filter").SimplifiedProperty[];
     } | null>;
     getNodeDocumentation(args: any): Promise<any>;
-    validateNodeOperation(args: any): Promise<import("./services/config-validator").ValidationResult | {
+    validateNodeOperation(args: any): Promise<import("./services/enhanced-config-validator").EnhancedValidationResult | {
         valid: boolean;
         errors: {
             type: string;

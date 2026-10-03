@@ -275,6 +275,91 @@ describe('NO_RESPONSE connection detail', () => {
   });
 });
 
+// #1118 — n8n 2.39+ answers 403 with { message, reason, versionId } on PUT
+// /workflows/{id} when the caller may edit but not publish.
+describe('PUBLISH_FORBIDDEN (n8n 2.39+ publish-on-save)', () => {
+  it('maps a 403 with reason=insufficient_api_key_scope to PUBLISH_FORBIDDEN', () => {
+    const axiosError: any = new Error('publish forbidden');
+    axiosError.response = {
+      status: 403,
+      data: {
+        message: "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+        reason: 'insufficient_api_key_scope',
+        versionId: 'draft-1',
+      },
+    };
+
+    const error = handleN8nApiError(axiosError);
+
+    expect(error.code).toBe('PUBLISH_FORBIDDEN');
+    expect(error.statusCode).toBe(403);
+    expect(error.message).toBe(axiosError.response.data.message);
+    expect(error.details).toEqual(axiosError.response.data);
+  });
+
+  it('maps a 403 with reason=insufficient_permissions to PUBLISH_FORBIDDEN', () => {
+    const axiosError: any = new Error('publish forbidden');
+    axiosError.response = {
+      status: 403,
+      data: {
+        message: 'Your change was saved as a draft. It was not published because you do not have permission to publish this workflow.',
+        reason: 'insufficient_permissions',
+        versionId: 'draft-2',
+      },
+    };
+
+    const error = handleN8nApiError(axiosError);
+
+    expect(error.code).toBe('PUBLISH_FORBIDDEN');
+    expect(error.statusCode).toBe(403);
+    expect(error.details).toEqual(axiosError.response.data);
+  });
+
+  it('leaves a 403 with a matching reason but no versionId as a generic API_ERROR', () => {
+    // n8n's WorkflowPublishForbiddenError always carries versionId (the draft it just
+    // saved); a 403 that reuses one of these reason strings without it is not that error,
+    // so it must not be misclassified as PUBLISH_FORBIDDEN.
+    const axiosError: any = new Error('publish forbidden');
+    axiosError.response = {
+      status: 403,
+      data: {
+        message: 'Forbidden',
+        reason: 'insufficient_api_key_scope',
+      },
+    };
+
+    const error = handleN8nApiError(axiosError);
+
+    expect(error.code).toBe('API_ERROR');
+    expect(error.statusCode).toBe(403);
+  });
+
+  it('leaves a plain 403 without a matching reason as a generic API_ERROR', () => {
+    const axiosError: any = new Error('Forbidden');
+    axiosError.response = {
+      status: 403,
+      data: { message: 'Forbidden' },
+    };
+
+    const error = handleN8nApiError(axiosError);
+
+    expect(error.code).toBe('API_ERROR');
+    expect(error.statusCode).toBe(403);
+    expect(error.message).toBe('Forbidden');
+  });
+
+  it('getUserFriendlyErrorMessage keeps n8n\'s message intact for PUBLISH_FORBIDDEN', () => {
+    const error = new N8nApiError(
+      "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+      403,
+      'PUBLISH_FORBIDDEN',
+      { reason: 'insufficient_api_key_scope', versionId: 'draft-1' },
+    );
+
+    expect(getUserFriendlyErrorMessage(error)).toBe(error.message);
+  });
+});
+
 describe('enrichUnknownPropertyError (#1047)', () => {
   const settingsRejection = () =>
     new N8nValidationError('request/body/settings must NOT have additional properties', {

@@ -1,7 +1,17 @@
 # syntax=docker/dockerfile:1.7
 # Ultra-optimized Dockerfile - minimal runtime dependencies (no n8n packages)
 
-# Stage 1: Builder (TypeScript compilation only)
+# Build the self-contained UI assets independently of server dependencies.
+FROM node:22-alpine AS ui-builder
+WORKDIR /app/ui-apps
+COPY ui-apps/package.json ui-apps/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY ui-apps/tsconfig.json ui-apps/vite.config.ts ./
+COPY ui-apps/src/apps ./src/apps
+COPY ui-apps/src/shared ./src/shared
+RUN npm run build
+
+# Server builder (TypeScript compilation only)
 FROM node:22-alpine AS builder
 WORKDIR /app
 
@@ -27,8 +37,8 @@ RUN --mount=type=cache,target=/root/.npm \
     echo '{"overrides":{"isolated-vm":"npm:empty-npm-package@1.0.0"}}' > package.json && \
     npm install --no-save typescript@^5.8.3 @types/node@^22.15.30 @types/express@^5.0.3 \
         @modelcontextprotocol/sdk@1.30.0 dotenv@^16.5.0 express@^5.1.0 axios@^1.18.1 \
-        n8n-workflow@2.37.2 uuid@^11.1.1 @types/uuid@^10.0.0 \
-        openai@^4.77.0 zod@3.25.76 lru-cache@^11.2.1 "@supabase/supabase-js@>=2.57.4 <2.110.0" \
+        n8n-workflow@2.41.2 uuid@^11.1.1 @types/uuid@^10.0.0 \
+        openai@^4.77.0 zod@3.25.76 lru-cache@^11.2.1 \
         undici@^6.28.0
 
 # Copy source and build
@@ -58,6 +68,9 @@ RUN --mount=type=cache,target=/root/.npm \
 
 # Copy built application
 COPY --from=builder /app/dist ./dist
+COPY --from=ui-builder /app/ui-apps/dist ./ui-apps/dist
+RUN --mount=type=bind,source=scripts/ui-package-smoke.cjs,target=/tmp/ui-package-smoke.cjs \
+    node /tmp/ui-package-smoke.cjs /app
 
 # Copy pre-built database and required files
 # Cache bust: 2025-07-06-trigger-fix-v3 - includes is_trigger=true for webhook,cron,interval,emailReadImap

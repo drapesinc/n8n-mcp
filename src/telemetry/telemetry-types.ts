@@ -104,18 +104,28 @@ export const TELEMETRY_CONFIG = {
 
   // Queue limits
   MAX_QUEUE_SIZE: 1000, // Maximum events to queue
-  MAX_BATCH_SIZE: 50, // Maximum events per batch
+  MAX_BATCH_SIZE: 50, // Maximum rows per batch, by count
+
+  // Byte-size limits per ingest stream, mirroring the server's own per-request
+  // caps. MAX_BATCH_SIZE bounds row count, but sanitized workflow/mutation
+  // payloads vary hugely in size, so a 50-row batch can still be too large.
+  // A single row over its stream's limit is sent alone — the server 413s it
+  // and it is dropped, never split.
+  MAX_BATCH_BYTES_EVENTS: 256 * 1024, // 256 KiB
+  MAX_BATCH_BYTES_WORKFLOWS: 1024 * 1024, // 1 MiB
+  MAX_BATCH_BYTES_MUTATIONS: 2 * 1024 * 1024, // 2 MiB
 } as const;
 
 export const TELEMETRY_BACKEND = {
-  URL: 'https://ydyufsohxdfpopqbubwk.supabase.co',
+  URL: 'https://telemetry.n8n-mcp.com',
   /**
-   * Supabase publishable key (`sb_publishable_…`), the successor to the legacy
-   * anon JWT. The field keeps the ANON_KEY name to match the SUPABASE_ANON_KEY
-   * environment variable that overrides it — a documented public contract.
-   * Insert-only by design; row access is governed by RLS policies.
+   * Public client identifier for our own ingest API (apps/telemetry-ingest in
+   * n8n-mcp-backend). It is not a secret — it identifies this client to the
+   * server, which is write-only from the client's point of view (no read
+   * access to any data), so publishing it here is safe. Overridable via
+   * N8N_MCP_TELEMETRY_KEY for development/testing.
    */
-  ANON_KEY: 'sb_publishable_UbVUTyXgIyvemM9b15auQg_YzGa47Gq'
+  KEY: 'ntk_pub_245fefa7e96617d0e8015056'
 } as const;
 
 export interface TelemetryMetrics {

@@ -16,6 +16,7 @@ import {
   createDocumentationGenerator,
 } from './documentation-generator';
 import { logger } from '../utils/logger';
+import { NPM_MISSING_README_PLACEHOLDER } from '../constants/npm-readme';
 
 /**
  * Options for batch processing
@@ -192,7 +193,10 @@ export class DocumentationBatchProcessor {
       const readme = readmeMap.get(node.npmPackageName);
       if (readme) {
         try {
-          this.repository.updateNodeReadme(node.nodeType, readme);
+          // A summary generated from a stored placeholder does not describe the README that replaces it.
+          this.repository.updateNodeReadme(node.nodeType, readme, {
+            clearSummary: node.npmReadme === NPM_MISSING_README_PLACEHOLDER,
+          });
           fetched++;
         } catch (error) {
           const msg = `Failed to save README for ${node.nodeType}: ${error}`;
@@ -200,6 +204,14 @@ export class DocumentationBatchProcessor {
           failed++;
         }
       } else {
+        // A stored placeholder is not a README: drop it and the summary generated from it.
+        if (node.npmReadme === NPM_MISSING_README_PLACEHOLDER) {
+          try {
+            this.repository.clearNodeReadme(node.nodeType);
+          } catch (error) {
+            errors.push(`Failed to clear the README placeholder for ${node.nodeType}: ${error}`);
+          }
+        }
         failed++;
       }
     }
@@ -223,7 +235,7 @@ export class DocumentationBatchProcessor {
     let nodes = skipExisting
       ? this.repository.getCommunityNodesWithoutAISummary()
       : this.repository.getCommunityNodes({ orderBy: 'downloads' }).filter(
-          (n) => n.npmReadme && n.npmReadme.length > 0
+          (n) => n.npmReadme && n.npmReadme.length > 0 && n.npmReadme !== NPM_MISSING_README_PLACEHOLDER
         );
 
     if (limit) {

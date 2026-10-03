@@ -30,4 +30,5 @@ export interface ColumnDefinition {
     type: string | null;
 }
 export declare function createDatabaseAdapter(dbPath: string): Promise<DatabaseAdapter>;
+export declare function createSQLJSAdapter(dbPath: string): Promise<DatabaseAdapter>;
 //# sourceMappingURL=database-adapter.d.ts.map

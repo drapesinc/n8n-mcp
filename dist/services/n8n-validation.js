@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.defaultWorkflowSettings = exports.workflowSettingsSchema = exports.workflowConnectionSchema = exports.WRITABLE_NODE_PROPERTIES = exports.workflowNodeSchema = void 0;
+exports.FILTER_OPERATOR_TYPES = exports.defaultWorkflowSettings = exports.workflowSettingsSchema = exports.workflowConnectionSchema = exports.WRITABLE_NODE_PROPERTIES = exports.workflowNodeSchema = void 0;
 exports.cleanNodeForApi = cleanNodeForApi;
 exports.validateWorkflowNode = validateWorkflowNode;
 exports.validateWorkflowConnections = validateWorkflowConnections;
@@ -14,6 +14,7 @@ exports.validateWorkflowStructure = validateWorkflowStructure;
 exports.hasWebhookTrigger = hasWebhookTrigger;
 exports.validateConditionNodeStructure = validateConditionNodeStructure;
 exports.validateFilterBasedNodeMetadata = validateFilterBasedNodeMetadata;
+exports.describeOperatorValue = describeOperatorValue;
 exports.validateOperatorStructure = validateOperatorStructure;
 exports.getWebhookUrl = getWebhookUrl;
 exports.getWorkflowStructureExample = getWorkflowStructureExample;
@@ -57,7 +58,7 @@ const connectionArraySchema = zod_1.z.array(zod_1.z.array(zod_1.z.object({
     node: zod_1.z.string(),
     type: zod_1.z.string(),
     index: zod_1.z.number(),
-})));
+})).nullable());
 exports.workflowConnectionSchema = zod_1.z.preprocess(mcp_input_normalizer_1.normalizeMcpWorkflowConnections, zod_1.z.record(zod_1.z.string(), zod_1.z.object({
     main: connectionArraySchema.optional(),
     error: connectionArraySchema.optional(),
@@ -167,6 +168,14 @@ function cleanWorkflowForUpdate(workflow) {
     }
     return cleanedWorkflow;
 }
+function describeParseFailure(error) {
+    if (!(error instanceof zod_1.z.ZodError)) {
+        return error instanceof Error ? error.message : 'Unknown error';
+    }
+    return error.issues
+        .map(issue => (issue.path.length > 0 ? `"${issue.path.join('.')}": ${issue.message}` : issue.message))
+        .join('; ');
+}
 function validateWorkflowStructure(workflow) {
     const errors = [];
     if (!workflow.name) {
@@ -174,6 +183,26 @@ function validateWorkflowStructure(workflow) {
     }
     if (!workflow.nodes || workflow.nodes.length === 0) {
         errors.push('Workflow must have at least one node');
+    }
+    if (workflow.nodes) {
+        if (!Array.isArray(workflow.nodes)) {
+            errors.push('Workflow nodes must be an array');
+            return errors;
+        }
+        const nodes = [];
+        const shapeErrors = [];
+        for (const [index, node] of workflow.nodes.entries()) {
+            try {
+                nodes.push(validateWorkflowNode(node));
+            }
+            catch (error) {
+                shapeErrors.push(`Invalid node at index ${index}: ${describeParseFailure(error)}`);
+            }
+        }
+        if (shapeErrors.length > 0) {
+            return [...errors, ...shapeErrors];
+        }
+        workflow = { ...workflow, nodes };
     }
     if (workflow.nodes && workflow.nodes.length > 0) {
         const hasExecutableNodes = workflow.nodes.some(node => !(0, node_classification_1.isNonExecutableNode)(node.type));
@@ -183,6 +212,14 @@ function validateWorkflowStructure(workflow) {
     }
     if (!workflow.connections) {
         errors.push('Workflow connections are required');
+    }
+    else {
+        try {
+            workflow = { ...workflow, connections: validateWorkflowConnections(workflow.connections) };
+        }
+        catch (error) {
+            return [...errors, `Invalid connections: ${describeParseFailure(error)}`];
+        }
     }
     if (workflow.nodes && workflow.nodes.length === 1) {
         const singleNode = workflow.nodes[0];
@@ -202,7 +239,7 @@ function validateWorkflowStructure(workflow) {
         else if (connectionCount > 0 || executableNodes.length > 1) {
             const connectedNodes = new Set();
             Object.entries(workflow.connections).forEach(([sourceName, connection]) => {
-                connectedNodes.add(sourceName);
+                let hasTarget = false;
                 const connectionRecord = connection;
                 Object.values(connectionRecord).forEach((connData) => {
                     if (connData && Array.isArray(connData)) {
@@ -211,47 +248,41 @@ function validateWorkflowStructure(workflow) {
                                 outputs.forEach((target) => {
                                     if (target?.node) {
                                         connectedNodes.add(target.node);
+                                        hasTarget = true;
                                     }
                                 });
                             }
                         });
                     }
                 });
+                if (hasTarget)
+                    connectedNodes.add(sourceName);
             });
             const disconnectedNodes = workflow.nodes.filter(node => {
                 if ((0, node_classification_1.isNonExecutableNode)(node.type)) {
                     return false;
                 }
-                const isConnected = connectedNodes.has(node.name);
-                const isNodeTrigger = (0, node_type_utils_1.isTriggerNode)(node.type);
-                if (isNodeTrigger) {
-                    const hasOutgoingConnections = !!workflow.connections?.[node.name];
-                    const hasInboundConnections = isConnected;
-                    return !hasOutgoingConnections && !hasInboundConnections;
-                }
-                return !isConnected;
+                return !connectedNodes.has(node.name);
             });
             if (disconnectedNodes.length > 0) {
                 const disconnectedList = disconnectedNodes.map(n => `"${n.name}" (${n.type})`).join(', ');
                 const firstDisconnected = disconnectedNodes[0];
-                const suggestedSource = workflow.nodes.find(n => connectedNodes.has(n.name))?.name || workflow.nodes[0].name;
-                errors.push(`Disconnected nodes detected: ${disconnectedList}. Each node must have at least one connection. Add a connection: {type: 'addConnection', source: '${suggestedSource}', target: '${firstDisconnected.name}', sourcePort: 'main', targetPort: 'main'}`);
+                const suggestedSource = workflow.nodes.find(n => connectedNodes.has(n.name) && !(0, node_classification_1.isNonExecutableNode)(n.type))?.name
+                    || workflow.nodes.find(n => n.name !== firstDisconnected.name && !(0, node_classification_1.isNonExecutableNode)(n.type))?.name;
+                const hint = suggestedSource
+                    ? ` Add a connection: {type: 'addConnection', source: '${suggestedSource}', target: '${firstDisconnected.name}', sourcePort: 'main', targetPort: 'main'}`
+                    : '';
+                errors.push(`Disconnected nodes detected: ${disconnectedList}. Each node must have at least one connection.${hint}`);
             }
         }
     }
     if (workflow.nodes) {
         workflow.nodes.forEach((node, index) => {
-            try {
-                validateWorkflowNode(node);
-                if (node.type.startsWith('nodes-base.')) {
-                    errors.push(`Invalid node type "${node.type}" at index ${index}. Use "n8n-nodes-base.${node.type.substring(11)}" instead.`);
-                }
-                else if (!node.type.includes('.')) {
-                    errors.push(`Invalid node type "${node.type}" at index ${index}. Node types must include package prefix (e.g., "n8n-nodes-base.webhook").`);
-                }
+            if (node.type.startsWith('nodes-base.')) {
+                errors.push(`Invalid node type "${node.type}" at index ${index}. Use "n8n-nodes-base.${node.type.substring(11)}" instead.`);
             }
-            catch (error) {
-                errors.push(`Invalid node at index ${index}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+            else if (!node.type.includes('.')) {
+                errors.push(`Invalid node type "${node.type}" at index ${index}. Node types must include package prefix (e.g., "n8n-nodes-base.webhook").`);
             }
         });
     }
@@ -263,14 +294,6 @@ function validateWorkflowStructure(workflow) {
             }
         });
     }
-    if (workflow.connections) {
-        try {
-            validateWorkflowConnections(workflow.connections);
-        }
-        catch (error) {
-            errors.push(`Invalid connections: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-    }
     if (workflow.active === true && workflow.nodes && workflow.nodes.length > 0) {
         const activatableTriggers = workflow.nodes.filter(node => !node.disabled && (0, node_type_utils_1.isActivatableTrigger)(node.type));
         if (activatableTriggers.length === 0) {
@@ -279,39 +302,28 @@ function validateWorkflowStructure(workflow) {
         }
     }
     if (workflow.nodes && workflow.connections) {
-        const switchNodes = workflow.nodes.filter(n => {
-            if (n.type !== 'n8n-nodes-base.switch')
-                return false;
-            const mode = n.parameters?.mode;
-            return !mode || mode === 'rules';
-        });
+        const switchNodes = workflow.nodes.filter(node => isRulesModeSwitch(node) && (node.typeVersion || 1) >= 2);
+        const ruleLabel = (rule, i) => typeof rule?.outputKey === 'string' ? `"${rule.outputKey}" (index ${i})` : `Rule ${i}`;
         for (const switchNode of switchNodes) {
             const params = switchNode.parameters;
-            const rules = params?.rules?.rules || [];
+            const ruleCollection = params?.rules?.values ?? params?.rules?.rules;
+            const rules = Array.isArray(ruleCollection) ? ruleCollection : [];
             const nodeConnections = workflow.connections[switchNode.name];
-            if (rules.length > 0 && nodeConnections?.main) {
+            if (Array.isArray(ruleCollection) && nodeConnections?.main) {
                 const outputBranches = nodeConnections.main.length;
-                if (outputBranches !== rules.length) {
-                    const ruleNames = rules.map((r, i) => r.outputKey ? `"${r.outputKey}" (index ${i})` : `Rule ${i}`).join(', ');
-                    errors.push(`Switch node "${switchNode.name}" has ${rules.length} rules [${ruleNames}] ` +
-                        `but only ${outputBranches} output branch${outputBranches !== 1 ? 'es' : ''} in connections. ` +
-                        `Each rule needs its own output branch. When connecting to Switch outputs, specify sourceIndex: ` +
-                        rules.map((_, i) => i).join(', ') +
-                        ` (or use case parameter for clarity).`);
-                }
-                const nonEmptyBranches = nodeConnections.main.filter((branch) => branch.length > 0).length;
-                if (nonEmptyBranches < rules.length) {
-                    const emptyIndices = nodeConnections.main
-                        .map((branch, i) => branch.length === 0 ? i : -1)
-                        .filter((i) => i !== -1 && i < rules.length);
-                    if (emptyIndices.length > 0) {
-                        const ruleInfo = emptyIndices.map((i) => {
-                            const rule = rules[i];
-                            return rule.outputKey ? `"${rule.outputKey}" (index ${i})` : `Rule ${i}`;
-                        }).join(', ');
-                        errors.push(`Switch node "${switchNode.name}" has unconnected output${emptyIndices.length !== 1 ? 's' : ''}: ${ruleInfo}. ` +
-                            `Add connection${emptyIndices.length !== 1 ? 's' : ''} using sourceIndex: ${emptyIndices.join(' or ')}.`);
-                    }
+                const fallbackOutput = params?.options?.fallbackOutput ?? params?.fallbackOutput;
+                const fallbackOutputs = fallbackOutput === 'extra' ? 1 : 0;
+                const errorOutputs = switchNode.onError === 'continueErrorOutput' ? 1 : 0;
+                const outputCount = rules.length + fallbackOutputs + errorOutputs;
+                if (outputBranches > outputCount) {
+                    const ruleNames = rules.map(ruleLabel).join(', ');
+                    errors.push(`Switch node "${switchNode.name}" has ${rules.length} rules [${ruleNames}]` +
+                        (fallbackOutputs ? ' plus a fallback output' : '') +
+                        (errorOutputs ? ' plus an error output' : '') +
+                        ` but ${outputBranches} output branches in connections. ` +
+                        (outputCount > 0
+                            ? `Outputs are indexed 0 to ${outputCount - 1}; remove the extra branches or add rules for them.`
+                            : 'The Switch has no outputs; add rules or a fallback output before connecting branches.'));
                 }
             }
         }
@@ -363,21 +375,37 @@ function hasWebhookTrigger(workflow) {
 function validateConditionNodeStructure(node) {
     const errors = [];
     const typeVersion = node.typeVersion || 1;
-    if (node.type === 'n8n-nodes-base.if') {
+    if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.filter') {
         if (typeVersion >= 2) {
             errors.push(...validateFilterConditionOperators(node.parameters?.conditions, 'conditions'));
         }
     }
-    else if (node.type === 'n8n-nodes-base.switch') {
-        if (typeVersion >= 3.2) {
-            const rules = node.parameters?.rules;
-            if (rules?.rules && Array.isArray(rules.rules)) {
-                rules.rules.forEach((rule, i) => {
-                    errors.push(...validateFilterConditionOperators(rule.conditions, `rules.rules[${i}].conditions`));
-                });
-            }
-        }
+    else if (isRulesModeSwitch(node) && typeVersion >= 3.2) {
+        const rules = node.parameters?.rules;
+        errors.push(...validateSwitchRuleCollection(rules?.values, 'rules.values'));
+        errors.push(...validateSwitchRuleCollection(rules?.rules, 'rules.rules'));
     }
+    return errors;
+}
+function isRulesModeSwitch(node) {
+    if (node.type !== 'n8n-nodes-base.switch')
+        return false;
+    const mode = node.parameters?.mode;
+    return !mode || mode === 'rules';
+}
+function validateSwitchRuleCollection(collection, path) {
+    if (collection === undefined || collection === null)
+        return [];
+    if (!Array.isArray(collection))
+        return [`${path}: rules is not an array`];
+    const errors = [];
+    collection.forEach((rule, i) => {
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+            errors.push(`${path}[${i}]: rule is missing or not an object`);
+            return;
+        }
+        errors.push(...validateFilterConditionOperators(rule.conditions, `${path}[${i}].conditions`));
+    });
     return errors;
 }
 function validateFilterConditionOperators(conditions, path) {
@@ -385,12 +413,24 @@ function validateFilterConditionOperators(conditions, path) {
     if (!conditions?.conditions || !Array.isArray(conditions.conditions))
         return errors;
     conditions.conditions.forEach((condition, i) => {
-        errors.push(...validateOperatorStructure(condition.operator, `${path}.conditions[${i}].operator`));
+        errors.push(...validateOperatorStructure(condition?.operator, `${path}.conditions[${i}].operator`));
     });
     return errors;
 }
 function validateFilterBasedNodeMetadata(node) {
     return validateConditionNodeStructure(node);
+}
+exports.FILTER_OPERATOR_TYPES = ['string', 'number', 'boolean', 'dateTime', 'array', 'object', 'any'];
+function describeOperatorValue(value) {
+    if (value === null)
+        return 'null';
+    if (value === undefined)
+        return 'nothing';
+    if (Array.isArray(value))
+        return 'an array';
+    if (typeof value === 'object')
+        return 'an object';
+    return typeof value === 'string' ? `"${value}"` : `a ${typeof value} (${String(value)})`;
 }
 function validateOperatorStructure(operator, path) {
     const errors = [];
@@ -400,15 +440,12 @@ function validateOperatorStructure(operator, path) {
     }
     if (!operator.type) {
         errors.push(`${path}: missing required field "type". ` +
-            'Must be a data type: "string", "number", "boolean", "dateTime", "array", or "object"');
+            `Must be a data type: ${exports.FILTER_OPERATOR_TYPES.map(t => `"${t}"`).join(', ')}`);
     }
-    else {
-        const validTypes = ['string', 'number', 'boolean', 'dateTime', 'array', 'object'];
-        if (!validTypes.includes(operator.type)) {
-            errors.push(`${path}: invalid type "${operator.type}". ` +
-                `Type must be a data type (${validTypes.join(', ')}), not an operation name. ` +
-                'Did you mean to use the "operation" field?');
-        }
+    else if (!exports.FILTER_OPERATOR_TYPES.includes(operator.type)) {
+        errors.push(`${path}: invalid type ${describeOperatorValue(operator.type)}. ` +
+            `Type must be a data type (${exports.FILTER_OPERATOR_TYPES.join(', ')}), not an operation name. ` +
+            'Did you mean to use the "operation" field?');
     }
     if (!operator.operation) {
         errors.push(`${path}: missing required field "operation". ` +

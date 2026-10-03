@@ -1,9 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.NodeSpecificValidators = void 0;
+const jmespath_checks_1 = require("../utils/jmespath-checks");
 const MAX_CODE_LENGTH = 200000;
 const MAX_SHORT_INPUT_LENGTH = 2000;
 const MAX_PARAM_SCAN = 2000;
+const MAX_HEADER_LINES = 50;
+const MAX_RETURN_LOOKAHEAD = 5000;
+const MAX_RETURN_TOTAL_SCAN = 200000;
 const JS_PRIMITIVE_RETURN_RE = /return\s+(?:(?:true|false|null|undefined)\b|\d+|['"`])/m;
 class NodeSpecificValidators {
     static validateSlack(context) {
@@ -391,7 +395,8 @@ class NodeSpecificValidators {
     static validateMongoDB(context) {
         const { config, errors, warnings, autofix } = context;
         const { operation } = config;
-        if (!config.collection) {
+        const collectionAlreadyReported = errors.some(e => e.property === 'collection');
+        if (!config.collection && !collectionAlreadyReported) {
             errors.push({
                 type: 'missing_required',
                 property: 'collection',
@@ -963,15 +968,16 @@ class NodeSpecificValidators {
             });
             return;
         }
+        const mode = config.mode || 'runOnceForAllItems';
+        const modeIsKnown = !(typeof config.mode === 'string' && config.mode.startsWith('='));
         if (language === 'javaScript') {
             this.validateJavaScriptCode(code, errors, warnings, suggestions);
         }
         else if (language === 'python') {
-            this.validatePythonCode(code, errors, warnings, suggestions);
+            this.validatePythonCode(code, errors, warnings, suggestions, mode, modeIsKnown);
         }
-        const mode = config.mode || 'runOnceForAllItems';
-        this.validateReturnStatement(code, language, errors, warnings, suggestions, mode);
-        this.validateN8nVariables(code, language, warnings, suggestions, errors);
+        this.validateReturnStatement(code, language, errors, warnings, suggestions, mode, modeIsKnown);
+        this.validateN8nVariables(code, language, warnings, suggestions, errors, mode);
         this.validateCodeSecurity(code, language, warnings);
         if (!config.onError && code.length > 100) {
             warnings.push({
@@ -982,7 +988,7 @@ class NodeSpecificValidators {
             });
             autofix.onError = 'continueRegularOutput';
         }
-        if (config.mode === 'runOnceForEachItem' && code.includes('items')) {
+        if (language === 'javaScript' && config.mode === 'runOnceForEachItem' && code.includes('items')) {
             warnings.push({
                 type: 'best_practice',
                 message: 'In "Run Once for Each Item" mode, use $json instead of items array',
@@ -1035,8 +1041,369 @@ class NodeSpecificValidators {
             });
         }
     }
-    static validatePythonCode(code, errors, warnings, suggestions) {
+    static pythonRemovedGlobalFix(name, isEachItem) {
+        switch (name) {
+            case '_input':
+                return isEachItem ? 'Use _item (the current item dict)' : 'Use _items (the list of item dicts)';
+            case '_json':
+                return isEachItem ? 'Use _item["json"]' : 'Use _items[0]["json"]';
+            case '_node':
+                return 'No equivalent: merge the other branch upstream, or read it in JavaScript';
+            case '_now':
+            case '_today':
+                return 'No equivalent: pass the timestamp in from an expression, or import datetime if this instance allowlists it';
+            default:
+                return 'No equivalent: use $jmespath in an expression, or a list comprehension';
+        }
+    }
+    static withinCapOrRaw(code, strip) {
+        return code.length <= MAX_CODE_LENGTH ? strip(code) : code;
+    }
+    static pythonHeaderColonIndex(text, startDepth = 0) {
+        let depth = startDepth;
+        for (let i = 0; i < text.length; i++) {
+            const char = text[i];
+            if (char === '(' || char === '[' || char === '{')
+                depth++;
+            else if (char === ')' || char === ']' || char === '}')
+                depth--;
+            else if (char === ':' && depth === 0)
+                return i;
+        }
+        return -1;
+    }
+    static pythonBracketDelta(text) {
+        let delta = 0;
+        for (const char of text) {
+            if (char === '(' || char === '[' || char === '{')
+                delta++;
+            else if (char === ')' || char === ']' || char === '}')
+                delta--;
+        }
+        return delta;
+    }
+    static pythonTargetName(target) {
+        const bare = target.trim().replace(/^[(\[\s]+|[)\]\s]+$/g, '').replace(/^\*+/, '').trim();
+        const name = bare.split(/[:=]/)[0].trim();
+        return /^[A-Za-z_]\w*$/.test(name) ? name : null;
+    }
+    static pythonSplitTopLevel(text) {
+        const parts = [];
+        let depth = 0;
+        let current = '';
+        for (const char of text) {
+            if (char === '(' || char === '[' || char === '{')
+                depth++;
+            else if (char === ')' || char === ']' || char === '}')
+                depth--;
+            if (char === ',' && depth === 0) {
+                parts.push(current);
+                current = '';
+                continue;
+            }
+            current += char;
+        }
+        parts.push(current);
+        return parts;
+    }
+    static pythonParameterNames(header) {
+        const open = header.indexOf('(');
+        if (open === -1)
+            return [];
+        let depth = 0;
+        let close = -1;
+        for (let i = open; i < header.length; i++) {
+            if (header[i] === '(')
+                depth++;
+            else if (header[i] === ')') {
+                depth--;
+                if (depth === 0) {
+                    close = i;
+                    break;
+                }
+            }
+        }
+        if (close === -1)
+            return [];
+        return this.pythonSplitTopLevel(header.slice(open + 1, close))
+            .map(part => this.pythonTargetName(part))
+            .filter((name) => name !== null);
+    }
+    static pythonLogicalLines(lines) {
+        const logical = lines.map(() => '');
+        const continuation = /\\[ \t]*$/;
+        const withoutMarker = (line) => line.replace(continuation, '');
+        for (let i = 0; i < lines.length; i++) {
+            const start = i;
+            let statement = withoutMarker(lines[i]);
+            let depth = this.pythonBracketDelta(lines[i]);
+            let continued = continuation.test(lines[i]);
+            while ((depth > 0 || continued) && i + 1 < lines.length && statement.length <= MAX_SHORT_INPUT_LENGTH) {
+                i++;
+                statement += ` ${withoutMarker(lines[i]).trim()}`;
+                depth += this.pythonBracketDelta(lines[i]);
+                continued = continuation.test(lines[i]);
+            }
+            logical[start] = statement;
+        }
+        return logical;
+    }
+    static pythonImportBindings(statement) {
+        const text = statement.trim().replace(/[()]/g, ' ');
+        const words = text.split(/[ \t]+/).filter(Boolean);
+        if (words.length === 0)
+            return [];
+        let list;
+        if (words[0] === 'import') {
+            list = words.slice(1);
+        }
+        else if (words[0] === 'from') {
+            const keyword = words.indexOf('import');
+            if (keyword === -1)
+                return [];
+            list = words.slice(keyword + 1);
+        }
+        else {
+            return [];
+        }
+        const names = [];
+        for (const part of list.join(' ').split(',')) {
+            const pieces = part.trim().split(/[ \t]+/).filter(Boolean);
+            if (pieces.length === 0)
+                continue;
+            const alias = pieces.indexOf('as');
+            const target = alias === -1 ? pieces[0].split('.')[0] : pieces[alias + 1];
+            if (target && /^[A-Za-z_]\w*$/.test(target))
+                names.push(target);
+        }
+        return names;
+    }
+    static pythonBindingsOnLine(line) {
+        const names = [];
+        const assignment = /^[ \t]*([^=\n]+?)(?<![=!<>+\-*/%&|^~])=(?!=)/.exec(line);
+        if (assignment) {
+            this.pythonSplitTopLevel(assignment[1]).forEach(target => {
+                const name = this.pythonTargetName(target);
+                if (name)
+                    names.push(name);
+            });
+        }
+        const forStatement = /^[ \t]*(?:async[ \t]+)?for[ \t]+(.+?)[ \t]+in[ \t]/.exec(line);
+        if (forStatement) {
+            this.pythonSplitTopLevel(forStatement[1]).forEach(target => {
+                const name = this.pythonTargetName(target);
+                if (name)
+                    names.push(name);
+            });
+        }
+        const asTargets = /\bas[ \t]+(\w+)/g;
+        let match;
+        while ((match = asTargets.exec(line)) !== null)
+            names.push(match[1]);
+        this.pythonImportBindings(line).forEach(name => names.push(name));
+        return names;
+    }
+    static pythonFormatsDunder(formatFields) {
+        const field = /\{[^{}\n]{0,200}\.__\w+__[^{}\n]{0,200}\}/g;
+        let match;
+        while ((match = field.exec(formatFields)) !== null) {
+            const after = formatFields.slice(match.index + match[0].length, match.index + match[0].length + 200);
+            if (/['"][ \t]*\.[ \t]*format[ \t]*\(/.test(after))
+                return true;
+        }
+        return false;
+    }
+    static pythonEnclosingGroup(line, index) {
+        let closers = 0;
+        let start = -1;
+        for (let i = index - 1; i >= 0; i--) {
+            const char = line[i];
+            if (char === ')' || char === ']' || char === '}')
+                closers++;
+            else if (char === '(' || char === '[' || char === '{') {
+                if (closers === 0) {
+                    start = i;
+                    break;
+                }
+                closers--;
+            }
+        }
+        if (start === -1)
+            return null;
+        let depth = 0;
+        for (let i = start; i < line.length; i++) {
+            const char = line[i];
+            if (char === '(' || char === '[' || char === '{')
+                depth++;
+            else if (char === ')' || char === ']' || char === '}') {
+                depth--;
+                if (depth === 0)
+                    return { start, end: i };
+            }
+        }
+        return { start, end: line.length };
+    }
+    static pythonLineLocalBindings(line) {
+        const bindings = [];
+        const add = (targets, range) => {
+            this.pythonSplitTopLevel(targets).forEach(target => {
+                const name = this.pythonTargetName(target);
+                if (name)
+                    bindings.push({ name, ...range });
+            });
+        };
+        const forTargets = /\bfor[ \t]+(.+?)[ \t]+in\b/g;
+        let match;
+        while ((match = forTargets.exec(line)) !== null) {
+            add(match[1], this.pythonEnclosingGroup(line, match.index) ?? { start: match.index, end: line.length });
+        }
+        const lambdas = /\blambda\b([^:\n]*):/g;
+        while ((match = lambdas.exec(line)) !== null) {
+            const group = this.pythonEnclosingGroup(line, match.index);
+            add(match[1], { start: match.index, end: group ? group.end : line.length });
+        }
+        return bindings;
+    }
+    static pythonMaskHeaderBindings(header) {
+        const chars = header.split('');
+        const blank = (from, to) => {
+            for (let i = from; i < to; i++)
+                if (chars[i] !== '\n')
+                    chars[i] = ' ';
+        };
+        const named = /(\bdef[ \t]+)(\w+)/.exec(header);
+        if (named)
+            blank(named.index + named[1].length, named.index + named[0].length);
+        const open = header.indexOf('(');
+        if (open === -1)
+            return chars.join('');
+        let depth = 0;
+        let close = header.length;
+        for (let i = open; i < header.length; i++) {
+            if (header[i] === '(')
+                depth++;
+            else if (header[i] === ')') {
+                depth--;
+                if (depth === 0) {
+                    close = i;
+                    break;
+                }
+            }
+        }
+        let partStart = open + 1;
+        let partDepth = 0;
+        for (let i = open + 1; i <= close; i++) {
+            if (i === close || (header[i] === ',' && partDepth === 0)) {
+                const part = header.slice(partStart, i);
+                const annotated = part.search(/[:=]/);
+                blank(partStart, partStart + (annotated === -1 ? part.length : annotated));
+                partStart = i + 1;
+                continue;
+            }
+            const char = header[i];
+            if (char === '(' || char === '[' || char === '{')
+                partDepth++;
+            else if (char === ')' || char === ']' || char === '}')
+                partDepth--;
+        }
+        return chars.join('');
+    }
+    static pythonScopes(scan, logicalLines) {
+        const lines = scan.split('\n');
+        const logical = logicalLines ?? this.pythonLogicalLines(lines);
+        const scopes = [{ parent: -1, names: new Set() }];
+        const lineScope = new Array(lines.length).fill(0);
+        const lineLocal = lines.map(() => []);
+        const referenceText = [...lines];
+        const stack = [{ scope: 0, indent: -1 }];
+        let i = 0;
+        while (i < lines.length) {
+            const line = lines[i];
+            if (line.trim() === '') {
+                lineScope[i] = stack[stack.length - 1].scope;
+                i++;
+                continue;
+            }
+            const indent = (line.match(/^[ \t]*/) || [''])[0].length;
+            while (stack.length > 1 && indent <= stack[stack.length - 1].indent)
+                stack.pop();
+            const enclosing = stack[stack.length - 1].scope;
+            const definition = /^[ \t]*(?:async[ \t]+)?def[ \t]+(\w+)[ \t]*\(/.exec(line);
+            if (!definition) {
+                lineScope[i] = enclosing;
+                i++;
+                continue;
+            }
+            let header = line;
+            let last = i;
+            let headerDepth = this.pythonBracketDelta(line);
+            while (this.pythonHeaderColonIndex(line, headerDepth - this.pythonBracketDelta(line)) === -1
+                && last + 1 < lines.length
+                && last - i < MAX_HEADER_LINES) {
+                const next = lines[last + 1];
+                const nextIndent = (next.match(/^[ \t]*/) || [''])[0].length;
+                if (headerDepth <= 0 && next.trim() !== '' && nextIndent <= indent)
+                    break;
+                last++;
+                header += `\n${next}`;
+                headerDepth += this.pythonBracketDelta(next);
+                if (this.pythonHeaderColonIndex(next, headerDepth - this.pythonBracketDelta(next)) !== -1)
+                    break;
+            }
+            const masked = this.pythonMaskHeaderBindings(header).split('\n');
+            const body = scopes.push({ parent: enclosing, names: new Set(this.pythonParameterNames(header)) }) - 1;
+            const colon = this.pythonHeaderColonIndex(header);
+            const inlineSuite = colon !== -1 && header.slice(colon + 1).trim() !== '';
+            for (let k = i; k <= last; k++) {
+                lineScope[k] = k === last && inlineSuite ? body : enclosing;
+                referenceText[k] = masked[k - i];
+            }
+            scopes[enclosing].names.add(definition[1]);
+            stack.push({ scope: body, indent });
+            i = last + 1;
+        }
+        lines.forEach((line, index) => {
+            const statement = logical[index] || line;
+            this.pythonBindingsOnLine(statement).forEach(name => scopes[lineScope[index]].names.add(name));
+            lineLocal[index] = this.pythonLineLocalBindings(line);
+        });
+        return { lines, lineScope, scopes, lineLocal, referenceText };
+    }
+    static pythonHasUnboundReference(index, name, reference) {
+        const { lineScope, scopes, lineLocal, referenceText } = index;
+        const matcher = new RegExp(reference.source, reference.flags.includes('g') ? reference.flags : `${reference.flags}g`);
+        return referenceText.some((line, lineNumber) => {
+            let bound = false;
+            for (let scope = lineScope[lineNumber]; scope !== -1; scope = scopes[scope].parent) {
+                if (scopes[scope].names.has(name)) {
+                    bound = true;
+                    break;
+                }
+            }
+            if (bound)
+                return false;
+            matcher.lastIndex = 0;
+            let match;
+            while ((match = matcher.exec(line)) !== null) {
+                if (match[0].length === 0)
+                    matcher.lastIndex++;
+                const at = match.index;
+                const shadowed = lineLocal[lineNumber].some(local => local.name === name && at >= local.start && at <= local.end);
+                if (!shadowed)
+                    return true;
+            }
+            return false;
+        });
+    }
+    static pythonHasGlobalInsideFunction(index) {
+        return index.lines.some((line, line_index) => index.lineScope[line_index] !== 0 && /^[ \t]*global[ \t]+\w/.test(line));
+    }
+    static validatePythonCode(code, errors, warnings, suggestions, mode = 'runOnceForAllItems', modeIsKnown = true) {
         const lines = code.split('\n');
+        const isEachItem = mode === 'runOnceForEachItem';
+        const scan = this.withinCapOrRaw(code, c => this.stripPythonStringsAndComments(c));
+        const logicalLines = this.pythonLogicalLines(scan.split('\n'));
+        const scopeIndex = code.length <= MAX_CODE_LENGTH ? this.pythonScopes(scan, logicalLines) : null;
         if (code.includes('__name__') && code.includes('__main__')) {
             warnings.push({
                 type: 'inefficient',
@@ -1044,22 +1411,127 @@ class NodeSpecificValidators {
                 suggestion: 'Code node Python runs directly - remove the main check'
             });
         }
-        const unavailableImports = [
-            { module: 'requests', suggestion: 'Use JavaScript Code node with $helpers.httpRequest for HTTP requests' },
-            { module: 'pandas', suggestion: 'Use built-in list/dict operations or JavaScript for data manipulation' },
-            { module: 'numpy', suggestion: 'Use standard Python math operations' },
-            { module: 'pip', suggestion: 'External packages cannot be installed in Code nodes' }
-        ];
-        unavailableImports.forEach(({ module, suggestion }) => {
-            if (code.includes(`import ${module}`) || code.includes(`from ${module}`)) {
+        if (scopeIndex) {
+            for (const name of this.PYTHON_REMOVED_GLOBALS) {
+                if (this.pythonHasUnboundReference(scopeIndex, name, new RegExp(`(?<![\\w.])${name}\\b`))) {
+                    errors.push({
+                        type: 'invalid_value',
+                        property: 'pythonCode',
+                        message: `${name} does not exist in native Python - it was removed with the Pyodide runtime`,
+                        fix: this.pythonRemovedGlobalFix(name, isEachItem)
+                    });
+                }
+            }
+            if (this.pythonHasUnboundReference(scopeIndex, 'items', /(?<![\w.])items\b(?![ \t]*=(?!=))/)) {
                 errors.push({
                     type: 'invalid_value',
                     property: 'pythonCode',
-                    message: `Module '${module}' is not available in Code nodes`,
-                    fix: suggestion
+                    message: 'items does not exist in native Python; use _items (all-items mode) or _item (each-item mode)',
+                    fix: isEachItem ? 'Use _item (the current item dict)' : 'Use _items (the list of item dicts)'
                 });
             }
-        });
+        }
+        if (modeIsKnown && scopeIndex) {
+            if (isEachItem && this.pythonHasUnboundReference(scopeIndex, '_items', /(?<![\w.])_items\b/)) {
+                errors.push({
+                    type: 'invalid_value',
+                    property: 'pythonCode',
+                    message: '_items does not exist in "Run Once for Each Item" mode',
+                    fix: 'Use _item, or switch mode to runOnceForAllItems'
+                });
+            }
+            if (!isEachItem && this.pythonHasUnboundReference(scopeIndex, '_item', /(?<![\w.])_item\b/)) {
+                errors.push({
+                    type: 'invalid_value',
+                    property: 'pythonCode',
+                    message: '_item does not exist in "Run Once for All Items" mode',
+                    fix: 'Use _items, or switch mode to runOnceForEachItem'
+                });
+            }
+        }
+        if (/\.json\b(?!\s*\()/.test(scan)) {
+            errors.push({
+                type: 'invalid_value',
+                property: 'pythonCode',
+                message: 'Items are dicts: .json attribute access raises AttributeError',
+                fix: 'Use dict access: item["json"]["field"] or item["json"].get("field")'
+            });
+        }
+        const importedModules = new Set();
+        const importStatement = /(?:^|[:;])[ \t]*import[ \t]+([^\n;]+)/gm;
+        const fromImportStatement = /(?:^|[:;])[ \t]*from[ \t]+([\w.]+)[ \t]+import\b/gm;
+        const rootModule = (token) => {
+            const trimmed = token.trim();
+            const space = trimmed.search(/[ \t]/);
+            const first = space === -1 ? trimmed : trimmed.slice(0, space);
+            return first.split('.')[0];
+        };
+        const addModule = (token) => {
+            const name = rootModule(token);
+            if (/^[A-Za-z_]\w*$/.test(name))
+                importedModules.add(name);
+        };
+        for (const statement of logicalLines) {
+            if (!statement)
+                continue;
+            let importMatch;
+            importStatement.lastIndex = 0;
+            while ((importMatch = importStatement.exec(statement)) !== null) {
+                importMatch[1].split(',').forEach(addModule);
+            }
+            fromImportStatement.lastIndex = 0;
+            while ((importMatch = fromImportStatement.exec(statement)) !== null) {
+                if (rootModule(importMatch[1]))
+                    addModule(importMatch[1]);
+                else
+                    this.pythonImportBindings(statement).forEach(name => importedModules.add(name));
+            }
+        }
+        for (const moduleName of importedModules) {
+            warnings.push({
+                type: 'security',
+                property: 'pythonCode',
+                message: `import ${moduleName} is blocked unless this instance allowlists the module (n8n Cloud allows none)`,
+                suggestion: `Write import-free code, or confirm '${moduleName}' is allowlisted on the Python task runner first`
+            });
+        }
+        if (/^[ \t]*class[ \t]+\w/m.test(scan)) {
+            errors.push({
+                type: 'invalid_value',
+                property: 'pythonCode',
+                message: 'class definitions fail in the sandbox: __build_class__ not found',
+                fix: 'Use dicts and plain functions instead of a class'
+            });
+        }
+        for (const [name, fix] of Object.entries(scopeIndex ? this.PYTHON_DENIED_BUILTINS : {})) {
+            if (this.pythonHasUnboundReference(scopeIndex, name, new RegExp(`(?<![\\w.])${name}\\b(?![ \\t]*=(?!=))`))) {
+                errors.push({
+                    type: 'invalid_value',
+                    property: 'pythonCode',
+                    message: `${name}() is denied in the Python sandbox and raises NameError`,
+                    fix
+                });
+            }
+        }
+        const formatFields = this.withinCapOrRaw(code, c => this.stripPythonStringsAndComments(c, true, true));
+        if (/\.__\w+__/.test(scan) || /\b__class__\b/.test(scan) || /\b__builtins__\b/.test(scan)
+            || /(?<![\w.])__import__[ \t]*\(/.test(scan)
+            || this.pythonFormatsDunder(formatFields)) {
+            errors.push({
+                type: 'invalid_value',
+                property: 'pythonCode',
+                message: 'Dunder access is rejected before the code runs: Security violations detected',
+                fix: 'Remove __class__, __import__ and other dunder access'
+            });
+        }
+        if (scopeIndex && this.pythonHasGlobalInsideFunction(scopeIndex)) {
+            errors.push({
+                type: 'invalid_value',
+                property: 'pythonCode',
+                message: 'global does not work: your code runs inside a wrapper function',
+                fix: 'Use nonlocal instead of global'
+            });
+        }
         lines.forEach((line, i) => {
             if (line.trim().endsWith(':') && i < lines.length - 1) {
                 const nextLine = lines[i + 1];
@@ -1074,9 +1546,9 @@ class NodeSpecificValidators {
             }
         });
     }
-    static validateReturnStatement(code, language, errors, warnings, suggestions, mode = 'runOnceForAllItems') {
-        const returnScanCode = (language === 'javaScript' && code.length <= MAX_CODE_LENGTH)
-            ? this.stripNestedJavaScriptFunctionBodies(code)
+    static validateReturnStatement(code, language, errors, warnings, suggestions, mode = 'runOnceForAllItems', modeIsKnown = true) {
+        const returnScanCode = language === 'javaScript'
+            ? this.withinCapOrRaw(code, c => this.stripNestedJavaScriptFunctionBodies(c))
             : code;
         const hasReturn = /return\s+/.test(returnScanCode);
         if (!hasReturn) {
@@ -1113,31 +1585,109 @@ class NodeSpecificValidators {
                     'To modify: return items.map(item => ({json: {...item.json, newField: "value"}}))');
             }
         }
-        if (language === 'python') {
+        if (language === 'python' && modeIsKnown) {
             const isRunOncePerItem = mode === 'runOnceForEachItem';
-            if (!isRunOncePerItem && /return\s+{(?!.*\[).*}$/s.test(code)) {
-                errors.push({
-                    type: 'invalid_value',
-                    property: 'pythonCode',
-                    message: 'Return value must be a list of dicts',
-                    fix: 'Wrap in list: return [{"json": your_dict}]'
-                });
+            if (isRunOncePerItem) {
+                const strippedTopLevel = this.withinCapOrRaw(code, c => this.stripPythonFunctionBodies(this.stripPythonStringsAndComments(c)));
+                const parenthesisedList = (inner) => /^\[[\s\S]*\]$/.test(inner) || inner === '_items' || /^list[ \t]*\(/.test(inner);
+                if (this.pythonReturnsWholeGroup(strippedTopLevel, /^[ \t]*return[ \t]+\[/)
+                    || this.pythonReturnsWholeGroup(strippedTopLevel, /^[ \t]*return[ \t]+list[ \t]*\(/)
+                    || this.pythonReturnsWholeGroup(strippedTopLevel, /^[ \t]*return[ \t]*\(/, parenthesisedList)
+                    || /^[ \t]*return[ \t]+_items[ \t;]*$/m.test(strippedTopLevel)) {
+                    errors.push({
+                        type: 'invalid_value',
+                        property: 'pythonCode',
+                        message: 'Returning a list in "Run Once for Each Item" mode fails: a \'json\' property isn\'t a dictionary',
+                        fix: 'Return a single dict: return {"json": {"value": your_data}}'
+                    });
+                }
             }
-            if (!isRunOncePerItem && /return\s+(True|False|None|\d+|['"`])/m.test(code)) {
-                errors.push({
-                    type: 'invalid_value',
-                    property: 'pythonCode',
-                    message: 'Cannot return primitive values directly',
-                    fix: 'Return list of dicts: return [{"json": {"value": your_data}}]'
-                });
+            else {
+                const topLevel = this.withinCapOrRaw(code, c => this.stripPythonFunctionBodies(this.stripPythonStringsAndComments(c, true)));
+                if (/return\s+(?:(?:True|False|None)\b|[+-]?(?:\d|\.\d)|[rbfu]{0,2}['"])/m.test(topLevel)) {
+                    errors.push({
+                        type: 'invalid_value',
+                        property: 'pythonCode',
+                        message: 'Cannot return primitive values directly',
+                        fix: 'Return list of dicts: return [{"json": {"value": your_data}}]'
+                    });
+                }
             }
         }
     }
-    static hasTopLevelPrimitiveReturn(code) {
-        if (code.length > MAX_CODE_LENGTH) {
-            return JS_PRIMITIVE_RETURN_RE.test(code);
+    static pythonReturnsWholeGroup(scan, prefix, innerTest) {
+        const matcher = new RegExp(prefix.source, 'gm');
+        let budget = MAX_RETURN_TOTAL_SCAN;
+        let match;
+        while ((match = matcher.exec(scan)) !== null) {
+            let position = match.index + match[0].length - 1;
+            const limit = Math.min(scan.length, position + MAX_RETURN_LOOKAHEAD, position + budget);
+            let depth = 0;
+            let closed = -1;
+            for (; position < limit; position++) {
+                const char = scan[position];
+                if (char === '[' || char === '(' || char === '{')
+                    depth++;
+                else if (char === ']' || char === ')' || char === '}') {
+                    depth--;
+                    if (depth === 0) {
+                        closed = position;
+                        break;
+                    }
+                }
+            }
+            budget -= position - (match.index + match[0].length - 1);
+            if (budget <= 0)
+                return false;
+            if (closed === -1)
+                continue;
+            const lineEnd = scan.indexOf('\n', closed);
+            const rest = scan.slice(closed + 1, lineEnd === -1 ? scan.length : lineEnd);
+            if (rest.replace(/;+[ \t]*$/, '').trim() !== '')
+                continue;
+            if (!innerTest)
+                return true;
+            const opened = match.index + match[0].length - 1;
+            if (innerTest(scan.slice(opened + 1, closed).trim()))
+                return true;
         }
-        const topLevelCode = this.stripNestedJavaScriptFunctionBodies(code);
+        return false;
+    }
+    static stripPythonFunctionBodies(code) {
+        const lines = code.split('\n');
+        const result = [];
+        let blockIndent = null;
+        let header = null;
+        for (const line of lines) {
+            const indentMatch = line.match(/^[ \t]*/);
+            const indent = indentMatch ? indentMatch[0].length : 0;
+            const isBlank = line.trim() === '';
+            if (header !== null) {
+                header += `\n${line}`;
+                result.push('');
+                if (this.pythonHeaderColonIndex(header) !== -1)
+                    header = null;
+                continue;
+            }
+            if (blockIndent !== null) {
+                if (isBlank || indent > blockIndent) {
+                    result.push('');
+                    continue;
+                }
+                blockIndent = null;
+            }
+            if (/^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+\w/.test(line)) {
+                blockIndent = indent;
+                header = this.pythonHeaderColonIndex(line) === -1 ? line : null;
+                result.push('');
+                continue;
+            }
+            result.push(line);
+        }
+        return result.join('\n');
+    }
+    static hasTopLevelPrimitiveReturn(code) {
+        const topLevelCode = this.withinCapOrRaw(code, c => this.stripNestedJavaScriptFunctionBodies(c));
         return JS_PRIMITIVE_RETURN_RE.test(topLevelCode);
     }
     static stripStringsCommentsRegex(code) {
@@ -1275,7 +1825,18 @@ class NodeSpecificValidators {
         }
         return result;
     }
-    static stripPythonStringsAndComments(code) {
+    static isFStringPrefix(code, end) {
+        let start = end;
+        while (start > 0 && /[A-Za-z]/.test(code[start - 1]))
+            start--;
+        if (start === end || end - start > 2)
+            return false;
+        if (start > 0 && /[\w$]/.test(code[start - 1]))
+            return false;
+        const prefix = code.slice(start, end);
+        return /^[rbuRBU]?[fF]$|^[fF][rbuRBU]?$/.test(prefix);
+    }
+    static stripPythonStringsAndComments(code, keepDelimiters = false, keepContent = false) {
         let result = '';
         let i = 0;
         while (i < code.length) {
@@ -1290,7 +1851,9 @@ class NodeSpecificValidators {
             if (char === "'" || char === '"') {
                 const triple = code.slice(i, i + 3) === char.repeat(3);
                 const delim = triple ? char.repeat(3) : char;
-                result += ' '.repeat(delim.length);
+                const blankedDelim = keepDelimiters || keepContent ? delim : ' '.repeat(delim.length);
+                const isFString = !keepContent && this.isFStringPrefix(code, i);
+                result += blankedDelim;
                 i += delim.length;
                 while (i < code.length) {
                     if (code[i] === '\\') {
@@ -1299,16 +1862,44 @@ class NodeSpecificValidators {
                         continue;
                     }
                     if (code.slice(i, i + delim.length) === delim) {
-                        result += ' '.repeat(delim.length);
+                        result += blankedDelim;
                         i += delim.length;
                         break;
+                    }
+                    if (isFString && code[i] === '{' && code[i + 1] !== '{') {
+                        let depth = 0;
+                        let nestedQuote = '';
+                        do {
+                            const current = code[i];
+                            if (nestedQuote) {
+                                if (current === nestedQuote)
+                                    nestedQuote = '';
+                                result += current === '\n' ? '\n' : ' ';
+                                i++;
+                                continue;
+                            }
+                            if (current === "'" || current === '"')
+                                nestedQuote = current;
+                            else if (current === '{')
+                                depth++;
+                            else if (current === '}')
+                                depth--;
+                            result += current === '\n' ? '\n' : current;
+                            i++;
+                        } while (i < code.length && depth > 0);
+                        continue;
+                    }
+                    if (isFString && code[i] === '{' && code[i + 1] === '{') {
+                        result += '  ';
+                        i += 2;
+                        continue;
                     }
                     if (code[i] === '\n' && !triple) {
                         result += '\n';
                         i++;
                         break;
                     }
-                    result += code[i] === '\n' ? '\n' : ' ';
+                    result += keepContent || code[i] === '\n' ? code[i] : ' ';
                     i++;
                 }
                 continue;
@@ -1381,23 +1972,24 @@ class NodeSpecificValidators {
         }
         return true;
     }
-    static validateN8nVariables(code, language, warnings, suggestions, errors) {
-        const scanView = code.length <= MAX_CODE_LENGTH
-            ? (language === 'javaScript'
-                ? this.stripStringsCommentsRegex(code)
-                : this.stripPythonStringsAndComments(code))
-            : code;
+    static validateN8nVariables(code, language, warnings, suggestions, errors, mode = 'runOnceForAllItems') {
+        const scanView = this.withinCapOrRaw(code, c => language === 'javaScript'
+            ? this.stripStringsCommentsRegex(c)
+            : this.stripPythonStringsAndComments(c));
         const inputPatterns = language === 'javaScript'
             ? ['items', '$input', '$json', '$node', '$prevNode', '$(', '$getWorkflowStaticData', '$workflow', '$execution', '$vars']
-            : ['items', '_input'];
+            : ['_items', '_item', '_input', '_json'];
         const usesInput = inputPatterns.some(pattern => scanView.includes(pattern));
         if (!usesInput && code.length > 50) {
+            const pythonSuggestion = mode === 'runOnceForEachItem'
+                ? 'Access input with: _item (the current item dict)'
+                : 'Access input with: _items (the list of item dicts)';
             warnings.push({
                 type: 'best_practice',
                 message: 'Code doesn\'t reference input data',
                 suggestion: language === 'javaScript'
                     ? 'Access input with: items, $input.all(), or $json (single-item mode)'
-                    : 'Access input with: items variable'
+                    : pythonSuggestion
             });
         }
         if (scanView.includes('{{') && scanView.includes('}}')) {
@@ -1408,25 +2000,27 @@ class NodeSpecificValidators {
                 fix: 'Use regular JavaScript/Python syntax without double curly braces'
             });
         }
-        if (code.includes('$node[')) {
+        if (language === 'javaScript' && code.includes('$node[')) {
             warnings.push({
                 type: 'invalid_value',
-                property: language === 'python' ? 'pythonCode' : 'jsCode',
+                property: 'jsCode',
                 message: 'Use $(\'Node Name\') instead of $node[\'Node Name\'] in Code nodes',
                 suggestion: 'Replace $node[\'NodeName\'] with $(\'NodeName\')'
             });
         }
-        const expressionOnlyFunctions = ['$now()', '$today()', '$tomorrow()', '.unique()', '.pluck(', '.keys()', '.hash('];
-        expressionOnlyFunctions.forEach(func => {
-            if (code.includes(func)) {
-                warnings.push({
-                    type: 'invalid_value',
-                    property: language === 'python' ? 'pythonCode' : 'jsCode',
-                    message: `${func} is an expression-only function not available in Code nodes`,
-                    suggestion: 'See Code node documentation for alternatives'
-                });
-            }
-        });
+        if (language === 'javaScript') {
+            const expressionOnlyFunctions = ['$now()', '$today()', '$tomorrow()', '.unique()', '.pluck(', '.keys()', '.hash('];
+            expressionOnlyFunctions.forEach(func => {
+                if (code.includes(func)) {
+                    warnings.push({
+                        type: 'invalid_value',
+                        property: 'jsCode',
+                        message: `${func} is an expression-only function not available in Code nodes`,
+                        suggestion: 'See Code node documentation for alternatives'
+                    });
+                }
+            });
+        }
         if (language === 'javaScript') {
             if (/\$(?![a-zA-Z_(])/.test(scanView) && !scanView.includes('${')) {
                 warnings.push({
@@ -1461,14 +2055,6 @@ class NodeSpecificValidators {
                     fix: 'Use $getWorkflowStaticData("global") or $getWorkflowStaticData("node") directly'
                 });
             }
-            if (code.includes('$jmespath(') && /\$jmespath\s*\(\s*['"`]/.test(code)) {
-                warnings.push({
-                    type: 'invalid_value',
-                    property: 'jsCode',
-                    message: 'Code node $jmespath has reversed parameter order: $jmespath(data, query)',
-                    suggestion: 'Use: $jmespath(dataObject, "query.path") not $jmespath("query.path", dataObject)'
-                });
-            }
             if (code.includes('items[0].json') && !code.includes('.json.body')) {
                 if (code.includes('Webhook') || code.includes('webhook') ||
                     code.includes('$("Webhook")') || code.includes("$('Webhook')")) {
@@ -1488,31 +2074,39 @@ class NodeSpecificValidators {
                 }
             }
         }
-        const jmespathFunction = language === 'javaScript' ? '$jmespath' : '_jmespath';
-        if (code.length <= MAX_CODE_LENGTH && code.includes(jmespathFunction + '(')) {
-            const filterPattern = /\[?\?[^[\]]*(?:>=?|<=?|==|!=)\s*(\d+(?:\.\d+)?)\s*\]/g;
-            let match;
-            while ((match = filterPattern.exec(code)) !== null) {
-                const number = match[1];
-                const beforeNumber = code.substring(match.index, match.index + match[0].indexOf(number));
-                const afterNumber = code.substring(match.index + match[0].indexOf(number) + number.length);
-                if (!beforeNumber.includes('`') || !afterNumber.startsWith('`')) {
-                    errors.push({
+        if (language === 'javaScript' && code.length <= MAX_CODE_LENGTH && code.includes('$jmespath')) {
+            const calls = (0, jmespath_checks_1.findJmespathCalls)(code);
+            for (const call of calls) {
+                if (call.queryIsFirstArgument) {
+                    warnings.push({
                         type: 'invalid_value',
-                        property: language === 'python' ? 'pythonCode' : 'jsCode',
-                        message: `JMESPath numeric literal ${number} must be wrapped in backticks`,
-                        fix: `Change [?field >= ${number}] to [?field >= \`${number}\`]`
+                        property: 'jsCode',
+                        message: 'Code node $jmespath has reversed parameter order: $jmespath(data, query)',
+                        suggestion: 'Use: $jmespath(dataObject, "query.path") not $jmespath("query.path", dataObject)'
                     });
+                    continue;
+                }
+                if (call.query === undefined)
+                    continue;
+                for (const finding of (0, jmespath_checks_1.checkJmespathQuery)(call.query)) {
+                    if (finding.severity === 'error') {
+                        errors.push({ type: 'invalid_value', property: 'jsCode', message: finding.message, fix: finding.fix });
+                    }
+                    else {
+                        warnings.push({ type: 'invalid_value', property: 'jsCode', message: finding.message, suggestion: finding.fix });
+                    }
                 }
             }
-            suggestions.push('JMESPath in n8n requires backticks around numeric literals in filters: [?age >= `18`]');
+            if (calls.length > 0) {
+                suggestions.push('JMESPath in n8n requires backticks around numeric literals in filters: [?age >= `18`]');
+            }
         }
     }
     static validateCodeSecurity(code, language, warnings) {
         const securityView = language === 'javaScript'
             ? this.stripStringsCommentsRegex(code)
             : this.stripPythonStringsAndComments(code);
-        const dangerousPatterns = [
+        const dangerousPatterns = language !== 'javaScript' ? [] : [
             { pattern: /(?<![.\w$])eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
             { pattern: /(?<![.\w$])Function\s*\(/, message: 'Avoid Function constructor - use regular functions' },
             { pattern: /(?:window|globalThis)\s*\.\s*eval\s*\(/, message: 'Avoid eval() - it\'s a security risk' },
@@ -1625,6 +2219,25 @@ class NodeSpecificValidators {
     }
 }
 exports.NodeSpecificValidators = NodeSpecificValidators;
+NodeSpecificValidators.PYTHON_REMOVED_GLOBALS = ['_input', '_json', '_node', '_now', '_today', '_jmespath'];
+NodeSpecificValidators.PYTHON_DENIED_BUILTINS = {
+    eval: 'Compute the value directly instead of evaluating a string',
+    exec: 'Compute the value directly instead of executing a string',
+    compile: 'Compute the value directly instead of compiling a string',
+    open: 'Read and write files with n8n file nodes',
+    input: 'Pass values in from a previous node',
+    type: 'Use isinstance(x, dict) to check a type',
+    getattr: 'Use dict access: d.get(key)',
+    setattr: 'Use dict access: d[key] = value',
+    hasattr: 'Use dict access: key in d',
+    vars: 'Use dict access: d.get(key)',
+    dir: 'Use dict access: key in d',
+    globals: 'Pass values through function arguments',
+    locals: 'Pass values through function arguments',
+    object: 'Use dicts instead of objects',
+    memoryview: 'Work with lists, dicts and strings',
+    breakpoint: 'Use print() for debugging'
+};
 NodeSpecificValidators.NON_FUNCTION_HEADS = new Set([
     'if', 'for', 'while', 'switch', 'catch', 'with', 'await',
 ]);

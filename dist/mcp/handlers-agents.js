@@ -30,6 +30,25 @@ const OFFICIAL_CODE_MAP = {
 function invalid(action, message) {
     return { success: false, action, code: 'INVALID_ARGS', error: message };
 }
+const PERSONAL_PROJECT_ALIAS = 'personal';
+const PROJECT_ID_HINT = "projectId could not be defaulted to your personal project. List the projects with n8n_list_catalog({kind: 'projects'}) and pass one as args.projectId.";
+async function personalProjectId(client, toolNames, timeoutMs) {
+    if (!toolNames.includes('search_projects'))
+        return undefined;
+    try {
+        const result = await client.callTool('search_projects', { type: 'personal', limit: 2 }, { timeoutMs, idempotent: true });
+        const json = result.json;
+        if (result.isError || json?.ok === false)
+            return undefined;
+        if (typeof json?.count === 'number' && json.count !== 1)
+            return undefined;
+        const projects = (Array.isArray(json?.data) ? json.data : []).filter((p) => p?.type === 'personal' && typeof p.id === 'string');
+        return projects.length === 1 ? projects[0].id : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
 async function credentialIdFromResult(args, data, client) {
     const direct = data?.config?.credential;
     if (typeof direct === 'string')
@@ -79,6 +98,7 @@ async function handleManageAgents(args, context) {
     if (!client)
         return (0, official_mcp_access_1.notConfiguredResponse)(context, action);
     const spec = agents_action_map_1.AGENT_ACTION_MAP[action];
+    let defaultedProjectId;
     try {
         const caps = await client.capabilities();
         if (!caps.reachable) {
@@ -91,10 +111,34 @@ async function handleManageAgents(args, context) {
         if (action === 'reference') {
             return { success: true, action, officialTool: tool, data: await client.reference(tool) };
         }
-        const result = await client.callTool(tool, toolArgs, { timeoutMs: timeoutMs ?? spec.defaultTimeoutMs, idempotent: spec.idempotent });
+        const callTimeoutMs = timeoutMs ?? spec.defaultTimeoutMs;
+        let callArgs = toolArgs;
+        const requested = toolArgs.projectId;
+        const wantsPersonalProject = spec.defaultsToPersonalProject
+            && (requested === undefined || requested === null || requested === '' || requested === PERSONAL_PROJECT_ALIAS);
+        if (wantsPersonalProject) {
+            defaultedProjectId = await personalProjectId(client, caps.toolNames, Math.min(callTimeoutMs, agents_action_map_1.DEFAULT_TIMEOUT_MS));
+            if (defaultedProjectId) {
+                callArgs = { ...toolArgs, projectId: defaultedProjectId };
+            }
+            else if (requested === PERSONAL_PROJECT_ALIAS) {
+                return { ...invalid(action, 'projectId "personal" could not be resolved to your personal project.'), hint: PROJECT_ID_HINT };
+            }
+            else if (requested !== undefined) {
+                const { projectId: _omit, ...rest } = toolArgs;
+                callArgs = rest;
+            }
+        }
+        const result = await client.callTool(tool, callArgs, { timeoutMs: callTimeoutMs, idempotent: spec.idempotent });
         const data = result.json ?? result.text;
-        if (result.text.startsWith('Input validation error'))
-            return invalid(action, result.text.slice(0, 2000));
+        if (result.text.startsWith('Input validation error')) {
+            const response = invalid(action, result.text.slice(0, 2000));
+            if (defaultedProjectId)
+                response.defaultedProjectId = defaultedProjectId;
+            else if (wantsPersonalProject)
+                response.hint = PROJECT_ID_HINT;
+            return response;
+        }
         const officialCode = data?.ok === false ? data?.code : undefined;
         if (result.isError || officialCode) {
             const mapped = officialCode && OFFICIAL_CODE_MAP[officialCode];
@@ -106,22 +150,28 @@ async function handleManageAgents(args, context) {
                 error: (0, official_mcp_access_1.officialErrorText)(data, officialCode),
                 officialError: data,
             };
-            const credHint = await credentialTypeHint(toolArgs, data, client, context);
+            if (defaultedProjectId)
+                response.defaultedProjectId = defaultedProjectId;
+            const credHint = await credentialTypeHint(callArgs, data, client, context);
             const hint = credHint ?? mapped?.hint;
             if (hint)
                 response.hint = hint;
             return response;
         }
         const response = { success: true, action, officialTool: tool, data };
+        if (defaultedProjectId)
+            response.defaultedProjectId = defaultedProjectId;
         if (result.truncated)
             response.truncated = true;
-        const hint = await credentialTypeHint(toolArgs, data, client, context);
+        const hint = await credentialTypeHint(callArgs, data, client, context);
         if (hint)
             response.hint = hint;
         return response;
     }
     catch (err) {
         const failure = (0, official_mcp_access_1.officialFailure)(err, action);
+        if (defaultedProjectId)
+            failure.defaultedProjectId = defaultedProjectId;
         if (failure.code === 'OFFICIAL_MCP_TIMEOUT' && action === 'call') {
             failure.hint = n8n_official_mcp_client_1.OFFICIAL_MCP_HINTS.OFFICIAL_MCP_TIMEOUT + ' Each agent turn is one n8n execution; the executionId appears in n8n_executions once the turn finishes.';
         }

@@ -14,6 +14,7 @@ import { N8nApiClient } from '@/services/n8n-api-client';
 import { clearVersionCache } from '@/services/n8n-version';
 import { resetToolPolicyCache } from '@/mcp/tool-policy';
 import { McpToolResponse } from '@/types/n8n-api';
+import { N8nApiError } from '@/utils/n8n-errors';
 
 vi.mock('dns/promises', () => ({ lookup: vi.fn() }));
 vi.mock('axios');
@@ -160,6 +161,91 @@ describe('withMcpExposure', () => {
     const r = await withMcpExposure({ ...base, apiClient: api as any, exposeToMcp: true }, vi.fn().mockResolvedValue(refused));
     expect(r).toMatchObject({ success: false, code: 'EXPOSE_FAILED' });
     expect(r.error).toContain('boom');
+  });
+
+  it('reports a draft-not-published outcome when a readback confirms "Available in MCP" was not saved (#1118)', async () => {
+    const api = {
+      getWorkflow: vi.fn().mockResolvedValue({ id: 'w', name: 'n', nodes: [], connections: {}, settings: {} }),
+      updateWorkflow: vi.fn().mockRejectedValue(
+        new N8nApiError(
+          "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+          403,
+          'PUBLISH_FORBIDDEN',
+          { reason: 'insufficient_api_key_scope', versionId: 'draft-1' },
+        )
+      ),
+    };
+    const call = vi.fn().mockResolvedValue(refused);
+    const r = await withMcpExposure({ ...base, apiClient: api as any, exposeToMcp: true }, call);
+    expect(r).toMatchObject({ success: false, code: 'EXPOSE_FAILED' });
+    expect(r.error).toContain('saved as a draft but not published');
+    expect(r.error).toContain('insufficient_api_key_scope');
+    expect(r.error).toContain('workflow:activate scope');
+    expect(r.error).toContain('workflow:publish permission');
+    expect(r.error).toContain('confirms "Available in MCP" was not saved');
+    expect(r.error).toContain('published workflow is unchanged');
+    expect(r.error).toContain('test was not attempted');
+    // Confirmed NOT set — the hint must not claim the setting sits on the draft or that
+    // publishing will enable it (round 4, item 2b).
+    expect(r.hint).toBeUndefined();
+    // Only the initial call (which triggered the enable attempt) ran — the retry this
+    // function would otherwise make was never attempted.
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the exposure state as unconfirmed when the post-PUBLISH_FORBIDDEN readback itself fails (#1118)', async () => {
+    const api = {
+      // First call is enableWorkflowMcpExposure's own read (must succeed so it can reach
+      // the PUT that 403s); the second is this function's post-failure re-read, which fails.
+      getWorkflow: vi.fn()
+        .mockResolvedValueOnce({ id: 'w', name: 'n', nodes: [], connections: {}, settings: {} })
+        .mockRejectedValueOnce(new Error('GET failed')),
+      updateWorkflow: vi.fn().mockRejectedValue(
+        new N8nApiError(
+          "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+          403,
+          'PUBLISH_FORBIDDEN',
+          { reason: 'insufficient_api_key_scope', versionId: 'draft-1' },
+        )
+      ),
+    };
+    const call = vi.fn().mockResolvedValue(refused);
+    const r = await withMcpExposure({ ...base, apiClient: api as any, exposeToMcp: true }, call);
+    expect(r).toMatchObject({ success: false, code: 'EXPOSE_FAILED' });
+    expect(r.error).toContain('could not be confirmed');
+    expect(r.error).toContain('published workflow is unchanged');
+    expect(r.error).toContain('test was not attempted');
+    expect(r.hint).not.toContain('availableInMCP: true now sits');
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds with the retry when "Available in MCP" persisted onto the draft despite PUBLISH_FORBIDDEN (#1118)', async () => {
+    // n8n's public API commits workflow content before it checks publish permission, so the
+    // PUT that 403s may still have saved settings.availableInMCP on the draft. n8n's own
+    // exposure gate reads that saved setting rather than the published graph, so the retry
+    // should proceed once a re-read confirms it — with a warning naming what's still missing.
+    const api = {
+      getWorkflow: vi.fn()
+        .mockResolvedValueOnce({ id: 'w', name: 'n', nodes: [], connections: {}, settings: {} })
+        .mockResolvedValueOnce({ id: 'w', name: 'n', nodes: [], connections: {}, settings: { availableInMCP: true } }),
+      updateWorkflow: vi.fn().mockRejectedValue(
+        new N8nApiError(
+          "Your change was saved as a draft. It wasn't published because this API key does not have the workflow:activate scope.",
+          403,
+          'PUBLISH_FORBIDDEN',
+          { reason: 'insufficient_api_key_scope', versionId: 'draft-1' },
+        )
+      ),
+    };
+    const call = vi.fn().mockResolvedValueOnce(refused).mockResolvedValueOnce(ok);
+    const r = await withMcpExposure({ ...base, apiClient: api as any, exposeToMcp: true }, call);
+
+    expect(call).toHaveBeenCalledTimes(2);
+    expect(r).toMatchObject({ success: true, exposedToMcp: true });
+    expect(r.warnings).toBeDefined();
+    expect(r.warnings!.some(w => w.includes('did not publish'))).toBe(true);
+    expect(r.warnings!.some(w => w.includes('workflow:activate scope'))).toBe(true);
+    expect(r.warnings!.some(w => w.includes('unpublished draft'))).toBe(true);
   });
 
   it('surfaces the write warnings on the retried success', async () => {

@@ -164,6 +164,8 @@ class ConfigValidator {
             const candidates = properties.filter(p => p && p.name === key);
             if (candidates.length === 0)
                 continue;
+            if (value === null || value === undefined)
+                continue;
             const prop = candidates.find(p => this.isPropertyVisible(p, config)) ?? candidates[0];
             if (candidates.some(p => 'default' in p && JSON.stringify(value) === JSON.stringify(p.default))) {
                 continue;
@@ -366,7 +368,9 @@ class ConfigValidator {
         }
     }
     static validateCode(config, errors, warnings) {
-        const codeField = config.language === 'python' ? 'pythonCode' : 'jsCode';
+        const rawLanguage = config.language || 'javascript';
+        const language = rawLanguage === 'pythonNative' ? 'python' : rawLanguage;
+        const codeField = language === 'python' ? 'pythonCode' : 'jsCode';
         const code = config[codeField];
         if (!code || code.trim() === '') {
             errors.push({
@@ -377,20 +381,20 @@ class ConfigValidator {
             });
             return;
         }
-        if (code?.includes('eval(') || code?.includes('exec(')) {
+        if (language !== 'python' && (code?.includes('eval(') || code?.includes('exec('))) {
             warnings.push({
                 type: 'security',
                 message: 'Code contains eval/exec which can be a security risk',
                 suggestion: 'Avoid using eval/exec with untrusted input'
             });
         }
-        if (config.language === 'python') {
+        if (language === 'python') {
             this.validatePythonSyntax(code, errors, warnings);
         }
         else {
             this.validateJavaScriptSyntax(code, errors, warnings);
         }
-        this.validateN8nCodePatterns(code, config.language || 'javascript', errors, warnings);
+        this.validateN8nCodePatterns(code, language, errors, warnings);
     }
     static checkCommonIssues(nodeType, config, properties, warnings, suggestions, userProvidedKeys) {
         if (nodeType === 'nodes-base.code') {
@@ -593,41 +597,6 @@ class ConfigValidator {
                 });
             }
         }
-        if (language === 'python' && hasReturn) {
-            if (/return\s+items\s*$/.test(code) && !code.includes('json') && !code.includes('dict')) {
-                warnings.push({
-                    type: 'best_practice',
-                    message: 'Returning items directly - ensure each item is a dict with "json" key',
-                    suggestion: 'Use: return [{"json": item.json} for item in items]'
-                });
-            }
-            if (/return\s+{['"]/.test(code) && !code.includes('[') && !code.includes(']')) {
-                warnings.push({
-                    type: 'invalid_value',
-                    message: 'Return value must be a list',
-                    suggestion: 'Wrap your return dict in a list: return [{"json": {"your": "data"}}]'
-                });
-            }
-            if (/return\s+(?!.*\[).*{(?!.*["']json["'])/.test(code)) {
-                warnings.push({
-                    type: 'invalid_value',
-                    message: 'Must return array of objects with json key',
-                    suggestion: 'Use format: return [{"json": {"data": "value"}}]'
-                });
-            }
-            const returnMatch = code.match(/return\s+(\w+)\s*(?:#|$)/m);
-            if (returnMatch) {
-                const varName = returnMatch[1];
-                const assignmentRegex = new RegExp(`${varName}\\s*=\\s*{[^}]+}`, 'm');
-                if (assignmentRegex.test(code) && !new RegExp(`${varName}\\s*=\\s*\\[`).test(code)) {
-                    warnings.push({
-                        type: 'invalid_value',
-                        message: 'Must return array of objects with json key',
-                        suggestion: `Wrap ${varName} in a list with json key: return [{"json": ${varName}}]`
-                    });
-                }
-            }
-        }
         if (language === 'javascript') {
             if (!code.includes('items') && !code.includes('$input') && !code.includes('$json')) {
                 warnings.push({
@@ -692,25 +661,11 @@ class ConfigValidator {
             }
         }
         else if (language === 'python') {
-            if (!code.includes('items') && !code.includes('_input')) {
-                warnings.push({
-                    type: 'missing_common',
-                    message: 'Code doesn\'t reference input items',
-                    suggestion: 'Access input data with: items variable'
-                });
-            }
             if (code.includes('print(')) {
                 warnings.push({
                     type: 'best_practice',
                     message: 'print() output appears in n8n execution logs',
                     suggestion: 'Remove print statements in production or use them sparingly'
-                });
-            }
-            if (code.includes('import requests') || code.includes('import pandas')) {
-                warnings.push({
-                    type: 'invalid_value',
-                    message: 'External libraries not available in Code node',
-                    suggestion: 'Only Python standard library is available. For HTTP requests, use JavaScript with $helpers.httpRequest'
                 });
             }
         }

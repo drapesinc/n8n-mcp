@@ -5,6 +5,8 @@ exports.normalizeFixedCollections = normalizeFixedCollections;
 exports.sanitizeWorkflowNodes = sanitizeWorkflowNodes;
 exports.validateNodeMetadata = validateNodeMetadata;
 const logger_1 = require("../utils/logger");
+const n8n_validation_1 = require("./n8n-validation");
+const SWITCH_RULE_KEYS = ['values', 'rules'];
 const OPERATOR_CORRECTIONS = {
     'isEmpty': 'empty',
     'isNotEmpty': 'notEmpty',
@@ -120,15 +122,19 @@ function sanitizeFilterBasedNode(parameters, nodeType, typeVersion) {
     if (nodeType === 'n8n-nodes-base.switch' && typeVersion >= 3.2) {
         if (sanitized.rules && typeof sanitized.rules === 'object') {
             const rules = sanitized.rules;
-            if (rules.rules && Array.isArray(rules.rules)) {
-                rules.rules = rules.rules.map((rule) => ({
-                    ...rule,
-                    conditions: sanitizeFilterConditions(rule.conditions)
-                }));
+            for (const key of SWITCH_RULE_KEYS) {
+                if (Array.isArray(rules[key])) {
+                    rules[key] = rules[key].map(sanitizeSwitchRule);
+                }
             }
         }
     }
     return sanitized;
+}
+function sanitizeSwitchRule(rule) {
+    return rule && typeof rule === 'object' && !Array.isArray(rule)
+        ? { ...rule, conditions: sanitizeFilterConditions(rule.conditions) }
+        : rule;
 }
 function sanitizeFilterConditions(conditions) {
     if (!conditions || typeof conditions !== 'object') {
@@ -193,8 +199,7 @@ function sanitizeOperator(operator) {
     return sanitized;
 }
 function isOperationName(value) {
-    const dataTypes = ['string', 'number', 'boolean', 'dateTime', 'array', 'object'];
-    return !dataTypes.includes(value) && /^[a-z][a-zA-Z]*$/.test(value);
+    return !n8n_validation_1.FILTER_OPERATOR_TYPES.includes(value) && /^[a-z][a-zA-Z]*$/.test(value);
 }
 function inferDataType(operation) {
     const booleanOps = ['true', 'false'];
@@ -249,24 +254,29 @@ function validateNodeMetadata(node) {
     }
     if (node.type === 'n8n-nodes-base.switch') {
         const rules = node.parameters.rules;
-        if (rules?.rules && Array.isArray(rules.rules)) {
-            for (let i = 0; i < rules.rules.length; i++) {
-                const rule = rules.rules[i];
+        for (const key of SWITCH_RULE_KEYS) {
+            const collection = rules?.[key];
+            if (!Array.isArray(collection))
+                continue;
+            for (let i = 0; i < collection.length; i++) {
+                const rule = collection[i];
+                if (!rule || typeof rule !== 'object' || Array.isArray(rule))
+                    continue;
                 if (!rule.conditions?.options) {
-                    issues.push(`Missing rules.rules[${i}].conditions.options`);
+                    issues.push(`Missing rules.${key}[${i}].conditions.options`);
                 }
                 else {
                     const required = ['version', 'leftValue', 'typeValidation', 'caseSensitive'];
                     for (const field of required) {
                         if (!(field in rule.conditions.options)) {
-                            issues.push(`Missing rules.rules[${i}].conditions.options.${field}`);
+                            issues.push(`Missing rules.${key}[${i}].conditions.options.${field}`);
                         }
                     }
                 }
                 if (rule.conditions?.conditions && Array.isArray(rule.conditions.conditions)) {
                     for (let j = 0; j < rule.conditions.conditions.length; j++) {
                         const condition = rule.conditions.conditions[j];
-                        const operatorIssues = validateOperator(condition.operator, `rules.rules[${i}].conditions.conditions[${j}].operator`);
+                        const operatorIssues = validateOperator(condition?.operator, `rules.${key}[${i}].conditions.conditions[${j}].operator`);
                         issues.push(...operatorIssues);
                     }
                 }
@@ -284,8 +294,8 @@ function validateOperator(operator, path) {
     if (!operator.type) {
         issues.push(`${path}: missing required field 'type'`);
     }
-    else if (!['string', 'number', 'boolean', 'dateTime', 'array', 'object'].includes(operator.type)) {
-        issues.push(`${path}: invalid type "${operator.type}" (must be data type, not operation)`);
+    else if (!n8n_validation_1.FILTER_OPERATOR_TYPES.includes(operator.type)) {
+        issues.push(`${path}: invalid type ${(0, n8n_validation_1.describeOperatorValue)(operator.type)} (must be data type, not operation)`);
     }
     if (!operator.operation) {
         issues.push(`${path}: missing required field 'operation'`);
@@ -293,12 +303,12 @@ function validateOperator(operator, path) {
     if (operator.operation) {
         if (isUnaryOperator(operator.operation)) {
             if (operator.singleValue !== true) {
-                issues.push(`${path}: unary operator "${operator.operation}" requires singleValue: true`);
+                issues.push(`${path}: unary operator ${(0, n8n_validation_1.describeOperatorValue)(operator.operation)} requires singleValue: true`);
             }
         }
         else {
             if (operator.singleValue === true) {
-                issues.push(`${path}: binary operator "${operator.operation}" should not have singleValue: true (only unary operators need this)`);
+                issues.push(`${path}: binary operator ${(0, n8n_validation_1.describeOperatorValue)(operator.operation)} should not have singleValue: true (only unary operators need this)`);
             }
         }
     }

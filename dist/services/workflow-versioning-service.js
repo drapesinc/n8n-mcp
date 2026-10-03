@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.WorkflowVersioningService = exports.VERSION_OWNERSHIP_ERROR_PREFIX = void 0;
 const workflow_validator_1 = require("./workflow-validator");
 const enhanced_config_validator_1 = require("./enhanced-config-validator");
+const n8n_errors_1 = require("../utils/n8n-errors");
 exports.VERSION_OWNERSHIP_ERROR_PREFIX = 'does not belong to workflow';
 class WorkflowVersioningService {
     constructor(nodeRepository, apiClient, instanceId = '') {
@@ -136,6 +137,19 @@ class WorkflowVersioningService {
             };
         }
         catch (error) {
+            if (error instanceof n8n_errors_1.N8nApiError && error.code === 'PUBLISH_FORBIDDEN') {
+                const body = error.details;
+                return {
+                    success: false,
+                    message: `Failed to restore workflow: the content was saved as a draft but not published${body?.reason ? ` (${body.reason})` : ''}. The published version is unchanged. The draft now holds the restored snapshot, so publishing it completes the restore.`,
+                    workflowId,
+                    toVersionId: versionToRestore.id,
+                    backupCreated: true,
+                    backupVersionId: backupResult.versionId,
+                    code: error.code,
+                    ...(body?.versionId ? { draftVersionId: body.versionId } : {})
+                };
+            }
             return {
                 success: false,
                 message: `Failed to restore workflow: ${error.message}`,

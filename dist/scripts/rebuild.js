@@ -158,6 +158,10 @@ async function rebuild() {
         }
     }
     console.log(`💾 Save completed: ${saved} nodes saved successfully`);
+    const { rewritten } = repository.compressStoredColumns();
+    if (rewritten > 0) {
+        console.log(`\n📦 Compressed bulk columns on ${rewritten} previously plain node row(s)`);
+    }
     console.log('\n🔍 Rebuilding FTS5 search index...');
     db.prepare("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')").run();
     console.log('✅ FTS5 index rebuilt successfully');
@@ -229,6 +233,20 @@ async function rebuild() {
     }
     console.log('\n✨ Rebuild complete!');
     db.close();
+    checkDatabaseSize(dbPath);
+}
+const GITHUB_FILE_LIMIT_MIB = 100;
+const SIZE_WARNING_MIB = 90;
+function checkDatabaseSize(dbPath) {
+    const sizeMiB = fs.statSync(dbPath).size / (1024 * 1024);
+    const sizeLabel = `${sizeMiB.toFixed(1)} MiB`;
+    console.log(`   Database size: ${sizeLabel}`);
+    if (sizeMiB >= GITHUB_FILE_LIMIT_MIB) {
+        throw new Error(`${dbPath} is ${sizeLabel}, over GitHub's ${GITHUB_FILE_LIMIT_MIB} MiB file limit; it cannot be pushed`);
+    }
+    if (sizeMiB >= SIZE_WARNING_MIB) {
+        console.warn(`⚠️  ${dbPath} is ${sizeLabel}, within ${GITHUB_FILE_LIMIT_MIB - SIZE_WARNING_MIB} MiB of GitHub's ${GITHUB_FILE_LIMIT_MIB} MiB file limit`);
+    }
 }
 const MIN_EXPECTED_TOOL_VARIANTS = 200;
 function validateDatabase(repository) {

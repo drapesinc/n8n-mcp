@@ -174,6 +174,106 @@ describe('TelemetryConfigManager', () => {
     });
   });
 
+  describe('recordServerDisable', () => {
+    it('makes isEnabled() false and persists disabledByServer for the current version', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        enabled: true,
+        userId: 'test-id',
+        version: '9.9.9'
+      }));
+
+      manager = TelemetryConfigManager.getInstance();
+      // getPackageVersion() re-reads through the same mocked fs calls, so it
+      // resolves to the config's own 'version' field ('9.9.9') here.
+      const currentVersion = (manager as any).getPackageVersion();
+      expect(currentVersion).toBe('9.9.9');
+
+      manager.recordServerDisable(currentVersion);
+
+      expect(manager.isEnabled()).toBe(false);
+
+      const calls = vi.mocked(writeFileSync).mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const lastCall = calls[calls.length - 1];
+      const written = JSON.parse(lastCall[1] as string);
+      expect(written.disabledByServer.version).toBe('9.9.9');
+      expect(written.disabledByServer.at).toBeDefined();
+    });
+
+    it('keeps isEnabled() true when disabledByServer.version is an older version', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        enabled: true,
+        userId: 'test-id',
+        version: '9.9.9',
+        disabledByServer: { version: '1.0.0', at: '2020-01-01T00:00:00Z' }
+      }));
+
+      manager = TelemetryConfigManager.getInstance();
+      expect(manager.isEnabled()).toBe(true);
+    });
+
+    it('env var opt-out still wins with no disabledByServer set', () => {
+      process.env.N8N_MCP_TELEMETRY_DISABLED = 'true';
+
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        enabled: true,
+        userId: 'test-id',
+        version: '9.9.9'
+      }));
+
+      manager = TelemetryConfigManager.getInstance();
+      expect(manager.isEnabled()).toBe(false);
+
+      delete process.env.N8N_MCP_TELEMETRY_DISABLED;
+    });
+  });
+
+  describe('getPackageVersion caching', () => {
+    it('reads package.json only once across repeated getPackageVersion() calls', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        enabled: true,
+        userId: 'test-id',
+        version: '9.9.9'
+      }));
+
+      manager = TelemetryConfigManager.getInstance();
+
+      expect(manager.getPackageVersion()).toBe('9.9.9');
+      const readCallsAfterFirst = vi.mocked(readFileSync).mock.calls.length;
+
+      expect(manager.getPackageVersion()).toBe('9.9.9');
+      expect(manager.getPackageVersion()).toBe('9.9.9');
+
+      expect(vi.mocked(readFileSync).mock.calls.length).toBe(readCallsAfterFirst);
+    });
+
+    it('does not re-read package.json on every isEnabled() check once disabledByServer is set', () => {
+      vi.mocked(existsSync).mockReturnValue(true);
+      vi.mocked(readFileSync).mockReturnValue(JSON.stringify({
+        enabled: true,
+        userId: 'test-id',
+        version: '9.9.9',
+        disabledByServer: { version: '9.9.9', at: '2020-01-01T00:00:00Z' }
+      }));
+
+      manager = TelemetryConfigManager.getInstance();
+
+      expect(manager.isEnabled()).toBe(false);
+      const readCallsAfterFirst = vi.mocked(readFileSync).mock.calls.length;
+
+      // Neither the config (already cached by loadConfig) nor the package
+      // version should be re-read from disk on subsequent checks.
+      expect(manager.isEnabled()).toBe(false);
+      expect(manager.isEnabled()).toBe(false);
+
+      expect(vi.mocked(readFileSync).mock.calls.length).toBe(readCallsAfterFirst);
+    });
+  });
+
   describe('getUserId', () => {
     it('should return consistent user ID', () => {
       vi.mocked(existsSync).mockReturnValue(true);

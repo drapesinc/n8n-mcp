@@ -8,6 +8,7 @@ const operation_similarity_service_1 = require("./operation-similarity-service")
 const resource_similarity_service_1 = require("./resource-similarity-service");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
 const type_structure_service_1 = require("./type-structure-service");
+const n8n_validation_1 = require("./n8n-validation");
 class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
     static initializeSimilarityServices(repository) {
         this.nodeRepository = repository;
@@ -23,6 +24,12 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         }
         if (!Array.isArray(properties)) {
             throw new Error(`Invalid properties: expected array, got ${typeof properties}`);
+        }
+        const rawVersion = config['@version'];
+        if (rawVersion !== undefined) {
+            const numeric = typeof rawVersion === 'number' ? rawVersion
+                : typeof rawVersion === 'string' && rawVersion.trim() !== '' ? Number(rawVersion) : NaN;
+            config = { ...config, '@version': Number.isFinite(numeric) ? numeric : 1 };
         }
         const operationContext = this.extractOperationContext(config);
         const userProvidedKeys = new Set(Object.keys(config));
@@ -259,7 +266,8 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         const typeErrors = result.errors.filter(e => e.type === 'invalid_type');
         const valueErrors = result.errors.filter(e => e.type === 'invalid_value');
         if (requiredErrors.length > 0) {
-            steps.push(`Add required fields: ${requiredErrors.map(e => e.property).join(', ')}`);
+            const properties = [...new Set(requiredErrors.map(e => e.property))];
+            steps.push(`Add required fields: ${properties.join(', ')}`);
         }
         if (typeErrors.length > 0) {
             steps.push(`Fix type mismatches: ${typeErrors.map(e => `${e.property} should be ${e.fix}`).join(', ')}`);
@@ -278,17 +286,19 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
     static deduplicateErrors(errors) {
         const seen = new Map();
         for (const error of errors) {
-            const key = `${error.property}-${error.type}`;
+            const key = error.type === 'missing_required'
+                ? `${error.property}-${error.type}`
+                : `${error.property}-${error.type}-${error.message}`;
             const existing = seen.get(key);
             if (!existing) {
                 seen.set(key, error);
+                continue;
             }
-            else {
+            if (error.type === 'missing_required') {
                 const existingLength = (existing.message?.length || 0) + (existing.fix?.length || 0);
                 const newLength = (error.message?.length || 0) + (error.fix?.length || 0);
-                if (newLength > existingLength) {
+                if (newLength > existingLength)
                     seen.set(key, error);
-                }
             }
         }
         return Array.from(seen.values());
@@ -389,7 +399,9 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
     static validateFixedCollectionStructures(nodeType, config, result) {
         const validationResult = fixed_collection_validator_1.FixedCollectionValidator.validate(nodeType, config);
         if (!validationResult.isValid) {
-            for (const error of validationResult.errors) {
+            const patterns = validationResult.errors.map(e => e.pattern);
+            const specificErrors = validationResult.errors.filter(error => !patterns.some(other => other !== error.pattern && other.startsWith(`${error.pattern}.`)));
+            for (const error of specificErrors) {
                 result.errors.push({
                     type: 'invalid_value',
                     property: error.pattern.split('.')[0],
@@ -423,9 +435,12 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         const hasFixedCollectionError = result.errors.some(e => e.property === 'rules' && e.message.includes('propertyValues[itemName] is not iterable'));
         if (hasFixedCollectionError)
             return;
+        this.validateConditionOperators('n8n-nodes-base.switch', config, result);
         if (config.rules.values && Array.isArray(config.rules.values)) {
             config.rules.values.forEach((rule, index) => {
-                if (!rule.conditions) {
+                if (!rule || typeof rule !== 'object' || Array.isArray(rule))
+                    return;
+                if (!rule?.conditions) {
                     result.warnings.push({
                         type: 'missing_common',
                         property: 'rules',
@@ -433,7 +448,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
                         suggestion: 'Each rule in the values array should have a "conditions" property'
                     });
                 }
-                if (!rule.outputKey && rule.renameOutput !== false) {
+                if (!rule?.outputKey && rule?.renameOutput !== false) {
                     result.warnings.push({
                         type: 'missing_common',
                         property: 'rules',
@@ -450,6 +465,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         const hasFixedCollectionError = result.errors.some(e => e.property === 'conditions' && e.message.includes('propertyValues[itemName] is not iterable'));
         if (hasFixedCollectionError)
             return;
+        this.validateConditionOperators('n8n-nodes-base.if', config, result);
     }
     static validateFilterNodeStructure(config, result) {
         if (!config.conditions)
@@ -457,6 +473,32 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         const hasFixedCollectionError = result.errors.some(e => e.property === 'conditions' && e.message.includes('propertyValues[itemName] is not iterable'));
         if (hasFixedCollectionError)
             return;
+        this.validateConditionOperators('n8n-nodes-base.filter', config, result);
+    }
+    static validateConditionOperators(nodeType, config, result) {
+        const rawVersion = config['@version'];
+        const typeVersion = typeof rawVersion === 'number' || typeof rawVersion === 'string' ? Number(rawVersion) : NaN;
+        const messages = (0, n8n_validation_1.validateConditionNodeStructure)({
+            id: 'node',
+            name: 'node',
+            type: nodeType,
+            typeVersion: Number.isFinite(typeVersion) ? typeVersion : 1,
+            parameters: config,
+            position: [0, 0]
+        });
+        for (const message of messages) {
+            const property = message.split(/[.[:]/, 1)[0];
+            if (result.errors.some(e => e.message === message))
+                continue;
+            result.errors.push({
+                type: 'invalid_value',
+                property,
+                message,
+                ...(message.includes('operator')
+                    ? { fix: 'Each condition needs an operator object with "type" (string, number, boolean, dateTime, array, object, any) and "operation" (for example equals, contains, exists).' }
+                    : {})
+            });
+        }
     }
     static validateResourceAndOperation(nodeType, config, result) {
         if (!this.operationSimilarityService || !this.resourceSimilarityService || !this.nodeRepository) {
@@ -793,7 +835,7 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         };
         for (let i = 0; i < conditions.length; i++) {
             const condition = conditions[i];
-            if (!condition.operator || typeof condition.operator !== 'object')
+            if (!condition?.operator || typeof condition.operator !== 'object')
                 continue;
             const { type, operation } = condition.operator;
             if (!type || !operation)
