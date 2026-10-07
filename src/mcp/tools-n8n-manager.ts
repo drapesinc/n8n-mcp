@@ -259,6 +259,10 @@ export const n8nManagementTools: ToolDefinition[] = [
         continueOnError: {
           type: 'boolean',
           description: 'If true, apply valid operations even if some fail (best-effort mode). Returns applied and failed operation indices. Default: false (atomic)'
+        },
+        allowPublishDraft: {
+          type: 'boolean',
+          description: 'Settings-only updates (updateSettings/updateName) on an active workflow whose draft differs from the published version are refused, because saving re-publishes the draft. Set true to allow publishing the draft. Default: false'
         }
       },
       required: ['id', 'operations']
