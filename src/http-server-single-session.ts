@@ -26,6 +26,7 @@ import {
   STANDARD_PROTOCOL_VERSION
 } from './utils/protocol-version';
 import { InstanceContext, pickInstanceContextFields, validateInstanceContext } from './types/instance-context';
+import { runWithRequestContext } from './utils/request-context';
 import { SessionState } from './types/session-state';
 import type { AdditionalTool } from './types/additional-tools';
 import { closeSharedDatabase } from './database/shared-database';
@@ -506,19 +507,37 @@ export class SingleSessionHTTPServer {
   }
 
   /**
-   * Switch session context with locking to prevent race conditions
+   * Switch session context with locking to prevent race conditions.
+   *
+   * With `mergeOverStored`, `newContext` holds only the fields a request supplied and
+   * is merged over the stored context once this call holds the lock. Merging before
+   * the wait would let a queued request write back values that a request ahead of it
+   * has since replaced.
    */
-  private async switchSessionContext(sessionId: string, newContext: InstanceContext): Promise<void> {
-    // Check if there's already a switch in progress for this session
-    const existingLock = this.contextSwitchLocks.get(sessionId);
-    if (existingLock) {
-      // Wait for the existing switch to complete
-      await existingLock;
-      return;
+  private async switchSessionContext(
+    sessionId: string,
+    newContext: InstanceContext,
+    mergeOverStored = false
+  ): Promise<InstanceContext | undefined> {
+    // Wait for any switch already in progress for this session, then apply this
+    // request's context as well. Returning after the wait would drop it, leaving the
+    // session on the context of whichever request got there first.
+    let existingLock = this.contextSwitchLocks.get(sessionId);
+    while (existingLock) {
+      await existingLock.catch(() => undefined);
+      existingLock = this.contextSwitchLocks.get(sessionId);
+    }
+
+    let contextToApply = newContext;
+    if (mergeOverStored) {
+      const storedContext = this.sessionContexts[sessionId];
+      // The session went away while this request waited; there is nothing to refresh.
+      if (!storedContext) return undefined;
+      contextToApply = { ...storedContext, ...newContext };
     }
 
     // Create a promise for this switch operation
-    const switchPromise = this.performContextSwitch(sessionId, newContext);
+    const switchPromise = this.performContextSwitch(sessionId, contextToApply);
     this.contextSwitchLocks.set(sessionId, switchPromise);
 
     try {
@@ -527,6 +546,7 @@ export class SingleSessionHTTPServer {
       // Clean up the lock after completion
       this.contextSwitchLocks.delete(sessionId);
     }
+    return contextToApply;
   }
 
   /**
@@ -701,6 +721,28 @@ export class SingleSessionHTTPServer {
           }
         }
 
+        // #1152: embedders hand the context over directly, and it may come from untyped
+        // JSON. A non-boolean switch (the string "false") would read as enabled here and
+        // would later make validateInstanceContext reject the whole context, so refuse
+        // it up front instead of storing it on a session.
+        if (instanceContext?.uiAppsEnabled !== undefined && typeof instanceContext.uiAppsEnabled !== 'boolean') {
+          logger.warn('Instance context rejected: uiAppsEnabled must be a boolean', {
+            receivedType: typeof instanceContext.uiAppsEnabled,
+            instanceId: instanceContext.instanceId
+          });
+          if (!res.headersSent) {
+            res.status(400).json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32602,
+                message: 'Invalid instance configuration: uiAppsEnabled must be a boolean'
+              },
+              id: req.body?.id ?? null
+            });
+          }
+          return;
+        }
+
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
         const isInitialize = req.body ? isInitializeRequest(req.body) : false;
 
@@ -716,6 +758,9 @@ export class SingleSessionHTTPServer {
         });
         
         let transport: StreamableHTTPServerTransport;
+        // SECURITY (GHSA-74jq-crxq-6x63): the context this request runs with.
+        let requestContext: InstanceContext | undefined = instanceContext;
+        let requestServer: N8NDocumentationMCPServer | undefined;
         
         if (isInitialize) {
           // Check session limits before creating new session
@@ -815,7 +860,9 @@ export class SingleSessionHTTPServer {
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
             additionalTools: this.additionalTools,
+            requireRequestContext: isMultiTenantEnabled && sessionStrategy === 'shared',
           });
+          requestServer = server;
 
           transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => sessionIdToUse,
@@ -915,9 +962,13 @@ export class SingleSessionHTTPServer {
           const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
           const sessionStrategy = process.env.MULTI_TENANT_SESSION_STRATEGY || 'instance';
 
-          if (isMultiTenantEnabled && sessionStrategy === 'shared' && instanceContext) {
+          requestContext = this.sessionContexts[sessionId];
+          requestServer = this.servers[sessionId];
+          if (isMultiTenantEnabled && sessionStrategy === 'shared') {
             // Update the context for this session with locking to prevent race conditions
-            await this.switchSessionContext(sessionId, instanceContext);
+            requestContext = instanceContext
+              ? await this.switchSessionContext(sessionId, instanceContext)
+              : undefined;
           } else if (isMultiTenantEnabled && sessionStrategy === 'instance' && instanceContext) {
             // #1045: in instance strategy the context used to be frozen at creation, so a
             // rotated n8n API key or MCP access token kept being served until the session
@@ -937,10 +988,9 @@ export class SingleSessionHTTPServer {
               storedContext?.instanceId === instanceContext.instanceId &&
               storedContext?.n8nApiUrl === instanceContext.n8nApiUrl
             ) {
-              await this.switchSessionContext(sessionId, {
-                ...storedContext,
-                ...pickInstanceContextFields(instanceContext)
-              });
+              requestContext =
+                await this.switchSessionContext(sessionId, pickInstanceContextFields(instanceContext), true)
+                ?? storedContext;
             }
           }
 
@@ -995,7 +1045,11 @@ export class SingleSessionHTTPServer {
           sessionId: isInitialize ? 'new' : sessionId,
           isInitialize 
         });
-        await transport.handleRequest(req, res, req.body);
+        if (requestServer) {
+          await runWithRequestContext(requestServer, requestContext, () => transport.handleRequest(req, res, req.body));
+        } else {
+          await transport.handleRequest(req, res, req.body);
+        }
         
         const duration = Date.now() - startTime;
         logger.info('MCP request completed', { duration, sessionId: transport.sessionId });

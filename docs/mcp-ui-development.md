@@ -62,6 +62,25 @@ Loaded UI tools attach their identity in response `_meta['n8n-mcp/toolName']`. C
 
 Receipt labels use explicit evidence: `saved` for partial updates, `preview` for autofix, the returned validation verdict and operation count for simulation, and the official pinned-test result for confirmed execution. Arbitrary public webhook response fields are never interpreted as execution success. Unrecognized operation shapes produce an unknown outcome. There are no mutation, retry or send-to-chat buttons.
 
+## Turning cards off
+
+Cards are advertised by default. Two switches stop that, and both leave every tool available with the same text result:
+
+- `N8N_MCP_DISABLE_UI_APPS=true` applies to the whole process, in stdio and HTTP mode. Only the exact value `true` turns cards off.
+- `InstanceContext.uiAppsEnabled: false` applies to the requests an embedder makes with that context. Unset and `true` both mean the default. The environment variable wins over `uiAppsEnabled: true`.
+
+With cards off the server omits `_meta.ui` and `_meta['ui/resourceUri']` from tool definitions, `_meta['n8n-mcp/toolName']` from tool results, and the `ui://n8n-mcp/*` entries from `resources/list`. `resources/read` for a `ui://n8n-mcp/*` URI keeps succeeding: hosts cache the tool list, and a host holding an older list would otherwise show a card that fails to load. For the same reason a host can keep rendering cards from a cached tool list until it fetches the list again.
+
+The switches cover the cards n8n-mcp ships. Tools an embedder registers through `additionalTools` are passed through as given, including any UI metadata on their definitions or results.
+
+In HTTP mode the context switch follows the session context, so send the value on every request:
+
+- `ENABLE_MULTI_TENANT=true` with the default `instance` session strategy: the value is taken from each request that carries the session's full tenant identity (the same `n8nApiUrl` and `instanceId`, plus `n8nApiKey`). A request that omits `uiAppsEnabled` leaves the session's value unchanged, like every other context field; send `true` to turn cards back on. A request without the full identity does not change it.
+- `MULTI_TENANT_SESSION_STRATEGY=shared`: each request's context replaces the previous one, so an omitted value means the default (cards on).
+- Without multi-tenant mode a session keeps the context it was created with.
+
+A new session takes the value from its `initialize` request, including after a server restart. A request whose `uiAppsEnabled` is not a boolean is answered with HTTP 400.
+
 ## Manual acceptance
 
 1. Replay creation → invalid validation → fix preview → saved update → passed validation → triggered run → confirmed execution. The replay must advance without a human repair handoff.

@@ -578,6 +578,100 @@ describe('HTTP Server Session Management', () => {
       expect(mcpServer.instanceContext.n8nMcpAccessToken).toBe('stored-token');
     });
 
+    it('should refresh uiAppsEnabled on a live instance-strategy session (#1152)', async () => {
+      mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
+        return await fn();
+      });
+      process.env.ENABLE_MULTI_TENANT = 'true';
+      process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
+      server = new SingleSessionHTTPServer();
+
+      const tenant = {
+        instanceId: 'tenant-a',
+        n8nApiUrl: 'https://a.example.com',
+        n8nApiKey: 'key-a',
+      };
+      const storedContext = { ...tenant, n8nMcpAccessToken: 'stored-token' };
+      const mcpServer: any = { instanceContext: storedContext };
+      (server as any).transports['session-a'] = {
+        handleRequest: vi.fn(async (_req: any, res2: any) => {
+          res2.status(200).json({ jsonrpc: '2.0', result: {}, id: 3 });
+        }),
+        close: vi.fn().mockResolvedValue(undefined)
+      };
+      (server as any).servers['session-a'] = mcpServer;
+      (server as any).sessionMetadata['session-a'] = {
+        lastAccess: new Date(),
+        createdAt: new Date()
+      };
+      (server as any).sessionContexts['session-a'] = storedContext;
+
+      const call = async (instanceContext: any) => {
+        const { req, res } = createMockReqRes();
+        req.method = 'POST';
+        req.headers = { 'mcp-session-id': 'session-a' };
+        req.body = { jsonrpc: '2.0', method: 'tools/list', params: {}, id: 3 };
+        await server.handleRequest(req as any, res as any, instanceContext);
+      };
+
+      await call({ ...tenant, uiAppsEnabled: false });
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+      // Credentials the request omits still stay as stored.
+      expect(mcpServer.instanceContext.n8nMcpAccessToken).toBe('stored-token');
+
+      // A request without the credentials must not change the switch either.
+      await call({ instanceId: 'tenant-a', n8nApiUrl: 'https://a.example.com', uiAppsEnabled: true });
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+
+      // A non-boolean is refused before it can reach the session: the string "false"
+      // would read as enabled.
+      for (const bad of ['false', 'true', 0, null]) {
+        const { req, res } = createMockReqRes();
+        req.method = 'POST';
+        req.headers = { 'mcp-session-id': 'session-a' };
+        req.body = { jsonrpc: '2.0', method: 'tools/list', params: {}, id: 4 };
+        await server.handleRequest(req as any, res as any, { ...tenant, uiAppsEnabled: bad } as any);
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+      }
+
+      // Omitted means "unchanged", as for every other field: a caller that forgets the
+      // field on one request must not switch the cards back on.
+      await call({ ...tenant });
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+      expect((server as any).sessionContexts['session-a'].uiAppsEnabled).toBe(false);
+
+      // The value travels with the session through export, so a restore keeps it.
+      const exported = server.exportSessionState().find(session => session.sessionId === 'session-a');
+      expect(exported?.context.uiAppsEnabled).toBe(false);
+
+      await call({ ...tenant, uiAppsEnabled: true });
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(true);
+
+      // Requests that overlap on one session each apply their own context; the later
+      // one must not be dropped because a switch was already in progress.
+      await Promise.all([
+        (server as any).switchSessionContext('session-a', { ...storedContext, uiAppsEnabled: true }),
+        (server as any).switchSessionContext('session-a', { ...storedContext, uiAppsEnabled: false })
+      ]);
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+      expect((server as any).contextSwitchLocks.size).toBe(0);
+
+      // A queued request that omits the field merges over the context as it is when its
+      // turn comes, not as it was when the request arrived, so it cannot undo the
+      // request ahead of it. Driven through the helper the refresh calls: overlapping
+      // handleRequest calls do not keep the mocked SSRF module under vitest.
+      const refresh = (context: any) => (server as any).switchSessionContext('session-a', context, true);
+      await refresh({ ...tenant, uiAppsEnabled: true });
+      await Promise.all([
+        refresh({ ...tenant, uiAppsEnabled: true }),
+        refresh({ ...tenant, uiAppsEnabled: false }),
+        refresh({ ...tenant })
+      ]);
+      expect(mcpServer.instanceContext.uiAppsEnabled).toBe(false);
+      expect(mcpServer.instanceContext.n8nMcpAccessToken).toBe('stored-token');
+    });
+
     it('should keep same-instance sessions alive in instance mode when concurrent sessions are allowed', async () => {
       mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => {
         return await fn();
