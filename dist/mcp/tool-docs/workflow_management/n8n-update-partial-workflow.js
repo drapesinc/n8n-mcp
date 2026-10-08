@@ -342,6 +342,7 @@ n8n_update_partial_workflow({
             },
             validateOnly: { type: 'boolean', description: 'If true, only validate operations without applying them' },
             continueOnError: { type: 'boolean', description: 'If true, apply valid operations even if some fail (best-effort mode). Returns applied and failed operation indices. Default: false (atomic)' },
+            allowPublishDraft: { type: 'boolean', description: 'Allow a settings-only update (updateSettings/updateName) on an active workflow with an unpublished draft. Saving re-publishes the draft, so it is refused unless this is true. Default: false' },
             intent: { type: 'string', description: 'Intent of the change - helps to return better response. Include in every tool call. Example: "Add error handling for API failures".' }
         },
         returns: 'Minimal summary (id, name, active, nodeCount, operationsApplied) for token efficiency. Use n8n_get_workflow with mode "structure" to verify current state if needed. Returns validation results if validateOnly=true.',
