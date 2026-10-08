@@ -14,7 +14,8 @@ import type { McpToolResponse } from '../types/n8n-api';
 import { existsSync, readFileSync, promises as fs } from 'fs';
 import path from 'path';
 import { n8nDocumentationToolsFinal } from './tools';
-import { UIAppRegistry } from './ui';
+import { UIAppRegistry, isUIAppsEnabled } from './ui';
+import { getRequestScope } from '../utils/request-context';
 import { SkillResourceRegistry } from './skills';
 import { n8nManagementTools, getN8nManagementToolsWithWorkspace, TOOL_OPERATION_PARAM, DESTRUCTIVE_TOOL_OPERATIONS } from './tools-n8n-manager';
 import {
@@ -203,6 +204,11 @@ type NodeInfoResponse = NodeMinimalInfo | NodeStandardInfo | NodeFullInfo | Vers
 
 interface MCPServerOptions {
   additionalTools?: AdditionalTool[];
+  /**
+   * SECURITY (GHSA-74jq-crxq-6x63): the instance context must come from the
+   * current request.
+   */
+  requireRequestContext?: boolean;
 }
 
 export class N8NDocumentationMCPServer {
@@ -214,7 +220,8 @@ export class N8NDocumentationMCPServer {
   private initialized: Promise<void>;
   private cache = new SimpleCache();
   private clientInfo: any = null;
-  private instanceContext?: InstanceContext;
+  private sessionInstanceContext?: InstanceContext;
+  private requireRequestContext = false;
   private previousTool: string | null = null;
   private previousToolTimestamp: number = Date.now();
   private earlyLogger: EarlyErrorLogger | null = null;
@@ -241,7 +248,8 @@ export class N8NDocumentationMCPServer {
       installStdioGuard();
     }
 
-    this.instanceContext = instanceContext;
+    this.sessionInstanceContext = instanceContext;
+    this.requireRequestContext = options?.requireRequestContext === true;
     this.earlyLogger = earlyLogger || null;
     this.registerAdditionalTools(options?.additionalTools || []);
     // Check for test environment first
@@ -339,6 +347,20 @@ export class N8NDocumentationMCPServer {
     UIAppRegistry.load();
     SkillResourceRegistry.load();
     this.setupHandlers();
+  }
+
+  // SECURITY (GHSA-74jq-crxq-6x63): request-scoped instance context.
+  private get instanceContext(): InstanceContext | undefined {
+    const scope = getRequestScope(this);
+    if (scope) return scope.instanceContext;
+    if (this.requireRequestContext) {
+      throw new Error('Instance context is not available for this request');
+    }
+    return this.sessionInstanceContext;
+  }
+
+  private set instanceContext(instanceContext: InstanceContext | undefined) {
+    this.sessionInstanceContext = instanceContext;
   }
 
   private registerAdditionalTools(additionalTools: AdditionalTool[]): void {
@@ -864,7 +886,9 @@ export class N8NDocumentationMCPServer {
         tools = tools.map(tool => this.filteredToolDefinitionsCache!.get(tool.name) ?? tool);
       }
 
-      UIAppRegistry.injectToolMeta(tools);
+      if (isUIAppsEnabled(this.instanceContext)) {
+        tools = UIAppRegistry.injectToolMeta(tools);
+      }
       return { tools };
     });
 
@@ -872,9 +896,10 @@ export class N8NDocumentationMCPServer {
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const isAdditionalTool = this.additionalToolsByName.has(name);
-      const resultMeta = !isAdditionalTool && UIAppRegistry.getAppForTool(name)?.html
-        ? { _meta: { 'n8n-mcp/toolName': name } }
-        : {};
+      const hasUIApp = !isAdditionalTool
+        && isUIAppsEnabled(this.instanceContext)
+        && Boolean(UIAppRegistry.getAppForTool(name)?.html);
+      const resultMeta = hasUIApp ? { _meta: { 'n8n-mcp/toolName': name } } : {};
       
       // SECURITY (GHSA-wg4g-395p-mqv3): log metadata only, not raw arg values.
       logger.info('Tool call received', {
@@ -1144,7 +1169,7 @@ export class N8NDocumentationMCPServer {
 
     // Handle ListResources: UI apps + skill markdown
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => {
-      const apps = UIAppRegistry.getAllApps();
+      const apps = isUIAppsEnabled(this.instanceContext) ? UIAppRegistry.getAllApps() : [];
       const skills = SkillResourceRegistry.getAll();
       return {
         resources: [
@@ -1443,6 +1468,14 @@ export class N8NDocumentationMCPServer {
         throw new Error(manager.getWorkspaceNotFoundError(args.workspace));
       }
       return workspaceContext;
+    }
+
+    // A per-request / per-session instance context that carries its own n8n
+    // credentials (multi-tenant HTTP) wins over the configured default
+    // workspace; otherwise every tenant would be routed to the default one.
+    const requestContext = this.instanceContext;
+    if (requestContext?.n8nApiUrl && requestContext?.n8nApiKey) {
+      return requestContext;
     }
 
     // Fall back to the default workspace if any N8N_URL_*/N8N_TOKEN_* pairs

@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Docker build stages run on the build host's platform.** The UI and TypeScript build stages of the main image now use `--platform=$BUILDPLATFORM`, so a multi-platform build no longer runs `npm` under emulation for them. Their output is HTML and JavaScript and does not depend on the target platform. The Docker build jobs in CI also have a time limit.
+
+## [2.92.1] - 2026-10-06
+
+### Security
+
+- Fix instance context handling on multi-tenant HTTP sessions (GHSA-74jq-crxq-6x63).
+
+## [2.92.0] - 2026-10-06
+
+### Added
+
+- **Result cards (MCP Apps) can be turned off** (#1152). `N8N_MCP_DISABLE_UI_APPS=true` stops the server from advertising cards for the whole process. Embedders can do the same per request with the new `InstanceContext.uiAppsEnabled: false`; the environment variable wins over `uiAppsEnabled: true`, and unset keeps the previous behaviour. With cards off, tool definitions carry no `_meta.ui` or `_meta['ui/resourceUri']`, tool results carry no `_meta['n8n-mcp/toolName']`, and `resources/list` has no `ui://n8n-mcp/*` entries. Every tool stays available and returns the same text. Tools an embedder registers through `additionalTools` are passed through unchanged. `resources/read` for a `ui://n8n-mcp/*` URI keeps succeeding, because a host that cached the tool list would otherwise show a card that fails to load. In the `instance` session strategy the value is taken from each request that refreshes the session context; a request that omits it leaves the session's value unchanged, so send `true` to turn cards back on. A host that cached the tool list can keep showing cards until it fetches the list again. See `docs/mcp-ui-development.md`.
+
+### Fixed
+
+- **Overlapping requests on one HTTP session each apply their own instance context.** A request that arrived while another context switch for the same session was in progress waited for it and then skipped its own, so the session kept the first request's context. In the `instance` strategy a waiting request now merges over the context as it is when its turn comes, so it cannot write back a value that a request ahead of it replaced.
+- **`tools/list` no longer writes UI metadata onto the shared tool definitions.** `UIAppRegistry.injectToolMeta` assigned `_meta` on the module-level definitions it was given, so the metadata stayed for the lifetime of the process. It now returns copies of the tools it enriches and leaves its input untouched.
+
 ## [2.91.0] - 2026-10-01
 
 ### Changed
