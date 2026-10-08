@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.settingsUpdateWouldPublishDraft = settingsUpdateWouldPublishDraft;
 exports.handleUpdatePartialWorkflow = handleUpdatePartialWorkflow;
 const zod_1 = require("zod");
 const crypto_1 = require("crypto");
@@ -139,8 +140,24 @@ const workflowDiffSchema = zod_1.z.object({
     validateOnly: zod_1.z.boolean().optional(),
     continueOnError: zod_1.z.boolean().optional(),
     createBackup: zod_1.z.boolean().optional(),
+    allowPublishDraft: zod_1.z.boolean().optional(),
     intent: zod_1.z.string().optional(),
 });
+const SETTINGS_ONLY_OPS = new Set(['updateSettings', 'updateName', 'addTag', 'removeTag']);
+const PUBLISHING_SETTINGS_OPS = new Set(['updateSettings', 'updateName']);
+function settingsUpdateWouldPublishDraft(workflow, operations) {
+    if (!operations.length)
+        return false;
+    if (!operations.every(op => op.type && SETTINGS_ONLY_OPS.has(op.type)))
+        return false;
+    if (!operations.some(op => op.type && PUBLISHING_SETTINGS_OPS.has(op.type)))
+        return false;
+    if (!workflow.active)
+        return false;
+    if (!workflow.versionId || !workflow.activeVersionId)
+        return false;
+    return workflow.versionId !== workflow.activeVersionId;
+}
 async function handleUpdatePartialWorkflow(args, repository, context) {
     const startTime = Date.now();
     const sessionId = `mutation_${Date.now()}_${(0, crypto_1.randomUUID)()}`;
@@ -231,6 +248,20 @@ async function handleUpdatePartialWorkflow(args, repository, context) {
                 };
             }
             throw error;
+        }
+        if (!input.validateOnly &&
+            !input.allowPublishDraft &&
+            settingsUpdateWouldPublishDraft(workflow, input.operations)) {
+            return {
+                success: false,
+                saved: false,
+                code: 'UNPUBLISHED_DRAFT',
+                error: `Workflow ${input.id} is active and has an unpublished draft ` +
+                    `(versionId ${workflow.versionId} differs from activeVersionId ${workflow.activeVersionId}). ` +
+                    'A settings/name update is saved with the full draft and re-publishes it, which would push ' +
+                    'those unpublished edits live. Publish or discard the draft first, or re-run with ' +
+                    'allowPublishDraft: true to publish the draft along with this change.'
+            };
         }
         if (input.createBackup !== false && !input.validateOnly) {
             try {
