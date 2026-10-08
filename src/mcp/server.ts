@@ -1470,6 +1470,14 @@ export class N8NDocumentationMCPServer {
       return workspaceContext;
     }
 
+    // A per-request / per-session instance context that carries its own n8n
+    // credentials (multi-tenant HTTP) wins over the configured default
+    // workspace; otherwise every tenant would be routed to the default one.
+    const requestContext = this.instanceContext;
+    if (requestContext?.n8nApiUrl && requestContext?.n8nApiKey) {
+      return requestContext;
+    }
+
     // Fall back to the default workspace if any N8N_URL_*/N8N_TOKEN_* pairs
     // are configured. This path fires in both single- and multi-workspace
     // mode; isMultiWorkspace() is strictly size>1 and would skip single
