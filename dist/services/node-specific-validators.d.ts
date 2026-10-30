@@ -29,6 +29,7 @@ export declare class NodeSpecificValidators {
     static validateWebhook(context: NodeValidationContext): void;
     static validateCode(context: NodeValidationContext): void;
     private static validateJavaScriptCode;
+    private static hasAwaitInFunctionBody;
     private static readonly PYTHON_REMOVED_GLOBALS;
     private static readonly PYTHON_DENIED_BUILTINS;
     private static pythonRemovedGlobalFix;
@@ -40,9 +41,10 @@ export declare class NodeSpecificValidators {
     private static pythonParameterNames;
     private static pythonLogicalLines;
     private static pythonImportBindings;
+    private static pythonForTarget;
     private static pythonBindingsOnLine;
     private static pythonFormatsDunder;
-    private static pythonEnclosingGroup;
+    private static pythonBracketGroups;
     private static pythonLineLocalBindings;
     private static pythonMaskHeaderBindings;
     private static pythonScopes;
@@ -58,11 +60,13 @@ export declare class NodeSpecificValidators {
     private static isFStringPrefix;
     private static stripPythonStringsAndComments;
     private static readonly NON_FUNCTION_HEADS;
+    private static javaScriptBackLinks;
     private static startsJavaScriptFunctionBody;
     private static readonly REGEX_PRECEDING_KEYWORDS;
     private static regexLiteralStartsHere;
     private static validateN8nVariables;
     private static validateCodeSecurity;
+    private static importsFromFsModule;
     static validateSet(context: NodeValidationContext): void;
 }
 //# sourceMappingURL=node-specific-validators.d.ts.map

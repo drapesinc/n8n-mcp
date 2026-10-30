@@ -10,6 +10,19 @@ class BaseTriggerHandler {
     validate(input) {
         return this.inputSchema.parse(input);
     }
+    isUnderTriggerPrefix(triggerUrl, baseUrl, prefix) {
+        try {
+            const target = new URL(triggerUrl);
+            const base = new URL(baseUrl);
+            const triggerRoot = `${base.pathname.replace(/\/+$/, '')}/${prefix}/`;
+            return target.origin === base.origin &&
+                target.pathname.startsWith(triggerRoot) &&
+                !/%(2e|2f|5c)/i.test(target.pathname.slice(triggerRoot.length));
+        }
+        catch {
+            return false;
+        }
+    }
     getBaseUrl() {
         if (this.context?.n8nApiUrl) {
             return this.context.n8nApiUrl.replace(/\/api\/v1\/?$/, '');

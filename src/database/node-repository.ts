@@ -76,10 +76,25 @@ export class NodeRepository {
   }
   
   /**
+   * Databases built before deprecated_versions existed keep their nodes table across
+   * rebuilds (community rows survive), and schema.sql only creates missing tables,
+   * so add the column before writing. Checked on every save rather than cached: saves
+   * run inside transactions, and a rollback also removes a column added inside it.
+   */
+  private ensureDeprecatedVersionsColumn(): void {
+    const columns = (this.db.prepare('PRAGMA table_info(nodes)').all() ?? []) as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some((column) => column.name === 'deprecated_versions')) {
+      this.db.exec('ALTER TABLE nodes ADD COLUMN deprecated_versions TEXT');
+    }
+  }
+
+  /**
    * Save node with proper JSON serialization
    * Supports both core and community nodes via optional community fields
    */
   saveNode(node: ParsedNode & Partial<CommunityNodeFields>): void {
+    this.ensureDeprecatedVersionsColumn();
+
     // Preserve existing npm_readme and ai_documentation_summary on upsert
     const existing = this.db.prepare(
       'SELECT npm_readme, ai_documentation_summary, ai_summary_generated_at FROM nodes WHERE node_type = ?'
@@ -95,8 +110,9 @@ export class NodeRepository {
         outputs, output_names,
         is_community, is_verified, author_name, author_github_url,
         npm_package_name, npm_version, npm_downloads, community_fetched_at,
-        npm_readme, ai_documentation_summary, ai_summary_generated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        npm_readme, ai_documentation_summary, ai_summary_generated_at,
+        deprecated_versions
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -134,7 +150,8 @@ export class NodeRepository {
       // Preserve existing docs data on upsert
       existing?.npm_readme || null,
       existing?.ai_documentation_summary || null,
-      existing?.ai_summary_generated_at || null
+      existing?.ai_summary_generated_at || null,
+      node.deprecatedVersions?.length ? JSON.stringify(node.deprecatedVersions) : null
     );
   }
   
@@ -285,6 +302,49 @@ export class NodeRepository {
     return rows.map(row => this.parseNodeRow(row));
   }
 
+  /**
+   * Display names of core action nodes per credential type they accept: not
+   * triggers, tool variants or AI sub-nodes (only nodes whose outputs are a plain
+   * main output), and not HTTP Request itself. Credentials of AI model providers
+   * (used by a chat-model or embeddings sub-node) are left out: their action
+   * nodes cover a small part of the provider's API.
+   */
+  getActionNodesByCredentialType(): Map<string, string[]> {
+    type Row = { node_type: string; display_name: string; credentials_required: string | null; outputs: string | null };
+    const rows = this.db.prepare(`
+      SELECT node_type, display_name, credentials_required, outputs
+      FROM nodes
+      WHERE is_community = 0 AND is_trigger = 0 AND is_tool_variant = 0
+    `).all() as Row[];
+
+    const credentialNames = (row: Row): string[] => {
+      const credentials = this.safeJsonParse(row.credentials_required ?? '', []);
+      if (!Array.isArray(credentials)) return [];
+      return credentials.map(credential => credential?.name).filter((name): name is string => typeof name === 'string');
+    };
+
+    const modelProviderCredentials = new Set<string>();
+    for (const row of rows) {
+      if (!/ai_languageModel|ai_embedding/.test(row.outputs ?? '')) continue;
+      for (const credential of credentialNames(row)) modelProviderCredentials.add(credential);
+    }
+
+    const byCredential = new Map<string, string[]>();
+    for (const row of rows) {
+      // HTTP Request itself, and the legacy vector-store insert nodes (Pinecone: Insert, ...)
+      if (row.node_type === 'nodes-base.httpRequest' || row.node_type.startsWith('nodes-langchain.vectorStore')) continue;
+      const outputs = this.safeJsonParse(row.outputs ?? '', null);
+      if (!Array.isArray(outputs) || outputs.length !== 1 || outputs[0] !== 'main') continue;
+      for (const credential of credentialNames(row)) {
+        if (modelProviderCredentials.has(credential)) continue;
+        const nodeNames = byCredential.get(credential) ?? [];
+        if (!nodeNames.includes(row.display_name)) nodeNames.push(row.display_name);
+        byCredential.set(credential, nodeNames);
+      }
+    }
+    return byCredential;
+  }
+
   getNodeCount(): number {
     const result = this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any;
     return result.count;
@@ -405,6 +465,7 @@ export class NodeRepository {
       isToolVariant: Number(row.is_tool_variant) === 1,
       toolVariantOf: row.tool_variant_of || null,
       hasToolVariant: Number(row.has_tool_variant) === 1,
+      deprecatedVersions: row.deprecated_versions ? this.safeJsonParse(row.deprecated_versions, []) : [],
       version: row.version,
       properties: decompressColumnJson(row.properties_schema, []),
       operations: this.safeJsonParse(row.operations, []),

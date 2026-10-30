@@ -25,6 +25,18 @@ class OperationSimilarityService {
             });
         }
     }
+    static setBounded(cache, key, value, maxEntries) {
+        if (key.length > OperationSimilarityService.MAX_CACHE_KEY_LENGTH)
+            return;
+        cache.delete(key);
+        while (cache.size >= maxEntries) {
+            const oldest = cache.keys().next().value;
+            if (oldest === undefined)
+                break;
+            cache.delete(oldest);
+        }
+        cache.set(key, value);
+    }
     initializeCommonPatterns() {
         const patterns = new Map();
         patterns.set('googleDrive', [
@@ -67,6 +79,11 @@ class OperationSimilarityService {
         return patterns;
     }
     findSimilarOperations(nodeType, invalidOperation, resource, maxSuggestions = OperationSimilarityService.MAX_SUGGESTIONS) {
+        const maxLength = OperationSimilarityService.MAX_NAME_LENGTH;
+        if ((typeof invalidOperation === 'string' && invalidOperation.length > maxLength) ||
+            (typeof resource === 'string' && resource.length > maxLength)) {
+            return [];
+        }
         if (Math.random() < 0.1) {
             this.cleanupExpiredEntries();
         }
@@ -127,7 +144,7 @@ class OperationSimilarityService {
         }
         suggestions.sort((a, b) => b.confidence - a.confidence);
         const topSuggestions = suggestions.slice(0, maxSuggestions);
-        this.suggestionCache.set(cacheKey, topSuggestions);
+        OperationSimilarityService.setBounded(this.suggestionCache, cacheKey, topSuggestions, OperationSimilarityService.MAX_SUGGESTION_CACHE_ENTRIES);
         return topSuggestions;
     }
     getOperationValue(op) {
@@ -209,7 +226,7 @@ class OperationSimilarityService {
         catch (error) {
             logger_1.logger.warn(`Failed to extract operations from properties for ${nodeType}:`, error);
         }
-        this.operationCache.set(cacheKey, { operations, timestamp: Date.now() });
+        OperationSimilarityService.setBounded(this.operationCache, cacheKey, { operations, timestamp: Date.now() }, OperationSimilarityService.MAX_OPERATION_CACHE_ENTRIES);
         return operations;
     }
     getNodePatterns(nodeType) {
@@ -255,22 +272,27 @@ class OperationSimilarityService {
     levenshteinDistance(str1, str2) {
         const m = str1.length;
         const n = str2.length;
-        const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-        for (let i = 0; i <= m; i++)
-            dp[i][0] = i;
+        if (m === 0)
+            return n;
+        if (n === 0)
+            return m;
+        let prev = new Array(n + 1);
+        let curr = new Array(n + 1);
         for (let j = 0; j <= n; j++)
-            dp[0][j] = j;
+            prev[j] = j;
         for (let i = 1; i <= m; i++) {
+            curr[0] = i;
             for (let j = 1; j <= n; j++) {
                 if (str1[i - 1] === str2[j - 1]) {
-                    dp[i][j] = dp[i - 1][j - 1];
+                    curr[j] = prev[j - 1];
                 }
                 else {
-                    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + 1);
+                    curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + 1);
                 }
             }
+            [prev, curr] = [curr, prev];
         }
-        return dp[m][n];
+        return prev[n];
     }
     areCommonVariations(str1, str2) {
         if (str1 === '' || str2 === '' || str1 === str2) {
@@ -331,6 +353,10 @@ exports.OperationSimilarityService = OperationSimilarityService;
 OperationSimilarityService.CACHE_DURATION_MS = 5 * 60 * 1000;
 OperationSimilarityService.MIN_CONFIDENCE = 0.3;
 OperationSimilarityService.MAX_SUGGESTIONS = 5;
+OperationSimilarityService.MAX_NAME_LENGTH = 128;
+OperationSimilarityService.MAX_CACHE_KEY_LENGTH = 512;
+OperationSimilarityService.MAX_OPERATION_CACHE_ENTRIES = 500;
+OperationSimilarityService.MAX_SUGGESTION_CACHE_ENTRIES = 100;
 OperationSimilarityService.CONFIDENCE_THRESHOLDS = {
     EXACT: 1.0,
     VERY_HIGH: 0.95,

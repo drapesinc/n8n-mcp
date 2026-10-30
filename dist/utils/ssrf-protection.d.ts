@@ -20,7 +20,11 @@ export interface WebhookUrlValidationResult {
     }>;
 }
 export declare class SSRFProtection {
+    private static canonicalIPv6;
+    private static isCloudMetadata;
     private static isLoopbackHost;
+    private static isLocalhostSubdomain;
+    private static normalizeHostname;
     private static isPrivateOrMappedIpv6;
     private static tryExtractTunneledIPv4;
     private static firstHextet;

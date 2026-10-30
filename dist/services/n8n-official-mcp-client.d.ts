@@ -1,3 +1,4 @@
+import { PinnedFetch } from '../utils/ssrf-protection';
 export type OfficialMcpErrorCode = 'NOT_CONFIGURED' | 'OFFICIAL_MCP_AUTH_FAILED' | 'OFFICIAL_MCP_NOT_ENABLED' | 'OFFICIAL_MCP_RATE_LIMITED' | 'OFFICIAL_MCP_TOOL_UNAVAILABLE' | 'OFFICIAL_MCP_URL_REJECTED' | 'OFFICIAL_MCP_TIMEOUT' | 'OFFICIAL_MCP_TRANSPORT_ERROR';
 export declare const OFFICIAL_MCP_HINTS: Record<OfficialMcpErrorCode, string>;
 export declare class OfficialMcpError extends Error {
@@ -34,6 +35,7 @@ export declare const OFFICIAL_MCP_CACHE_TTL_MS: number;
 export declare const OFFICIAL_MCP_FAILURE_TTL_MS = 30000;
 export declare const OFFICIAL_RESULT_MAX_BYTES: number;
 export declare function mapOfficialTransportError(err: unknown): OfficialMcpError;
+export declare function withResponseSizeLimit(fetchFn: PinnedFetch['fetch'], maxBytes: number): PinnedFetch['fetch'];
 export declare class N8nOfficialMcpClient {
     readonly endpoint: string;
     private readonly token;

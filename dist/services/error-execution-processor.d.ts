@@ -5,5 +5,6 @@ export interface ErrorProcessorOptions {
     includeExecutionPath?: boolean;
     workflow?: Workflow;
 }
+export declare function hasRecordedError(execution: Execution): boolean;
 export declare function processErrorExecution(execution: Execution, options?: ErrorProcessorOptions): ErrorAnalysis;
 //# sourceMappingURL=error-execution-processor.d.ts.map

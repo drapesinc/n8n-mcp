@@ -503,8 +503,7 @@ class ConfigValidator {
                 fix: 'Check that all ( have matching )'
             });
         }
-        const stringMatches = code.match(/(["'`])(?:(?=(\\?))\2.)*?\1/g) || [];
-        const quotesInStrings = stringMatches.join('').match(/["'`]/g)?.length || 0;
+        const quotesInStrings = this.countQuotesInStringLiterals(code);
         const totalQuotes = (code.match(/["'`]/g) || []).length;
         if ((totalQuotes - quotesInStrings) % 2 !== 0) {
             warnings.push({
@@ -554,8 +553,7 @@ class ConfigValidator {
                 fix: 'Check that all { have matching }'
             });
         }
-        const controlStructures = /^\s*(if|elif|else|for|while|def|class|try|except|finally|with)\s+.*[^:]\s*$/gm;
-        if (controlStructures.test(code)) {
+        if (this.hasControlStructureWithoutColon(code)) {
             warnings.push({
                 type: 'inefficient',
                 message: 'Missing colon after control structure',
@@ -582,7 +580,7 @@ class ConfigValidator {
                     suggestion: 'If modifying items, use: return items.map(item => ({json: {...item.json, newField: "value"}}))'
                 });
             }
-            if (/return\s+{[^}]+}\s*;/.test(code) && !code.includes('[') && !code.includes(']')) {
+            if (this.hasReturnOfPlainObject(code) && !code.includes('[') && !code.includes(']')) {
                 warnings.push({
                     type: 'invalid_value',
                     message: 'Return value must be an array',
@@ -686,7 +684,135 @@ class ConfigValidator {
             }
         }
     }
+    static isLineTerminator(ch) {
+        return ch === '\n' || ch === '\r' || ch === '\u2028' || ch === '\u2029';
+    }
+    static isWhitespace(ch) {
+        return this.WHITESPACE.test(ch);
+    }
+    static countQuotesInStringLiterals(code) {
+        const isQuote = (ch) => ch === '"' || ch === "'" || ch === '`';
+        let count = 0;
+        for (const line of code.split(/[\n\r\u2028\u2029]/)) {
+            const closers = { '"': [], "'": [], '`': [] };
+            let backslashes = 0;
+            for (let i = 0; i < line.length; i++) {
+                const ch = line[i];
+                if (ch === '\\') {
+                    backslashes++;
+                    continue;
+                }
+                if (isQuote(ch) && backslashes % 2 === 0)
+                    closers[ch].push(i);
+                backslashes = 0;
+            }
+            const next = { '"': 0, "'": 0, '`': 0 };
+            let k = 0;
+            while (k < line.length) {
+                const quote = line[k];
+                if (!isQuote(quote)) {
+                    k++;
+                    continue;
+                }
+                const list = closers[quote];
+                while (next[quote] < list.length && list[next[quote]] <= k)
+                    next[quote]++;
+                if (next[quote] === list.length) {
+                    k++;
+                    continue;
+                }
+                const end = list[next[quote]];
+                for (let i = k; i <= end; i++) {
+                    if (isQuote(line[i]))
+                        count++;
+                }
+                k = end + 1;
+            }
+        }
+        return count;
+    }
+    static hasControlStructureWithoutColon(code) {
+        const keywords = ['if', 'elif', 'else', 'for', 'while', 'def', 'class', 'try', 'except', 'finally', 'with'];
+        const n = code.length;
+        let lineStart = 0;
+        while (lineStart <= n) {
+            let firstCode = lineStart;
+            while (firstCode < n && !this.isLineTerminator(code[firstCode]) && this.isWhitespace(code[firstCode]))
+                firstCode++;
+            let lineEnd = firstCode;
+            while (lineEnd < n && !this.isLineTerminator(code[lineEnd]))
+                lineEnd++;
+            if (firstCode < lineEnd) {
+                const keyword = keywords.find(kw => code.startsWith(kw, firstCode));
+                const keywordEnd = keyword ? firstCode + keyword.length : -1;
+                if (keyword && keywordEnd < n && this.isWhitespace(code[keywordEnd])) {
+                    let nextCode = keywordEnd;
+                    let terminatorAfterStart = false;
+                    while (nextCode < n && this.isWhitespace(code[nextCode])) {
+                        if (nextCode >= keywordEnd + 2 && this.isLineTerminator(code[nextCode]))
+                            terminatorAfterStart = true;
+                        nextCode++;
+                    }
+                    if (nextCode === n) {
+                        if (keywordEnd + 1 < n)
+                            return true;
+                    }
+                    else {
+                        if (terminatorAfterStart)
+                            return true;
+                        let statementEnd = nextCode;
+                        let lastCode = nextCode;
+                        while (statementEnd < n && !this.isLineTerminator(code[statementEnd])) {
+                            if (!this.isWhitespace(code[statementEnd]))
+                                lastCode = statementEnd;
+                            statementEnd++;
+                        }
+                        if (code[lastCode] !== ':' || lastCode < statementEnd - 1)
+                            return true;
+                        if (statementEnd < n) {
+                            let after = statementEnd + 1;
+                            while (after < n && this.isWhitespace(code[after]) && !this.isLineTerminator(code[after]))
+                                after++;
+                            if (after === n || this.isLineTerminator(code[after]))
+                                return true;
+                        }
+                    }
+                }
+            }
+            lineStart = lineEnd + 1;
+        }
+        return false;
+    }
+    static hasReturnOfPlainObject(code) {
+        let close = -2;
+        let checkedClose = -1;
+        let from = 0;
+        while (true) {
+            const start = code.indexOf('return', from);
+            if (start === -1)
+                return false;
+            from = start + 1;
+            let brace = start + 6;
+            while (brace < code.length && this.isWhitespace(code[brace]))
+                brace++;
+            if (brace === start + 6 || code[brace] !== '{')
+                continue;
+            if (close === -2 || (close !== -1 && close <= brace))
+                close = code.indexOf('}', brace + 1);
+            if (close === -1)
+                return false;
+            if (close < brace + 2 || close === checkedClose)
+                continue;
+            checkedClose = close;
+            let afterClose = close + 1;
+            while (afterClose < code.length && this.isWhitespace(code[afterClose]))
+                afterClose++;
+            if (code[afterClose] === ';')
+                return true;
+        }
+    }
 }
 exports.ConfigValidator = ConfigValidator;
 ConfigValidator.UI_ONLY_TYPES = ['notice', 'callout', 'infoBox', 'info'];
+ConfigValidator.WHITESPACE = /\s/;
 //# sourceMappingURL=config-validator.js.map

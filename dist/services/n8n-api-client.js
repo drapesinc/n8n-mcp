@@ -36,7 +36,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.N8nApiClient = void 0;
+exports.N8nApiClient = exports.SIZE_LIMIT_HINT = void 0;
+exports.getMaxResponseBytes = getMaxResponseBytes;
+exports.responseSizeLimits = responseSizeLimits;
+exports.sizeLimitMb = sizeLimitMb;
+exports.describeSizeLimitError = describeSizeLimitError;
 const axios_1 = __importDefault(require("axios"));
 const logger_1 = require("../utils/logger");
 const n8n_errors_1 = require("../utils/n8n-errors");
@@ -44,6 +48,47 @@ const validation_schemas_1 = require("../utils/validation-schemas");
 const n8n_validation_1 = require("./n8n-validation");
 const node_groups_1 = require("./node-groups");
 const n8n_version_1 = require("./n8n-version");
+const DEFAULT_MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+let warnedMaxResponseSize;
+function getMaxResponseBytes() {
+    const raw = process.env.N8N_MCP_MAX_RESPONSE_SIZE;
+    if (raw === undefined || raw.trim() === '')
+        return DEFAULT_MAX_RESPONSE_BYTES;
+    const configured = Number(raw);
+    if (Number.isSafeInteger(configured) && configured > 0)
+        return configured;
+    if (raw !== warnedMaxResponseSize) {
+        warnedMaxResponseSize = raw;
+        logger_1.logger.warn(`Ignoring N8N_MCP_MAX_RESPONSE_SIZE="${raw.slice(0, 40)}": expected a positive whole number of bytes; using ${DEFAULT_MAX_RESPONSE_BYTES}`);
+    }
+    return DEFAULT_MAX_RESPONSE_BYTES;
+}
+function responseSizeLimits() {
+    const limit = getMaxResponseBytes();
+    return { maxContentLength: limit, maxBodyLength: limit };
+}
+exports.SIZE_LIMIT_HINT = 'Set N8N_MCP_MAX_RESPONSE_SIZE (bytes) to change the limit.';
+function sizeLimitMb(maxBytes) {
+    return Math.round((maxBytes / (1024 * 1024)) * 10) / 10;
+}
+function describeSizeLimitError(error) {
+    const candidate = error;
+    const message = candidate?.message;
+    if (candidate?.isAxiosError !== true || typeof message !== 'string')
+        return null;
+    const limitMb = sizeLimitMb(getMaxResponseBytes());
+    if (message.startsWith('maxContentLength size of')) {
+        return `The n8n response exceeded the ${limitMb} MB size limit and was discarded. ${exports.SIZE_LIMIT_HINT}`;
+    }
+    if (message.startsWith('Request body larger than maxBodyLength')) {
+        return `The request body exceeded the ${limitMb} MB size limit and was not sent. ${exports.SIZE_LIMIT_HINT}`;
+    }
+    return null;
+}
+function sizeLimitError(error) {
+    const message = describeSizeLimitError(error);
+    return message ? new n8n_errors_1.N8nApiError(message, undefined, 'RESPONSE_TOO_LARGE') : null;
+}
 const GROUPS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas groups (added in 2.28); the workflow was saved without them.';
 const GROUP_DESCRIPTIONS_UNSUPPORTED_WARNING = 'This n8n version does not support canvas group descriptions (added in 2.32); the descriptions were not saved.';
 const settingsRejectedWarning = (keys) => `This n8n version rejects the workflow settings ${keys.join(', ')}; they were left out of the write ` +
@@ -112,6 +157,7 @@ class N8nApiClient {
             timeout,
             headers,
             maxRedirects: 0,
+            ...responseSizeLimits(),
         });
         this.client.interceptors.request.use(async (config) => {
             const agents = await this.getPinnedAgents();
@@ -131,6 +177,11 @@ class N8nApiClient {
             logger_1.logger.debug(`n8n API Response: ${response.status} ${response.config.url}`);
             return response;
         }, async (error) => {
+            const tooLarge = sizeLimitError(error);
+            if (tooLarge) {
+                (0, n8n_errors_1.logN8nError)(tooLarge, 'n8n API Response');
+                return Promise.reject(tooLarge);
+            }
             const retryAttempt = this.tryRetry(error);
             if (retryAttempt) {
                 return retryAttempt;
@@ -292,6 +343,7 @@ class N8nApiClient {
                 maxRedirects: 0,
                 httpAgent: agents.httpAgent,
                 httpsAgent: agents.httpsAgent,
+                ...responseSizeLimits(),
             });
             const versionInfo = await this.getVersion();
             if (response.status === 200 && response.data?.status === 'ok') {
@@ -736,9 +788,8 @@ class N8nApiClient {
                 method: httpMethod,
                 url: webhookPath,
                 headers: {
-                    ...headers,
+                    ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => name.trim().toLowerCase() !== 'x-n8n-api-key')),
                     ...(forwardCfHeaders ? this.cfAccessHeaders() : {}),
-                    'X-N8N-API-KEY': undefined,
                 },
                 data: httpMethod !== 'GET' ? data : undefined,
                 params: httpMethod === 'GET' ? data : undefined,
@@ -753,6 +804,7 @@ class N8nApiClient {
                 maxRedirects: 0,
                 httpAgent: pinned?.httpAgent,
                 httpsAgent: pinned?.httpsAgent,
+                ...responseSizeLimits(),
             });
             const response = await webhookClient.request(config);
             return {
@@ -763,7 +815,7 @@ class N8nApiClient {
             };
         }
         catch (error) {
-            throw (0, n8n_errors_1.handleN8nApiError)(error);
+            throw sizeLimitError(error) ?? (0, n8n_errors_1.handleN8nApiError)(error);
         }
     }
     async listCredentials(params = {}) {

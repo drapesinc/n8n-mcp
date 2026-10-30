@@ -118,7 +118,8 @@ class ExpressionValidator {
     }
     static checkNodeReferences(result, context) {
         for (const nodeName of result.usedNodes) {
-            if (!context.availableNodes.includes(nodeName)) {
+            const available = context.availableNodes;
+            if (!(Array.isArray(available) ? available.includes(nodeName) : available.has(nodeName))) {
                 result.errors.push(`Referenced node "${nodeName}" not found in workflow`);
             }
         }

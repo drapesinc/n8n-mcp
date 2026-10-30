@@ -53,6 +53,10 @@ const CLOUD_METADATA = new Set([
     'metadata',
     '100.100.100.200',
     '192.0.0.192',
+    'fd00:ec2::254',
+    'fd20:ce::254',
+    'fe80::a9fe:a9fe',
+    'fd00:a9fe:a9fe::1',
 ]);
 const LOCALHOST_PATTERNS = new Set([
     'localhost',
@@ -74,8 +78,34 @@ const PRIVATE_IP_RANGES = [
     /^(24\d|25[0-5])\./,
 ];
 class SSRFProtection {
+    static canonicalIPv6(addr) {
+        try {
+            return new url_1.URL(`http://[${addr}]/`).hostname.slice(1, -1);
+        }
+        catch {
+            return null;
+        }
+    }
+    static isCloudMetadata(host) {
+        if (CLOUD_METADATA.has(host))
+            return true;
+        if (!(0, net_1.isIPv6)(host))
+            return false;
+        const canonical = SSRFProtection.canonicalIPv6(host);
+        return canonical !== null && CLOUD_METADATA.has(canonical);
+    }
     static isLoopbackHost(host) {
         return LOCALHOST_PATTERNS.has(host) || ((0, net_1.isIPv4)(host) && host.startsWith('127.'));
+    }
+    static isLocalhostSubdomain(host) {
+        return host.endsWith('.localhost');
+    }
+    static normalizeHostname(url) {
+        let hostname = url.hostname.toLowerCase();
+        if (hostname.startsWith('[') && hostname.endsWith(']')) {
+            hostname = hostname.slice(1, -1);
+        }
+        return hostname.replace(/\.+$/, '');
     }
     static isPrivateOrMappedIpv6(hostname) {
         if (!(0, net_1.isIPv6)(hostname))
@@ -111,7 +141,7 @@ class SSRFProtection {
     static tryExtractTunneledIPv4(hostname) {
         let parsed;
         try {
-            parsed = ipaddr_js_1.default.parse(hostname);
+            parsed = ipaddr_js_1.default.parse(SSRFProtection.canonicalIPv6(hostname) ?? hostname);
         }
         catch {
             return null;
@@ -119,6 +149,10 @@ class SSRFProtection {
         if (parsed.kind() !== 'ipv6')
             return null;
         const p = parsed.parts;
+        if (p[0] === 0 && p[1] === 0 && p[2] === 0 && p[3] === 0 &&
+            ((p[4] === 0 && (p[5] === 0 || p[5] === 0xffff)) || (p[4] === 0xffff && p[5] === 0))) {
+            return SSRFProtection.hextetsToIPv4(p[6], p[7]);
+        }
         if (p[0] === 0x64 && p[1] === 0xff9b) {
             const rfc6052 = p[2] === 0 && p[3] === 0 && p[4] === 0 && p[5] === 0;
             const rfc8215 = p[2] === 0x0001 && p[3] === 0 && p[4] === 0 && p[5] === 0;
@@ -152,6 +186,8 @@ class SSRFProtection {
     static tunneledIPv6BlockReason(addr) {
         if (!(0, net_1.isIPv6)(addr))
             return null;
+        if (SSRFProtection.canonicalIPv6(addr) === null)
+            return 'IPv6 private/mapped address not allowed';
         const embedded = SSRFProtection.tryExtractTunneledIPv4(addr);
         if (embedded === 'non_canonical')
             return 'IPv6 private/mapped address not allowed';
@@ -167,11 +203,11 @@ class SSRFProtection {
             if (!['http:', 'https:'].includes(url.protocol)) {
                 return { valid: false, reason: 'Invalid protocol. Only HTTP/HTTPS allowed.' };
             }
-            let hostname = url.hostname.toLowerCase();
-            if (hostname.startsWith('[') && hostname.endsWith(']')) {
-                hostname = hostname.slice(1, -1);
+            const hostname = SSRFProtection.normalizeHostname(url);
+            if (!hostname) {
+                return { valid: false, reason: 'Invalid URL format' };
             }
-            if (CLOUD_METADATA.has(hostname)) {
+            if (SSRFProtection.isCloudMetadata(hostname)) {
                 logger_1.logger.warn('SSRF blocked: Cloud metadata endpoint', { hostname, mode });
                 return { valid: false, reason: 'Cloud metadata endpoint blocked' };
             }
@@ -219,7 +255,7 @@ class SSRFProtection {
         }
     }
     static validateResolvedAddress(hostname, resolvedIP, mode) {
-        if (CLOUD_METADATA.has(resolvedIP)) {
+        if (SSRFProtection.isCloudMetadata(resolvedIP)) {
             logger_1.logger.warn('SSRF blocked: Hostname resolves to cloud metadata IP', {
                 hostname,
                 resolvedIP,
@@ -243,7 +279,7 @@ class SSRFProtection {
         const isLocalhost = SSRFProtection.isLoopbackHost(hostname) ||
             resolvedIP === '::1' ||
             resolvedIP.startsWith('127.');
-        if (mode === 'strict' && isLocalhost) {
+        if (mode === 'strict' && (isLocalhost || SSRFProtection.isLocalhostSubdomain(hostname))) {
             logger_1.logger.warn('SSRF blocked: Localhost not allowed in strict mode', {
                 hostname,
                 resolvedIP
@@ -340,11 +376,11 @@ class SSRFProtection {
         if (url.username !== '' || url.password !== '') {
             return { valid: false, reason: 'Userinfo in URL is not allowed' };
         }
-        let hostname = url.hostname.toLowerCase();
-        if (hostname.startsWith('[') && hostname.endsWith(']')) {
-            hostname = hostname.slice(1, -1);
+        const hostname = SSRFProtection.normalizeHostname(url);
+        if (!hostname) {
+            return { valid: false, reason: 'Invalid URL format' };
         }
-        if (CLOUD_METADATA.has(hostname)) {
+        if (SSRFProtection.isCloudMetadata(hostname)) {
             return { valid: false, reason: 'Cloud metadata endpoint blocked' };
         }
         const tunneledReason = SSRFProtection.tunneledIPv6BlockReason(hostname);
@@ -355,7 +391,8 @@ class SSRFProtection {
         if (mode === 'permissive') {
             return { valid: true };
         }
-        const isLocalhost = SSRFProtection.isLoopbackHost(hostname);
+        const isLocalhost = SSRFProtection.isLoopbackHost(hostname) ||
+            SSRFProtection.isLocalhostSubdomain(hostname);
         if (mode === 'strict' && isLocalhost) {
             return { valid: false, reason: 'Localhost access is blocked in strict mode' };
         }

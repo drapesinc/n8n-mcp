@@ -7,8 +7,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.99.2] - 2026-10-27
+
+### Security
+
+- Fix hostname normalization in SSRF protection (GHSA-qm7x-j9xp-x3gv). Reported by @ccsimplyspolit.
+- Fix session isolation in multi-tenant HTTP mode and path handling in `n8n_test_workflow` (GHSA-q7jr-6fm4-vvhg). Reported by @3099404236.
+
 ### Changed
 
+- Webhook and API URLs with a trailing dot on the hostname are checked as the same host without the dot, and `*.localhost` names are treated as localhost.
+- In multi-tenant mode with the `instance` session strategy, a new session only replaces existing sessions with the same instance URL, instance ID and n8n API key. Sessions of the same instance ID with another URL or key end on their normal idle timeout.
+- `initialize` always gets a server-generated session ID. A client-supplied `mcp-session-id` header on `initialize` is ignored.
+- `n8n_test_workflow` refuses webhook, chat and form paths that do not stay under the instance's `/webhook/` or `/form/` path.
+
+## [2.99.1] - 2026-10-24
+
+### Security
+
+- Fix remaining denial of service paths in workflow validation (GHSA-xvxq-x6hr-xc2c).
+
+## [2.99.0] - 2026-10-24
+
+### Security
+
+- Fix denial of service in shared HTTP deployments through crafted tool input or n8n responses (GHSA-xvxq-x6hr-xc2c).
+- Fix credentials and personal data reaching telemetry and server logs (GHSA-rqgx-cvr7-hc6x).
+- The legacy HTTP server (`USE_FIXED_HTTP=true`) now refuses to start in production with the placeholder `AUTH_TOKEN` (GHSA-7mg3-m9wx-m555).
+- `n8n_workflow_versions` now checks that n8n accepts the API key before serving local backups (GHSA-74hp-7jv7-vx4j).
+
+### Changed
+
+- `n8n_update_partial_workflow`:
+  - Connection indexes (`sourceIndex`, `targetIndex`, `case`, `branch`, numeric `sourceOutput`, and `index` in `replaceConnections`) must be whole numbers from 0 to 1000.
+  - A request can hold at most 1000 operations.
+  - `patchNodeField` rejects regexes with a repeated group that itself contains `*`, `+` or `{n,}`. Use a simpler pattern or literal matching instead.
+  - `patchNodeField` regex matching has a time limit.
+  - The `patchNodeField` operations in one request can together grow fields by at most 512 KB beyond the replacement text they supply.
+  - Reserved keys are rejected in `updateSettings`.
+- Responses from n8n larger than 50 MB after decompression are rejected with `RESPONSE_TOO_LARGE`. Set `N8N_MCP_MAX_RESPONSE_SIZE` (bytes) to change the limit.
+- `POST /mcp` and `POST /messages` reject compressed request bodies with 415. MCP clients don't compress requests.
+- The legacy HTTP server rejects request bodies over 10 MB with 413, the same limit as the default server.
+- `Dockerfile.railway` no longer sets a placeholder `AUTH_TOKEN`. Set `AUTH_TOKEN` or `AUTH_TOKEN_FILE` in the service variables.
+- `n8n_workflow_versions` makes one n8n call per instance and API key, cached for 60 seconds, before it reads or deletes local backups. It returns `UNAUTHORIZED` when n8n rejects the key and `N8N_UNAVAILABLE` when n8n can't be reached. A key that can read a workflow but can't list workflows can still use the history of that workflow.
+- `validate_workflow` groups node-group warnings: after 5 of one kind in a group it reports one summary, and it stops at 50 node-group issues in total.
+- Resource and operation values longer than 128 characters get no similarity suggestions.
+- Telemetry redacts more values: short keys and signatures in name/value parameters, secrets inside JSON-string parameters, and personal data in node names. JSON-string parameters are parsed and written back, so compact JSON loses its spacing in telemetry.
+
+## [2.98.1] - 2026-10-24
+
+### Security
+
+- Fix prototype pollution in the workflow auto-fixer and in connection handling for partial workflow updates (GHSA-ppgm-m8rg-4wqv). Reported by Zachariah Mithani (@zachariah-mithani, AploSec).
+- `n8n_update_partial_workflow` now rejects the node names `__proto__`, `constructor` and `prototype`, and connection types with those names.
+
+## [2.98.0] - 2026-10-24
+
+### Added
+
+- **`validate_workflow` names the native node for short Code nodes that don't need code.** A JavaScript Code node of up to 20 lines that only builds or renames fields, collects item values into a list, turns a list field into items, filters or sorts items, removes duplicates, totals a field, or makes one HTTP request now gets a `NATIVE_ALTERNATIVE` warning under the `ai-friendly` and `strict` profiles, and a suggestion under the default `runtime` profile. The message names Edit Fields (Set), Aggregate, Split Out, Filter, Sort, Remove Duplicates, Summarize or HTTP Request. When the native node matches the code only for some data, which the code doesn't show, the message says so: "If the field holds numbers, the Summarize node … does this without code." This applies to Sort and Summarize (numbers) and to Remove Duplicates (fields that hold text or numbers). When the Code node runs once for all items and returns one result, the message says to turn on the node's "Execute Once" setting; code that reads input items past the first gets no such suggestion, because a node set to execute once only receives the first item. The code is parsed (with `acorn`), and anything that may need code is left alone: loops, branching, parsing, libraries, workflow static data, binary data, error handling, returns that change the number of items, another node's items, conditions that read other data, computed values where a node copies fields, outputs linked to chosen inputs (`pairedItem`), calls outside a short list of formatting and item-reading functions, computed keys and reused intermediate values. A node whose notes start with `Why Code:` is skipped. The server instructions and the `tools_documentation` overview now tell agents to add that note when a Code node is the right choice. The `minimal` profile and `validate_node` are unchanged. On the 2,352 bundled templates the check flags 151 of 2,932 JavaScript Code nodes. Labels written by a model against a fixed rubric found no wrong suggestion among them; those labels were used to tune the rules. On a separate sample of 100 flagged Code nodes from anonymous telemetry, labelled after the rules were frozen, precision is 97% (86 of 89 still flagged; the review fixes that followed only removed flags). (#1193)
+- **HTTP Request nodes signed with a native node's credential get a hint.** Under `ai-friendly` and `strict`, an HTTP Request node whose predefined credential type belongs to one to three native action nodes gets a suggestion such as "Use the Notion node unless it lacks this operation." Generic credential types (header, bearer, basic, OAuth) are left out, and so are the credentials of AI model providers such as OpenAI, Google Gemini and Mistral, whose nodes cover a small part of the provider's API. It fires on 174 HTTP Request nodes in the bundled templates. Hidden legacy vector-store insert nodes are not offered as alternatives. (#1193)
+
+### Changed
+
+- `acorn` is now a direct dependency; it was already installed through other packages. The Docker images install it.
+
+## [2.97.0] - 2026-10-24
+
+### Added
+
+- **Node-selection guidance at initialize.** The server now sends an MCP `instructions` string: use the service's own node first, then a native node (Edit Fields, Filter, IF, Switch, Merge, Aggregate, Summarize, Remove Duplicates, Sort, Limit, Split Out, Date & Time, Compare Datasets), then a short expression in that node, and a Code node only for loops or recursion that per-item execution and Loop Over Items cannot express, state across runs, parsing no node handles, external libraries, heavy all-items work on queue-mode workers, or one short Code node that replaces four or more glue nodes. An expression with a function body or several statements counts as code. Clients that support `instructions` add the text to the model's context. The same steps now open the `tools_documentation` overview, which still points to the Code node guides. (#1193)
+- **`tools_documentation({topic: "expression_helpers"})`.** A reference for the helper methods n8n adds to values in expressions, such as `pluck()`, `sum()`, `unique()`, `extractEmail()`, `toDateTime()`, `diffTo()` and `$ifEmpty()`, with the jobs across items that belong in a node instead. A unit test checks every listed helper and runs every example against the bundled n8n-workflow, so a change in n8n fails the test. (#1193)
+
+### Changed
+
+- **`get_node` standard detail shows more of each node's settings.** Properties are resolved for the node's current typeVersion first, so settings of older versions no longer appear: Webhook 2.2 listed the v1 `responseCode`, and Set listed fields of v3.0–3.2. The settings inside a collection or fixedCollection are listed with a one-line description that also names their fields one level down and the allowed values of option fields: HTTP Request's `options.pagination` names `paginationMode` and `completeExpression`, and `options.response` names `neverError`. A node that declares one `options` collection per operation or mode gets one merged list, in which each setting says when it applies (`Only when operation=formatDate.`); a setting that is defined differently per condition or operation, such as OpenAI's image `size` per model or Date & Time's `timezone`, is listed once per definition. Conditions are written out, including exclusions and operators (`Only when not joinMode=keepMatches.`, `Only when queryReplacement is set.`). Nodes without a `resource` selector now list their `options` collection. Curated lists that named fields missing at the current version were corrected: IF (`combineOperation`), Merge (the v1 `propertyName1`/`propertyName2`; it now lists `combineBy`, `fieldsToMatchString` and `numberInputs`), Postgres, MySQL, Google Sheets, OpenAI, FTP, Execute Command, and Send Email, which was listed under `nodes-base.email`, a type that does not exist. A list cut at 25 settings says so and names the tools that show the rest. Of 85 lesser-known settings that replace common Code patterns, standard detail now shows 78 (46 before). Across the 841 core nodes, standard output grew by a median of 0% and by 34% at the 90th percentile; HTTP Request went from 2.9 to 5.5 KB, Merge from 1.7 to 5.1 KB and Webhook from 2.3 to 4.6 KB. Community nodes are unchanged. (#1193)
+- **`search_nodes` lists the core node first for generic data-shaping queries.** A query that is only a phrase such as "deduplicate", "group by", "flatten array", "rename fields", "compare lists", "join two lists" or "format date" (question words such as "how to" are ignored) lists Remove Duplicates, Summarize, Split Out, Edit Fields, Compare Datasets, Merge, Date & Time, Aggregate, Sort, Filter or Limit first. Before, "group by" and "flatten" did not return Summarize or Split Out at all, and "deduplicate" listed a community node first. This also works without FTS5, as with the sql.js fallback. A query with any other word, such as a service name in "hubspot deduplicate contacts", is ranked as before, and searches with `source: "community"` or `"verified"` are unaffected. The `search_nodes` description no longer says that Code is prioritised in results; no such ranking existed. (#1193)
+- **`validate_workflow` no longer suggests a Code node for nodes with many expressions.** Any node with more than five `{{` got "Consider using a Code node for complex data transformations instead of multiple expressions" under every profile, `minimal` included. It fired on 570 of the 2,352 bundled templates (24%), on an Edit Fields node in 147 of them. (#1193)
+- Template search for the `data_transformation` task and the `transform` node alias lists native transform nodes first and now also matches Aggregate, Summarize, Filter and Split Out templates; `transform` no longer matches Loop Over Items. `data_transformation` matches 1,729 bundled templates (1,665 before). (#1193)
+
+### Removed
+
+- `src/services/example-generator.ts` and `src/services/task-templates.ts` (deprecated since 2.15.0), with their tests and two scripts that used them. No tool served their examples, most of which were Code nodes. `get_node` and `search_nodes` examples come from the template database and are unchanged. (#1193)
+
+## [2.96.2] - 2026-10-23
+
+### Changed
+
+- **Minimum Node.js version follows the October 2026 Node.js security release.** `engines` in the published package now requires Node `^22.23.4 || ^24.22.1 || >=26.12.1`; Node 20 is end-of-life and no longer in the supported range. npm only warns on a mismatch unless `engine-strict` is set. The MCPB manifest requires Node `>=22.12.0`, since hosts enforce that check.
+- **Docker images use a pinned, patched base.** All Dockerfiles build from `node:22.23.4-alpine` instead of the floating `node:22-alpine` tag, so Dependabot can propose base-image updates, and `latest` is rebuilt weekly to pick up base-image patches between releases. To check an older image: `docker run --rm --entrypoint node <image> --version`.
+- CI and release jobs run on Node 22 instead of Node 20.
+
+## [2.96.1] - 2026-10-22
+
+### Fixed
+
+- **`MCP_AUTH_TOKEN` is no longer described as a server setting.** The n8n deployment guide (`docs/N8N_DEPLOYMENT.md`) said to set `MCP_AUTH_TOKEN` on the server with the same value as `AUTH_TOKEN`. The server authenticates with `AUTH_TOKEN` (or `AUTH_TOKEN_FILE`) only; `MCP_AUTH_TOKEN` is read by the `scripts/mcp-http-client.js` bridge on the client side. The guide now uses `AUTH_TOKEN` throughout, and `docs/README_CLAUDE_SETUP.md` explains which side reads which variable.
+- **`n8n_health_check` diagnostic mode reports HTTP auth and port correctly.** `modeSpecificDebug.authTokenConfigured` counted `MCP_AUTH_TOKEN` and ignored `AUTH_TOKEN_FILE`; it now checks `AUTH_TOKEN` or `AUTH_TOKEN_FILE`. `modeSpecificDebug.port` preferred `MCP_PORT`, which the server does not read; it now uses `PORT`.
+
+### Removed
+
+- `scripts/deploy-to-vm.sh` and `tests/test-mcp-server-extraction.js`, two scripts from June 2025 that nothing referenced. They relied on the server-side `MCP_AUTH_TOKEN`, `MCP_SERVER_PORT` and `MCP_SERVER_HOST`, which the server does not read. `docker-compose.n8n.yml` no longer passes the unused `MCP_AUTH_TOKEN` into the container; its `.env` key of that name still sets `AUTH_TOKEN`.
+
+## [2.96.0] - 2026-10-22
+
+### Added
+
+- **`N8N_MCP_VERSION_CHECK_DISABLED` turns off the npm version check.** `n8n_health_check` asks `registry.npmjs.org` for the latest n8n-mcp version in both status and diagnostic mode. With telemetry off, that was the only outbound request n8n-mcp made, and it had no setting to turn it off. Setting the variable to `true` or `1` skips the request. The setting is read on every call, and an unrecognised value is logged as a warning once. (#1146)
+
+### Fixed
+
+- **The health check no longer reports `upToDate: true` when it could not check.** When the npm registry was unreachable or returned an error, `versionCheck.upToDate` (status mode) and `versionInfo.upToDate` (diagnostic mode) were `true`, and the failure was cached for an hour like a successful check. `upToDate` is now `null` when the check failed or is disabled, and a new `checkStatus` field says which case applies (`ok`, `failed` or `disabled`). A failed check is cached for 5 minutes, a successful one still for an hour. Clients that test `!upToDate` should test `upToDate === false`. The `health_check_completed` and `diagnostic_completed` telemetry events send the same `null` and a new `versionCheckStatus` property, so a failed check is no longer counted as up to date. (#1146)
+- **`n8n_executions` error mode no longer reports an error for an execution that has none.** For an execution without a top-level error or a node error, such as a successful one, `mode: "error"` named the last executed node as failing with "Unknown error". It now omits `errorInfo` and returns `errorInfoNote`, which says whether the execution succeeded, is still waiting or running, or ended without recorded error details. If n8n records a node error on an execution that succeeded, the analysis is still returned, with a note that the error did not stop the workflow. A node set to continue on error usually records no node error, so such an execution reports that it succeeded. When n8n records only node-level errors, the analysis now names the node that holds the error instead of the last executed node. (#1065)
+
+### Changed
+
+- **Environment variable documentation.** `docs/SECURITY_HARDENING.md` now lists `AUTH_TOKEN_FILE`, `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW`, `TRUST_PROXY`, `CORS_ORIGIN`, `N8N_MCP_MAX_SESSIONS` / `SESSION_TIMEOUT_MINUTES`, `DISABLED_TOOL_OPERATIONS`, `N8N_MCP_TELEMETRY_DISABLED` and `WORKFLOW_VERSION_RETENTION_DAYS`. `docs/HTTP_DEPLOYMENT.md` adds the rate-limit and session variables. `.env.example` adds `AUTH_TOKEN_FILE`, the session limits, `N8N_MCP_ACCESS_TOKEN`, `N8N_MCP_TELEMETRY_DISABLED` and `WORKFLOW_VERSION_RETENTION_DAYS`, and uses `LOG_LEVEL` instead of `MCP_LOG_LEVEL`, which the server does not read. Variables that nothing reads were removed from `.env.example`, `.env.docker` and the Docker Compose files: `REBUILD_ON_START`, `MCP_SERVER_PORT`, `MCP_SERVER_HOST`, `MCP_AUTH_TOKEN`, `METADATA_GENERATION_ENABLED`, `HTTP_PORT`, `HTTPS_PORT` and `USE_NGINX`.
+
+## [2.95.0] - 2026-10-21
+
+### Added
+
+- **Deprecated nodes are flagged.** n8n now refuses to save a workflow that adds a node whose description is marked `deprecated`, or changes one in any way other than moving it, including turning it on or off (n8n 2.44, also backported to 2.42.x and 2.43.x patch releases; `N8N_DEPRECATED_NODES_BLOCK` turns it off). Unchanged existing nodes keep running and can be deleted. Today this covers Function, Function Item and LangChain Code. The node database records the deprecated typeVersions of each node in a new `deprecated_versions` column (`["*"]` for a node that is not versioned, whose one description n8n uses for any typeVersion). A database built before this version gets the column on its next rebuild or `fetch:community`; until then it reports no deprecated nodes. `validate_workflow` reports such a node, disabled or not, as a warning with `code: "DEPRECATED_NODE"`, also under the `minimal` profile. Its responses, and those of `n8n_validate_workflow`, now include the `code` of each error and warning that has one. It is a warning because the validator cannot tell an added or edited node from an untouched one. `validate_node` reports it as an error, because it checks a configuration that is about to be saved. Both name the replacement where one exists (the Code node for Function and Function Item). `get_node` adds a `deprecation` object, and `search_nodes` marks the results with `deprecated: true`. Before this change, nothing warned about these nodes before n8n's 400 error.
+
+### Changed
+
+- **Updated n8n to 2.44.x.** n8n-nodes-base, n8n-core and @n8n/n8n-nodes-langchain 2.43.3 → 2.44.3, n8n-workflow 2.43.3 → 2.44.2. Rebuilt the node database: 3,143 nodes (841 core: 708 from n8n-nodes-base, 133 from @n8n/n8n-nodes-langchain; 2,302 community, 1,879 verified). New core node: Databricks AI Agent. New node versions: IF 2.4, Filter 2.4 and Switch 3.5 use filter version 4, which applies the regex `i` flag when "Ignore Case" is on instead of lowercasing the input; Extract From File is at 1.2. `node_versions` has 651 rows (646 before). The community node refresh saved 145 node rows from 66 npm packages and removed 2 rows that their packages no longer declare. 2,289 of 2,302 community nodes have an AI summary; the other 13 come from packages without a README. The database is 67.3 MiB.
+- **n8n 2.44 contract check.** Workflow settings are unchanged (`check-settings-drift.ts` reports no drift for 2.44.5). In the Public API, `active` is marked deprecated in favour of `activeVersionId`, which is read-only in request bodies. Several path parameters were renamed without changing the URLs. A pagination `limit` that is omitted or 0 now means 100, and a negative one returns 400. Every tool sends a limit of at least 1. n8n's MCP server defines the same tools as in 2.43. n8n Agents accept a new `google-vertex` model provider (`googleVertexAiApi` credentials), and model names may contain `@`. The provider is added to `AGENT_MODEL_PROVIDER_CREDENTIAL_TYPES`, so `n8n_manage_agents` lists `googleVertexAiApi` among the credential types it suggests. Workflow create, update, activation and deletion, executions, credentials, tags, data tables and folders were checked against an n8n 2.44.5 instance. The instance rejected a workflow update that added a Function node with the 400 described above.
+- **Dependency updates.** Patch and minor updates from the open Dependabot pull requests: `express` 5.3.0, `sql.js` 1.15.1, `langsmith` 0.11.0, `tedious` 20.3.8, the AWS SDK clients, `rollup` 4.64.12 and `@babel/types` 7.29.8, plus `@playwright/test` and `@testing-library/user-event` in the UI apps. `@axe-core/playwright` stays at 4.13.0, because 4.14.0 requires Node 22.12 and the UI apps still support Node 20. Dependabot's `@anthropic-ai/sdk` 0.115.0 → 0.27.3 is a downgrade and was left out. The major updates (`vitest` 5, `@vitest/coverage-v8` 5, `secretlint` 13, `@modelcontextprotocol/ext-apps` 2) are not included.
+
+## [2.94.3] - 2026-10-18
+
+### Security
+
+- Remove more free-text fields from workflow telemetry: sticky-note text in workflows and in the recorded workflow operations, node notes and operation descriptions in the recorded operations, and node group descriptions in both the operations and the workflow snapshots. Follow-up to GHSA-gg57-wj7g-vfrv.
+
+## [2.94.2] - 2026-10-18
+
+### Security
+
+- Fix sensitive data in workflow telemetry (GHSA-gg57-wj7g-vfrv). Reported by @avrlab233. Node notes and workflow descriptions are no longer included in telemetry.
+
+## [2.94.1] - 2026-10-18
+
+### Security
+
+- Fix cloud metadata blocking for IPv6 addresses in the URL validator (GHSA-xf82-4743-c4gm). Reported by @Mirr2.
+
+## [2.94.0] - 2026-10-15
+
+### Added
+
+- **Per-call instance targeting for embedders.** An embedder that routes one credential to several n8n instances can set the new `InstanceContext.instanceArgument: true`. With it set, every management tool (`n8n_*`) advertises an optional `instance` string argument: the name of the n8n instance that one call should target. The server does not route on it. The embedder reads it from the request and routes the call itself. The server drops the argument before running the tool, so tool handlers never see it. Documentation tools and tools registered through `additionalTools` are unchanged. Unset or `false` leaves every tool schema unchanged. A non-boolean value makes `validateInstanceContext` reject the context. A host that cached the tool list sees the argument only after it fetches the list again.
+
+## [2.93.0] - 2026-10-14
+
+### Changed
+
+- **Updated n8n to 2.43.x.** n8n-nodes-base, n8n-core and @n8n/n8n-nodes-langchain 2.41.4 → 2.43.3, n8n-workflow 2.41.2 → 2.43.3. Rebuilt the node database: 3,135 nodes (840 core: 708 from n8n-nodes-base, 132 from @n8n/n8n-nodes-langchain; 2,295 community, 1,878 verified). New core nodes: Microsoft SharePoint Trigger and Databricks Vector Store. New node versions: Webhook 2.2, Execute Workflow Trigger 1.3 and Split Out 1.1 have the same parameters as their previous versions; Brevo (`sendInBlue`) 1.1 renames the misspelled `receipients` parameters to `recipients`; the Azure OpenAI Chat Model, now named Azure AI Foundry Chat Model, selects the model through a resource locator in version 1.1 and adds a Responses API switch. `node_versions` has 646 rows (634 before). The community node refresh added 184 community nodes: 148 from the verified catalogue and 36 from the npm search, which saved 143 node rows from 66 packages. It removed 2 rows that their packages no longer declare. 2,282 of 2,295 community nodes have an AI summary; the other 13 come from packages without a README. The database is 70.8 MiB.
+- **n8n 2.43 contract check.** Workflow settings are unchanged (`check-settings-drift.ts` reports no drift for 2.43.5). The workflow create body now accepts an optional `description`, like the update body already did; the node schema gains an optional `extendsCredential`, and credentials gain an optional `description`. No tool sends any of the three yet: `n8n_create_workflow` has no `description` input and drops one if given. Among the endpoints n8n-mcp uses, the data table, folder and audit endpoints moved to strict request schemas. For n8n-mcp's requests this means: the data table column name rule (`^[a-zA-Z][a-zA-Z0-9_]*$`, at most 63 characters) now also applies to columns given when creating a table and to column names in row filters, data table IDs are 16 alphanumeric characters, and folder names are at most 128 characters. An n8n 2.43.5 instance also rejects folder names containing `[ ] ^ \ / : * ? " < > |`. A request that breaks these rules gets a 400, and the tools return n8n's message. Creating a table no longer accepts the `json` column type, which `n8n_manage_datatable` never offered; the filter conditions are unchanged. The evaluation run endpoints renamed their path parameter without changing the URL. n8n's MCP server exposes the same 54 tools. `update_agent_integration` no longer requires `credentialId`: a Slack connect without one starts n8n's managed setup, and the follow-up call passes `managerCredentialId` and `workspaceId`. `n8n_manage_agents` passes arguments through unchanged, so no code change was needed; its `tools_documentation` entry now describes the flow. The agent model providers are unchanged. Workflows, data tables, folders, credentials, executions, tags, evaluation runs and the audit were checked against an n8n 2.43.5 instance.
+- **Dependency updates.** `undici` ^6.28.0 → ^6.29.0 and `axios` ^1.7.7 → ^1.20.0 in the published package (`package.runtime.json`; the root development dependency was ^1.18.1), fixing the advisories reported against the server's own copies of both. `n8n-workflow` still pins `axios` 1.18.0 exactly, so that copy stays until n8n updates it. The lockfile also moves `proxy-addr` to 2.0.8, `body-parser` to 2.3.0, `qs` to 6.16.0, `hono` to 4.13.13, `@hono/node-server` to 1.19.17, `fast-uri` to 3.1.8 and `ip-address` to 10.7.4 (reached through `express` and `@modelcontextprotocol/sdk`), plus patch and minor updates to development dependencies and the n8n dependency tree. Apart from `n8n-workflow`, that tree is used only to build the node database; the advisories on packages that n8n pins to an exact version (`simple-git`, `tar`, `adm-zip`, `nodemailer` and others) stay open until n8n updates them. The UI apps update React, Vite and their test tooling.
 - **Docker build stages run on the build host's platform.** The UI and TypeScript build stages of the main image now use `--platform=$BUILDPLATFORM`, so a multi-platform build no longer runs `npm` under emulation for them. Their output is HTML and JavaScript and does not depend on the target platform. The Docker build jobs in CI also have a time limit.
 
 ## [2.92.1] - 2026-10-06

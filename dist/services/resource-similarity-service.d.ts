@@ -9,6 +9,10 @@ export declare class ResourceSimilarityService {
     private static readonly CACHE_DURATION_MS;
     private static readonly MIN_CONFIDENCE;
     private static readonly MAX_SUGGESTIONS;
+    private static readonly MAX_NAME_LENGTH;
+    private static readonly MAX_CACHE_KEY_LENGTH;
+    private static readonly MAX_RESOURCE_CACHE_ENTRIES;
+    private static readonly MAX_SUGGESTION_CACHE_ENTRIES;
     private static readonly CONFIDENCE_THRESHOLDS;
     private repository;
     private resourceCache;
@@ -16,6 +20,7 @@ export declare class ResourceSimilarityService {
     private commonPatterns;
     constructor(repository: NodeRepository);
     private cleanupExpiredEntries;
+    private static setBounded;
     private initializeCommonPatterns;
     findSimilarResources(nodeType: string, invalidResource: string, maxSuggestions?: number): ResourceSuggestion[];
     private getResourceValue;

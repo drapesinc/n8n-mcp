@@ -1089,6 +1089,7 @@ async function handleValidateWorkflow(args, repository, context) {
                 node: e.nodeName || 'workflow',
                 nodeName: e.nodeName,
                 message: e.message,
+                ...(e.code ? { code: e.code } : {}),
                 details: e.details
             }));
         }
@@ -1097,6 +1098,7 @@ async function handleValidateWorkflow(args, repository, context) {
                 node: w.nodeName || 'workflow',
                 nodeName: w.nodeName,
                 message: w.message,
+                ...(w.code ? { code: w.code } : {}),
                 details: w.details
             }));
         }
@@ -1900,7 +1902,8 @@ async function handleHealthCheck(context) {
             versionCheck: {
                 current: versionCheck.currentVersion,
                 latest: versionCheck.latestVersion,
-                upToDate: !versionCheck.isOutdated,
+                upToDate: (0, npm_version_checker_1.getUpToDate)(versionCheck),
+                checkStatus: versionCheck.status,
                 message: (0, npm_version_checker_1.formatVersionMessage)(versionCheck),
                 ...(versionCheck.updateCommand ? { updateCommand: versionCheck.updateCommand } : {})
             },
@@ -1925,7 +1928,8 @@ async function handleHealthCheck(context) {
         telemetry_1.telemetry.trackEvent('health_check_completed', {
             success: true,
             responseTimeMs: responseTime,
-            upToDate: !versionCheck.isOutdated,
+            upToDate: (0, npm_version_checker_1.getUpToDate)(versionCheck),
+            versionCheckStatus: versionCheck.status,
             apiConnected: true
         });
         return {
@@ -1984,18 +1988,18 @@ function detectCloudPlatform() {
 }
 function getModeSpecificDebug(mcpMode) {
     if (mcpMode === 'http') {
-        const port = process.env.MCP_PORT || process.env.PORT || 3000;
+        const port = process.env.PORT || 3000;
         return {
             mode: 'HTTP Server',
             port,
-            authTokenConfigured: !!(process.env.MCP_AUTH_TOKEN || process.env.AUTH_TOKEN),
+            authTokenConfigured: !!(process.env.AUTH_TOKEN || process.env.AUTH_TOKEN_FILE),
             corsEnabled: true,
             serverUrl: `http://localhost:${port}`,
             healthCheckUrl: `http://localhost:${port}/health`,
             troubleshooting: [
                 `1. Test server health: curl http://localhost:${port}/health`,
                 '2. Check browser console for CORS errors',
-                '3. Verify MCP_AUTH_TOKEN or AUTH_TOKEN if authentication enabled',
+                '3. Verify the client sends the server\'s AUTH_TOKEN as its bearer token',
                 `4. Ensure port ${port} is not in use: lsof -i :${port} (macOS/Linux) or netstat -ano | findstr :${port} (Windows)`,
                 '5. Check firewall settings for port access',
                 '6. Review server logs for connection errors'
@@ -2198,7 +2202,8 @@ async function handleDiagnostic(request, context) {
         versionInfo: {
             current: versionCheck.currentVersion,
             latest: versionCheck.latestVersion,
-            upToDate: !versionCheck.isOutdated,
+            upToDate: (0, npm_version_checker_1.getUpToDate)(versionCheck),
+            checkStatus: versionCheck.status,
             message: (0, npm_version_checker_1.formatVersionMessage)(versionCheck),
             ...(versionCheck.updateCommand ? { updateCommand: versionCheck.updateCommand } : {})
         },
@@ -2364,7 +2369,8 @@ async function handleDiagnostic(request, context) {
         apiConnected: apiStatus.connected,
         toolsAvailable: totalTools,
         responseTimeMs: responseTime,
-        upToDate: !versionCheck.isOutdated,
+        upToDate: (0, npm_version_checker_1.getUpToDate)(versionCheck),
+        versionCheckStatus: versionCheck.status,
         verbose
     });
     return {
@@ -2477,9 +2483,81 @@ async function handleNativeWorkflowVersions(input, context) {
     }
     return labelled;
 }
+const KEY_CHECK_TTL_MS = 60000;
+const KEY_CHECK_MAX_ENTRIES = 1000;
+const acceptedKeyScopes = new Map();
+async function checkScopeKeyAccepted(scopeId, client, workflowId) {
+    if (!client) {
+        return {
+            success: false,
+            code: 'NOT_CONFIGURED',
+            error: 'n8n API not configured for this context, so local version history is not available. Provide the n8n API URL and key for this instance.'
+        };
+    }
+    const now = Date.now();
+    const expiresAt = acceptedKeyScopes.get(scopeId);
+    if (expiresAt !== undefined && expiresAt > now) {
+        return null;
+    }
+    acceptedKeyScopes.delete(scopeId);
+    const unauthorized = {
+        success: false,
+        code: 'UNAUTHORIZED',
+        error: 'n8n did not accept this API key, so local version history is not available. Check that the key is valid and can read workflows on this n8n instance, then try again.'
+    };
+    const unavailable = {
+        success: false,
+        code: 'N8N_UNAVAILABLE',
+        error: 'n8n could not be reached to confirm this API key, so local version history is unavailable until it is. Check that n8n is running and reachable, then try again.'
+    };
+    const statusOf = (error) => (error instanceof n8n_errors_1.N8nApiError ? error.statusCode : undefined);
+    try {
+        await client.listWorkflows({ limit: 1 });
+    }
+    catch (error) {
+        const status = statusOf(error);
+        if (status === 401)
+            return unauthorized;
+        if (status !== 403)
+            return unavailable;
+        if (!workflowId)
+            return unauthorized;
+        try {
+            await client.getWorkflow(workflowId);
+            return null;
+        }
+        catch (fallbackError) {
+            const fallbackStatus = statusOf(fallbackError);
+            return fallbackStatus !== undefined && fallbackStatus < 500 && fallbackStatus !== 429
+                ? unauthorized
+                : unavailable;
+        }
+    }
+    if (acceptedKeyScopes.size >= KEY_CHECK_MAX_ENTRIES) {
+        for (const [scope, expiry] of acceptedKeyScopes) {
+            if (expiry <= now)
+                acceptedKeyScopes.delete(scope);
+        }
+        if (acceptedKeyScopes.size >= KEY_CHECK_MAX_ENTRIES) {
+            const oldest = acceptedKeyScopes.keys().next().value;
+            if (oldest !== undefined)
+                acceptedKeyScopes.delete(oldest);
+        }
+    }
+    acceptedKeyScopes.set(scopeId, now + KEY_CHECK_TTL_MS);
+    return null;
+}
 async function handleLocalWorkflowVersions(input, versionId, toVersionId, repository, context) {
     const client = getN8nApiClient(context);
-    const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, (0, instance_context_1.getInstanceScopeId)(context));
+    const scopeId = (0, instance_context_1.getInstanceScopeId)(context);
+    if (scopeId !== '') {
+        const workflowBound = input.mode === 'list' || input.mode === 'prune' || input.mode === 'diff' ||
+            input.mode === 'rollback' || (input.mode === 'delete' && input.deleteAll === true);
+        const refused = await checkScopeKeyAccepted(scopeId, client, workflowBound ? input.workflowId : undefined);
+        if (refused)
+            return refused;
+    }
+    const versioningService = new workflow_versioning_service_1.WorkflowVersioningService(repository, client || undefined, scopeId);
     switch (input.mode) {
         case 'list': {
             if (!input.workflowId) {
@@ -2530,6 +2608,16 @@ async function handleLocalWorkflowVersions(input, versionId, toVersionId, reposi
                     success: false,
                     error: 'n8n API not configured. Cannot perform rollback without API access.'
                 };
+            }
+            if (scopeId !== '' && versionId !== undefined) {
+                const target = await versioningService.getVersion(versionId);
+                if (!target || target.workflowId !== input.workflowId) {
+                    return {
+                        success: false,
+                        code: 'INVALID_ARGS',
+                        error: `Version ${versionId} not found for workflow ${input.workflowId}`
+                    };
+                }
             }
             const result = await versioningService.restoreVersion(input.workflowId, versionId, input.validateBefore);
             return {

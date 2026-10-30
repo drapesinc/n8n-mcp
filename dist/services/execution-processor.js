@@ -226,6 +226,15 @@ function truncateItems(items, limit, knownTotal) {
         },
     };
 }
+function noRecordedErrorNote(status) {
+    if (status === 'success') {
+        return 'The execution succeeded, so there is no error to analyse. Nodes that handle errors themselves may still output items with an "error" field; use mode="summary" to inspect its data.';
+    }
+    if (status === 'waiting' || status === 'running' || status === 'new') {
+        return `The execution has not finished (status "${status}"), so there is no error to analyse yet. Use mode="summary" to inspect what ran.`;
+    }
+    return `n8n recorded no error details for this execution (status "${status}"): no top-level error and no node error, or the execution data was not saved. Use mode="summary" to inspect what ran.`;
+}
 function filterExecutionData(execution, options, workflow) {
     const mode = options.mode || 'summary';
     let itemsLimit = options.itemsLimit !== undefined ? options.itemsLimit : 2;
@@ -261,15 +270,22 @@ function filterExecutionData(execution, options, workflow) {
         return response;
     }
     if (mode === 'error') {
-        const errorAnalysis = (0, error_execution_processor_1.processErrorExecution)(execution, {
-            itemsLimit: options.errorItemsLimit ?? 2,
-            includeStackTrace: options.includeStackTrace ?? false,
-            includeExecutionPath: options.includeExecutionPath !== false,
-            workflow
-        });
         const runData = execution.data?.resultData?.runData || {};
         const executedNodes = Object.keys(runData).length;
-        response.errorInfo = errorAnalysis;
+        if ((0, error_execution_processor_1.hasRecordedError)(execution)) {
+            response.errorInfo = (0, error_execution_processor_1.processErrorExecution)(execution, {
+                itemsLimit: options.errorItemsLimit ?? 2,
+                includeStackTrace: options.includeStackTrace ?? false,
+                includeExecutionPath: options.includeExecutionPath !== false,
+                workflow
+            });
+            if (execution.status === 'success') {
+                response.errorInfoNote = 'The execution succeeded, so this node error did not stop the workflow.';
+            }
+        }
+        else {
+            response.errorInfoNote = noRecordedErrorNote(execution.status);
+        }
         response.summary = {
             totalNodes: executedNodes,
             executedNodes,

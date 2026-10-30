@@ -45,5 +45,11 @@ export declare class ConfigValidator {
     private static validateJavaScriptSyntax;
     private static validatePythonSyntax;
     private static validateN8nCodePatterns;
+    private static isLineTerminator;
+    private static readonly WHITESPACE;
+    private static isWhitespace;
+    private static countQuotesInStringLiterals;
+    private static hasControlStructureWithoutColon;
+    private static hasReturnOfPlainObject;
 }
 //# sourceMappingURL=config-validator.d.ts.map

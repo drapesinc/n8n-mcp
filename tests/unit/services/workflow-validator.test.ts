@@ -453,8 +453,10 @@ describe('WorkflowValidator', () => {
 
   describe('validateAllNodes', () => {
     it('should skip disabled nodes', async () => {
-      await validator.validateWorkflow({ nodes: [{ id: '1', name: 'Webhook', type: 'n8n-nodes-base.webhook', position: [100, 100], parameters: {}, disabled: true }], connections: {} } as any);
-      expect(mockNodeRepository.getNode).not.toHaveBeenCalled();
+      const result = await validator.validateWorkflow({ nodes: [{ id: '1', name: 'Webhook', type: 'n8n-nodes-base.webhook', position: [100, 100], parameters: {}, disabled: true }], connections: {} } as any);
+      // The only lookup is the deprecated-node check, which n8n applies to disabled nodes too
+      expect(mockNodeRepository.getNode).toHaveBeenCalledTimes(1);
+      expect(result.errors.filter(e => e.nodeName === 'Webhook')).toEqual([]);
     });
 
     it('should accept both nodes-base and n8n-nodes-base prefixes', async () => {
@@ -1400,6 +1402,22 @@ describe('WorkflowValidator', () => {
       } as any);
 
       expect(result.warnings.some(w => w.code === 'group-contains-trigger')).toBe(true);
+    });
+
+    it('handles a group member listed many times', async () => {
+      vi.mocked(mockNodeRepository.getNode).mockClear();
+      const result = await validator.validateWorkflow({
+        nodes: [
+          { id: 't', name: 'Webhook', type: 'n8n-nodes-base.webhook', position: [0, 0], parameters: {}, typeVersion: 2 },
+          twoNodes[0],
+        ],
+        connections: { Webhook: { main: [[{ node: 'Set A', type: 'main', index: 0 }]] } },
+        nodeGroups: [{ id: 'g1', name: 'Everything', nodeIds: Array.from({ length: 2_000 }, () => 't') }],
+      } as any);
+
+      expect(vi.mocked(mockNodeRepository.getNode).mock.calls.length).toBeLessThan(50);
+      expect(result.warnings.filter(w => w.code === 'group-contains-trigger')).toHaveLength(1);
+      expect(result.warnings.filter(w => w.code === 'group-node-in-multiple-groups')).toHaveLength(1);
     });
 
     it('says nothing about a healthy grouping', async () => {

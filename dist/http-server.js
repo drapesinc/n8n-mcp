@@ -17,10 +17,13 @@ const n8n_api_1 = require("./config/n8n-api");
 const dotenv_1 = __importDefault(require("dotenv"));
 const fs_1 = require("fs");
 const url_detector_1 = require("./utils/url-detector");
+const native_first_1 = require("./mcp/native-first");
 const protocol_version_1 = require("./utils/protocol-version");
 dotenv_1.default.config();
 let expressServer;
 let authToken = null;
+const DEFAULT_AUTH_TOKEN = 'REPLACE_THIS_AUTH_TOKEN_32_CHARS_MIN_abcdefgh';
+const MAX_BODY_BYTES = 10 * 1024 * 1024;
 function loadAuthToken() {
     if (process.env.AUTH_TOKEN) {
         logger_1.logger.info('Using AUTH_TOKEN from environment variable');
@@ -55,7 +58,14 @@ function validateEnvironment() {
         logger_1.logger.warn('AUTH_TOKEN should be at least 32 characters for security');
         console.warn('WARNING: AUTH_TOKEN should be at least 32 characters for security');
     }
-    if (authToken === 'REPLACE_THIS_AUTH_TOKEN_32_CHARS_MIN_abcdefgh') {
+    if (authToken === DEFAULT_AUTH_TOKEN) {
+        if (process.env.NODE_ENV === 'production') {
+            const message = 'CRITICAL SECURITY ERROR: Cannot start in production with default AUTH_TOKEN. Generate secure token: openssl rand -base64 32';
+            logger_1.logger.error(message);
+            console.error(message);
+            console.error('Set NODE_ENV to development for testing, or update AUTH_TOKEN for production');
+            process.exit(1);
+        }
         logger_1.logger.warn('⚠️ SECURITY WARNING: Using default AUTH_TOKEN - CHANGE IMMEDIATELY!');
         logger_1.logger.warn('Generate secure token with: openssl rand -base64 32');
         if (process.env.MCP_MODE === 'http') {
@@ -270,12 +280,44 @@ async function startFixedHTTPServer() {
             return;
         }
         try {
-            let body = '';
-            req.on('data', chunk => {
-                body += chunk.toString();
+            const rejectTooLarge = () => {
+                res.setHeader('Connection', 'close');
+                res.on('finish', () => req.destroy());
+                res.status(413).json({
+                    jsonrpc: '2.0',
+                    error: {
+                        code: -32600,
+                        message: 'Request body too large'
+                    },
+                    id: null
+                });
+            };
+            const declaredLength = Number(req.headers['content-length']);
+            if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
+                rejectTooLarge();
+                return;
+            }
+            const chunks = [];
+            let receivedBytes = 0;
+            let tooLarge = false;
+            req.on('data', (chunk) => {
+                if (tooLarge)
+                    return;
+                receivedBytes += chunk.length;
+                if (receivedBytes > MAX_BODY_BYTES) {
+                    tooLarge = true;
+                    chunks.length = 0;
+                    req.pause();
+                    rejectTooLarge();
+                    return;
+                }
+                chunks.push(chunk);
             });
             req.on('end', async () => {
+                if (tooLarge)
+                    return;
                 try {
+                    const body = Buffer.concat(chunks).toString();
                     const jsonRpcRequest = JSON.parse(body);
                     logger_1.logger.debug('Received JSON-RPC request:', { method: jsonRpcRequest.method });
                     let response;
@@ -294,7 +336,8 @@ async function startFixedHTTPServer() {
                                     serverInfo: {
                                         name: 'n8n-documentation-mcp',
                                         version: version_1.PROJECT_VERSION
-                                    }
+                                    },
+                                    instructions: native_first_1.SERVER_INSTRUCTIONS
                                 },
                                 id: jsonRpcRequest.id
                             };
@@ -434,7 +477,7 @@ async function startFixedHTTPServer() {
         console.log(`Health check: ${endpoints.health}`);
         console.log(`MCP endpoint: ${endpoints.mcp}`);
         console.log('\nPress Ctrl+C to stop the server');
-        if (authToken === 'REPLACE_THIS_AUTH_TOKEN_32_CHARS_MIN_abcdefgh') {
+        if (authToken === DEFAULT_AUTH_TOKEN) {
             setInterval(() => {
                 logger_1.logger.warn('⚠️ Still using default AUTH_TOKEN - security risk!');
                 if (process.env.MCP_MODE === 'http') {

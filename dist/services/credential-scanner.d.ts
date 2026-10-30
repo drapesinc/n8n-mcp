@@ -3,6 +3,7 @@ export interface SecretPattern {
     label: string;
     category: string;
     severity: 'critical' | 'high' | 'medium';
+    find?: (text: string) => string | null;
 }
 export interface ScanDetection {
     label: string;

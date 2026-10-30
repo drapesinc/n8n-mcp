@@ -41,6 +41,7 @@ const zod_1 = require("zod");
 const axios_1 = __importDefault(require("axios"));
 const crypto_1 = require("crypto");
 const base_handler_1 = require("./base-handler");
+const n8n_api_client_1 = require("../../services/n8n-api-client");
 const trigger_detector_1 = require("../trigger-detector");
 const chatInputSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
@@ -79,6 +80,9 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
             else {
                 chatUrl = `${baseUrl.replace(/\/+$/, '')}/webhook/${input.workflowId}`;
             }
+            if (!this.isUnderTriggerPrefix(chatUrl, baseUrl, 'webhook')) {
+                return this.errorResponse(input, 'Invalid webhook path', startTime);
+            }
             const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('../../utils/ssrf-protection')));
             const validation = await SSRFProtection.validateWebhookUrl(chatUrl);
             if (!validation.valid) {
@@ -107,6 +111,7 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
                 maxRedirects: 0,
                 httpAgent: pinned?.httpAgent,
                 httpsAgent: pinned?.httpsAgent,
+                ...(0, n8n_api_client_1.responseSizeLimits)(),
             };
             const response = await axios_1.default.request(config);
             const chatResponse = response.data;
@@ -121,7 +126,8 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
             });
         }
         catch (error) {
-            let errorMessage = error instanceof Error ? error.message : 'Unknown error';
+            let errorMessage = (0, n8n_api_client_1.describeSizeLimitError)(error)
+                ?? (error instanceof Error ? error.message : 'Unknown error');
             if (!errorMessage) {
                 const members = error?.errors ?? error?.cause?.errors;
                 errorMessage = (Array.isArray(members)

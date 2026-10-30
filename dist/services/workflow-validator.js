@@ -19,6 +19,8 @@ const node_classification_1 = require("../utils/node-classification");
 const n8n_validation_1 = require("./n8n-validation");
 const node_groups_1 = require("./node-groups");
 const tool_variant_generator_1 = require("./tool-variant-generator");
+const deprecated_nodes_1 = require("./deprecated-nodes");
+const code_native_alternatives_1 = require("./code-native-alternatives");
 const logger = new logger_1.Logger({ prefix: '[WorkflowValidator]' });
 const ADD_ERROR_HANDLING_ADVISORY = 'Consider adding error handling to your workflow';
 exports.VALID_CONNECTION_TYPES = new Set([
@@ -30,6 +32,10 @@ exports.VALID_CONNECTION_TYPES = new Set([
     'ai_retriever',
     'ai_reranker',
 ]);
+function isGenericCredentialType(type) {
+    return type.startsWith('http') || ['oAuth1Api', 'oAuth2Api', 'jwtAuth'].includes(type);
+}
+const ACTION_NODES_BY_CREDENTIAL = new WeakMap();
 function describeValueType(value) {
     if (value === null)
         return 'null';
@@ -113,15 +119,26 @@ function collectMalformedConnectionErrors(connections) {
     }
     return errors;
 }
+const MAX_LOOP_BACK_STEPS = 1000000;
 class WorkflowValidator {
     constructor(nodeRepository, nodeValidator) {
         this.nodeRepository = nodeRepository;
         this.nodeValidator = nodeValidator;
         this.currentWorkflow = null;
+        this.loopBackReach = new Map();
+        this.loopBackSteps = 0;
+        this.loopBackIncompleteReported = false;
+        this.lowerCaseNames = new Map();
+        this.mainInputTargets = null;
         this.similarityService = new node_similarity_service_1.NodeSimilarityService(nodeRepository);
     }
     async validateWorkflow(workflow, options = {}) {
         this.currentWorkflow = workflow;
+        this.loopBackReach = new Map();
+        this.loopBackSteps = MAX_LOOP_BACK_STEPS;
+        this.loopBackIncompleteReported = false;
+        this.lowerCaseNames = new Map();
+        this.mainInputTargets = null;
         const { validateNodes = true, validateConnections = true, validateExpressions = true, profile = 'runtime' } = options;
         const result = {
             valid: true,
@@ -223,10 +240,16 @@ class WorkflowValidator {
     validateNodeGroups(workflow, result) {
         if (!Array.isArray(workflow.nodeGroups) || workflow.nodeGroups.length === 0)
             return;
+        const triggerByType = new Map();
         const issues = (0, node_groups_1.checkNodeGroups)({ nodes: workflow.nodes, nodeGroups: workflow.nodeGroups }, {
             isTrigger: node => {
-                const nodeInfo = this.nodeRepository.getNode(node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type));
-                return nodeInfo ? Boolean(nodeInfo.isTrigger) : (0, node_type_utils_1.isTriggerNode)(node.type);
+                let trigger = triggerByType.get(node.type);
+                if (trigger === undefined) {
+                    const nodeInfo = this.nodeRepository.getNode(node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type));
+                    trigger = nodeInfo ? Boolean(nodeInfo.isTrigger) : (0, node_type_utils_1.isTriggerNode)(node.type);
+                    triggerByType.set(node.type, trigger);
+                }
+                return trigger;
             }
         });
         for (const issue of issues) {
@@ -342,8 +365,35 @@ class WorkflowValidator {
             });
         }
     }
+    checkDeprecatedNode(node, nodeInfo, result) {
+        if (!nodeInfo || !(0, deprecated_nodes_1.isDeprecatedNodeVersion)(nodeInfo, node.typeVersion))
+            return;
+        result.warnings.push({
+            type: 'warning',
+            nodeId: node.id,
+            nodeName: node.name,
+            code: 'DEPRECATED_NODE',
+            message: `${(0, deprecated_nodes_1.deprecatedNodeMessage)(node.type)} ${(0, deprecated_nodes_1.deprecatedNodeReplacementHint)(nodeInfo.toolVariantOf ?? nodeInfo.nodeType)}`
+        });
+    }
     async validateAllNodes(workflow, result, profile) {
+        const reportedErrors = new Map();
+        let reportedErrorsIndexed = 0;
+        const hasReportedError = (nodeName, message) => {
+            for (; reportedErrorsIndexed < result.errors.length; reportedErrorsIndexed++) {
+                const e = result.errors[reportedErrorsIndexed];
+                let messages = reportedErrors.get(e.nodeName);
+                if (!messages) {
+                    messages = new Set();
+                    reportedErrors.set(e.nodeName, messages);
+                }
+                messages.add(e.message);
+            }
+            return reportedErrors.get(nodeName)?.has(message) ?? false;
+        };
         for (const node of workflow.nodes) {
+            const storedNodeInfo = this.nodeRepository.getNode(node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type));
+            this.checkDeprecatedNode(node, storedNodeInfo, result);
             if (node.disabled || (0, node_classification_1.isNonExecutableNode)(node.type))
                 continue;
             try {
@@ -376,7 +426,7 @@ class WorkflowValidator {
                     }
                 }
                 const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type);
-                let nodeInfo = this.nodeRepository.getNode(normalizedType);
+                let nodeInfo = storedNodeInfo;
                 if (!nodeInfo && tool_variant_generator_1.ToolVariantGenerator.isToolVariantNodeType(normalizedType)) {
                     const baseNodeType = tool_variant_generator_1.ToolVariantGenerator.getBaseNodeType(normalizedType);
                     if (baseNodeType) {
@@ -517,9 +567,11 @@ class WorkflowValidator {
                         message: typeof warning === 'string' ? warning : warning.message || String(warning)
                     });
                 });
+                this.checkNativeAlternative(node, profile, result);
+                this.checkHttpRequestCredential(node, profile, result);
                 if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.switch' || node.type === 'n8n-nodes-base.filter') {
                     for (const err of (0, n8n_validation_1.validateConditionNodeStructure)(node)) {
-                        if (result.errors.some(e => e.nodeName === node.name && e.message === err))
+                        if (hasReportedError(node.name, err))
                             continue;
                         result.errors.push({
                             type: 'error',
@@ -861,6 +913,62 @@ class WorkflowValidator {
     isAdvisoryProfile(profile) {
         return profile === 'ai-friendly' || profile === 'strict';
     }
+    checkNativeAlternative(node, profile, result) {
+        if (profile === 'minimal' || node.type !== 'n8n-nodes-base.code')
+            return;
+        const parameters = node.parameters ?? {};
+        if ((parameters.language ?? 'javaScript') !== 'javaScript')
+            return;
+        if (typeof node.notes === 'string' && /^\s*why code:/i.test(node.notes))
+            return;
+        const alternative = (0, code_native_alternatives_1.findNativeAlternative)(parameters.jsCode, parameters.mode);
+        if (!alternative)
+            return;
+        const runOnce = alternative.executeOnce || node.executeOnce === true ? ' with its "Execute Once" setting on' : '';
+        const nativeNode = `the ${alternative.node} node (${alternative.nodeType})${runOnce} does this without code.`;
+        const message = `Code node "${node.name}" only ${alternative.does}. ` +
+            (alternative.when ? `If ${alternative.when}, ${nativeNode}` : nativeNode.charAt(0).toUpperCase() + nativeNode.slice(1)) +
+            ' If this needs a Code node, start its notes with "Why Code:" and the reason.';
+        if (this.isAdvisoryProfile(profile)) {
+            result.warnings.push({ type: 'warning', nodeId: node.id, nodeName: node.name, message, code: 'NATIVE_ALTERNATIVE' });
+        }
+        else {
+            result.suggestions.push(message);
+        }
+    }
+    checkHttpRequestCredential(node, profile, result) {
+        if (!this.isAdvisoryProfile(profile) || node.type !== 'n8n-nodes-base.httpRequest')
+            return;
+        const parameters = node.parameters ?? {};
+        const credentialType = parameters.nodeCredentialType;
+        if (parameters.authentication !== 'predefinedCredentialType' || typeof credentialType !== 'string')
+            return;
+        if (isGenericCredentialType(credentialType))
+            return;
+        const nodes = this.actionNodesByCredential()?.get(credentialType);
+        if (!nodes || nodes.length === 0 || nodes.length > 3)
+            return;
+        const names = nodes.join(' or ');
+        result.suggestions.push(`HTTP Request node "${node.name}" uses the ${credentialType} credential of the ${names} node. ` +
+            `Use the ${names} node unless it lacks this operation.`);
+    }
+    actionNodesByCredential() {
+        const repository = this.nodeRepository;
+        if (typeof repository.getActionNodesByCredentialType !== 'function')
+            return undefined;
+        let map = ACTION_NODES_BY_CREDENTIAL.get(repository);
+        if (!map) {
+            try {
+                map = repository.getActionNodesByCredentialType();
+            }
+            catch (error) {
+                logger.debug('Could not build the credential map for the HTTP Request hint', error);
+                map = new Map();
+            }
+            ACTION_NODES_BY_CREDENTIAL.set(repository, map);
+        }
+        return map;
+    }
     getMainOutputCount(sourceNode) {
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
         const nodeInfo = this.nodeRepository.getNode(normalizedType);
@@ -1098,12 +1206,10 @@ class WorkflowValidator {
             this.flagOrphanedNodes(workflow, result);
             return;
         }
-        const reachable = new Set();
-        const queue = [...triggerNodes];
-        for (const t of triggerNodes)
-            reachable.add(t);
-        while (queue.length > 0) {
-            const current = queue.shift();
+        const reachable = new Set(triggerNodes);
+        const queue = [...reachable];
+        for (let head = 0; head < queue.length; head++) {
+            const current = queue[head];
             const neighbors = adjacency.get(current);
             if (neighbors) {
                 for (const neighbor of neighbors) {
@@ -1131,8 +1237,9 @@ class WorkflowValidator {
     }
     hasCycle(workflow) {
         const visited = new Set();
-        const recursionStack = new Set();
+        const pathPosition = new Map();
         const path = [];
+        const exitCounts = [0];
         const nodeTypeMap = new Map();
         const nodeMap = new Map();
         workflow.nodes.forEach(node => {
@@ -1178,9 +1285,16 @@ class WorkflowValidator {
             const outputCount = node ? this.getMainOutputCount(node) : null;
             return outputCount !== null && outputCount > 1;
         };
+        const pathFromHasExit = (start) => {
+            while (exitCounts.length <= path.length) {
+                const k = exitCounts.length - 1;
+                exitCounts.push(exitCounts[k] + (isPotentialCycleExit(path[k]) ? 1 : 0));
+            }
+            return exitCounts[path.length] > exitCounts[start];
+        };
         const hasCycleDFS = (nodeName) => {
             visited.add(nodeName);
-            recursionStack.add(nodeName);
+            pathPosition.set(nodeName, path.length);
             path.push(nodeName);
             const connections = workflow.connections[nodeName];
             if (connections) {
@@ -1198,16 +1312,17 @@ class WorkflowValidator {
                         if (hasCycleDFS(target))
                             return true;
                     }
-                    else if (recursionStack.has(target)) {
-                        const cycleNodes = path.slice(path.indexOf(target));
-                        if (!cycleNodes.some(isPotentialCycleExit)) {
+                    else if (pathPosition.has(target)) {
+                        if (!pathFromHasExit(pathPosition.get(target))) {
                             return true;
                         }
                     }
                 }
             }
-            recursionStack.delete(nodeName);
+            pathPosition.delete(nodeName);
             path.pop();
+            if (exitCounts.length > path.length + 1)
+                exitCounts.length = path.length + 1;
             return false;
         };
         for (const node of workflow.nodes) {
@@ -1219,7 +1334,7 @@ class WorkflowValidator {
         return false;
     }
     validateExpressions(workflow, result, profile = 'runtime') {
-        const nodeNames = workflow.nodes.map(n => n.name);
+        const nodeNameSet = new Set(workflow.nodes.map(n => n.name));
         for (const node of workflow.nodes) {
             if (node.disabled || (0, node_classification_1.isNonExecutableNode)(node.type))
                 continue;
@@ -1228,7 +1343,7 @@ class WorkflowValidator {
                 continue;
             }
             const context = {
-                availableNodes: nodeNames.filter(n => n !== node.name),
+                availableNodes: { has: (name) => name !== node.name && nodeNameSet.has(name) },
                 currentNodeName: node.name,
                 hasInputData: this.nodeHasInput(node.name, workflow),
                 isInLoop: false
@@ -1297,16 +1412,18 @@ class WorkflowValidator {
         return count;
     }
     nodeHasInput(nodeName, workflow) {
-        for (const [sourceName, outputs] of Object.entries(workflow.connections)) {
-            if (outputs.main) {
-                for (const outputConnections of outputs.main) {
-                    if (outputConnections?.some(conn => conn.node === nodeName)) {
-                        return true;
+        if (this.mainInputTargets?.workflow !== workflow) {
+            const targets = new Set();
+            for (const outputs of Object.values(workflow.connections)) {
+                if (outputs.main) {
+                    for (const outputConnections of outputs.main) {
+                        outputConnections?.forEach(conn => targets.add(conn.node));
                     }
                 }
             }
+            this.mainInputTargets = { workflow, targets };
         }
-        return false;
+        return this.mainInputTargets.targets.has(nodeName);
     }
     checkWorkflowPatterns(workflow, result, profile = 'runtime') {
         const advisoryProfile = this.isAdvisoryProfile(profile);
@@ -1344,6 +1461,7 @@ class WorkflowValidator {
         }
     }
     workflowHasErrorHandling(workflow) {
+        const hasWiredMainOutput = new Map();
         return workflow.nodes.some(node => {
             if (node.disabled)
                 return false;
@@ -1360,7 +1478,12 @@ class WorkflowValidator {
                 return false;
             const errorOutputIndex = this.getMainOutputCount(node);
             if (errorOutputIndex === null) {
-                return mainOutputs.some(conns => Array.isArray(conns) && conns.length > 0);
+                let wired = hasWiredMainOutput.get(node.name);
+                if (wired === undefined) {
+                    wired = mainOutputs.some(conns => Array.isArray(conns) && conns.length > 0);
+                    hasWiredMainOutput.set(node.name, wired);
+                }
+                return wired;
             }
             const errorConnections = mainOutputs[errorOutputIndex];
             return Array.isArray(errorConnections) && errorConnections.length > 0;
@@ -1433,14 +1556,6 @@ class WorkflowValidator {
         }
         if (workflow.nodes.length > 20) {
             result.suggestions.push('Consider breaking this workflow into smaller sub-workflows for better maintainability');
-        }
-        const complexExpressionNodes = workflow.nodes.filter(node => {
-            const jsonString = JSON.stringify(node.parameters);
-            const expressionCount = (jsonString.match(/\{\{/g) || []).length;
-            return expressionCount > 5;
-        });
-        if (complexExpressionNodes.length > 0) {
-            result.suggestions.push('Consider using a Code node for complex data transformations instead of multiple expressions');
         }
         if (workflow.nodes.length === 1 && Object.keys(workflow.connections).length === 0) {
             result.suggestions.push('A minimal workflow needs: 1) A trigger node (e.g., Manual Trigger), 2) An action node (e.g., Set, HTTP Request), 3) A connection between them');
@@ -1715,13 +1830,20 @@ class WorkflowValidator {
             result.suggestions.push('Replace "continueOnFail: true" with "onError: \'continueRegularOutput\'" for better UI compatibility and control.');
         }
     }
+    lowerCaseNodeNames(node) {
+        let names = this.lowerCaseNames.get(node);
+        if (!names) {
+            names = { type: node.type.toLowerCase(), name: node.name.toLowerCase() };
+            this.lowerCaseNames.set(node, names);
+        }
+        return names;
+    }
     validateSplitInBatchesConnection(sourceNode, outputIndex, connection, nodeMap, result) {
         const targetNode = nodeMap.get(connection.node);
         if (!targetNode)
             return;
         if (outputIndex === 0) {
-            const targetType = targetNode.type.toLowerCase();
-            const targetName = targetNode.name.toLowerCase();
+            const { type: targetType, name: targetName } = this.lowerCaseNodeNames(targetNode);
             if (targetType.includes('function') ||
                 targetType.includes('code') ||
                 targetType.includes('item') ||
@@ -1729,7 +1851,10 @@ class WorkflowValidator {
                 targetName.includes('transform') ||
                 targetName.includes('handle')) {
                 const hasLoopBack = this.checkForLoopBack(targetNode.name, sourceNode.name, nodeMap);
-                if (hasLoopBack) {
+                if (hasLoopBack === null) {
+                    this.reportIncompleteLoopBackCheck(result);
+                }
+                else if (hasLoopBack) {
                     result.errors.push({
                         type: 'error',
                         nodeId: sourceNode.id,
@@ -1748,8 +1873,7 @@ class WorkflowValidator {
             }
         }
         else if (outputIndex === 1) {
-            const targetType = targetNode.type.toLowerCase();
-            const targetName = targetNode.name.toLowerCase();
+            const { type: targetType, name: targetName } = this.lowerCaseNodeNames(targetNode);
             if (targetType.includes('aggregate') ||
                 targetType.includes('merge') ||
                 targetType.includes('email') ||
@@ -1766,7 +1890,10 @@ class WorkflowValidator {
                 });
             }
             const hasLoopBack = this.checkForLoopBack(targetNode.name, sourceNode.name, nodeMap);
-            if (!hasLoopBack) {
+            if (hasLoopBack === null) {
+                this.reportIncompleteLoopBackCheck(result);
+            }
+            else if (!hasLoopBack) {
                 result.warnings.push({
                     type: 'warning',
                     nodeId: sourceNode.id,
@@ -1776,35 +1903,61 @@ class WorkflowValidator {
             }
         }
     }
-    checkForLoopBack(startNode, targetNode, nodeMap, visited = new Set(), maxDepth = 50) {
+    checkForLoopBack(startNode, targetNode, nodeMap) {
+        let entry = this.loopBackReach.get(startNode);
+        if (!entry) {
+            const reached = new Set();
+            const complete = this.collectLoopBackReach(startNode, nodeMap, new Set(), 50, reached);
+            entry = { reached, complete };
+            this.loopBackReach.set(startNode, entry);
+        }
+        if (entry.reached.has(targetNode))
+            return true;
+        return entry.complete ? false : null;
+    }
+    collectLoopBackReach(startNode, nodeMap, visited, maxDepth, reached) {
         if (maxDepth <= 0)
-            return false;
+            return true;
         if (visited.has(startNode))
-            return false;
+            return true;
         visited.add(startNode);
         const node = nodeMap.get(startNode);
         if (!node)
-            return false;
+            return true;
         const connections = this.currentWorkflow?.connections[startNode];
         if (!connections)
+            return true;
+        if (this.loopBackSteps <= 0)
             return false;
-        for (const [outputType, outputs] of Object.entries(connections)) {
+        for (const outputs of Object.values(connections)) {
+            if (--this.loopBackSteps < 0)
+                return false;
             if (!Array.isArray(outputs))
                 continue;
             for (const outputConnections of outputs) {
+                if (--this.loopBackSteps < 0)
+                    return false;
                 if (!Array.isArray(outputConnections))
                     continue;
                 for (const conn of outputConnections) {
-                    if (conn.node === targetNode) {
-                        return true;
-                    }
-                    if (this.checkForLoopBack(conn.node, targetNode, nodeMap, visited, maxDepth - 1)) {
-                        return true;
-                    }
+                    if (--this.loopBackSteps < 0)
+                        return false;
+                    reached.add(conn.node);
+                    if (!this.collectLoopBackReach(conn.node, nodeMap, visited, maxDepth - 1, reached))
+                        return false;
                 }
             }
         }
-        return false;
+        return true;
+    }
+    reportIncompleteLoopBackCheck(result) {
+        if (this.loopBackIncompleteReported)
+            return;
+        this.loopBackIncompleteReported = true;
+        result.warnings.push({
+            type: 'warning',
+            message: 'The workflow\'s loop structure is too large to check fully. Some SplitInBatches loop-back checks were skipped.'
+        });
     }
     addErrorRecoverySuggestions(result) {
         const errorTypes = {
