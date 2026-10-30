@@ -430,6 +430,7 @@ export interface FilteredExecutionResponse {
     nodes?: Record<string, FilteredNodeData>;
     error?: Record<string, unknown>;
     errorInfo?: ErrorAnalysis;
+    errorInfoNote?: string;
 }
 export interface FilteredNodeData {
     executionTime?: number;

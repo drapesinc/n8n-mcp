@@ -38,6 +38,26 @@ const logger_1 = require("../utils/logger");
 const template_sanitizer_1 = require("../utils/template-sanitizer");
 const zlib = __importStar(require("zlib"));
 const template_node_resolver_1 = require("../utils/template-node-resolver");
+const TASK_NODE_MAP = {
+    'ai_automation': ['@n8n/n8n-nodes-langchain.openAi', '@n8n/n8n-nodes-langchain.agent', 'n8n-nodes-base.openAi'],
+    'data_sync': ['n8n-nodes-base.googleSheets', 'n8n-nodes-base.postgres', 'n8n-nodes-base.mysql'],
+    'webhook_processing': ['n8n-nodes-base.webhook'],
+    'email_automation': ['n8n-nodes-base.gmail', 'n8n-nodes-base.emailSend', 'n8n-nodes-base.emailReadImap'],
+    'slack_integration': ['n8n-nodes-base.slack', 'n8n-nodes-base.slackTrigger'],
+    'data_transformation': [
+        'n8n-nodes-base.set',
+        'n8n-nodes-base.aggregate',
+        'n8n-nodes-base.summarize',
+        'n8n-nodes-base.filter',
+        'n8n-nodes-base.splitOut',
+        'n8n-nodes-base.merge',
+        'n8n-nodes-base.code'
+    ],
+    'file_processing': ['n8n-nodes-base.readBinaryFile', 'n8n-nodes-base.writeBinaryFile', 'n8n-nodes-base.googleDrive'],
+    'scheduling': ['n8n-nodes-base.scheduleTrigger', 'n8n-nodes-base.cron'],
+    'api_integration': ['n8n-nodes-base.httpRequest', 'n8n-nodes-base.graphql'],
+    'database_operations': ['n8n-nodes-base.postgres', 'n8n-nodes-base.mysql', 'n8n-nodes-base.mongodb']
+};
 class TemplateRepository {
     constructor(db) {
         this.db = db;
@@ -236,19 +256,7 @@ class TemplateRepository {
         return results.map(t => this.decompressWorkflow(t));
     }
     getTemplatesForTask(task, limit = 10, offset = 0) {
-        const taskNodeMap = {
-            'ai_automation': ['@n8n/n8n-nodes-langchain.openAi', '@n8n/n8n-nodes-langchain.agent', 'n8n-nodes-base.openAi'],
-            'data_sync': ['n8n-nodes-base.googleSheets', 'n8n-nodes-base.postgres', 'n8n-nodes-base.mysql'],
-            'webhook_processing': ['n8n-nodes-base.webhook'],
-            'email_automation': ['n8n-nodes-base.gmail', 'n8n-nodes-base.emailSend', 'n8n-nodes-base.emailReadImap'],
-            'slack_integration': ['n8n-nodes-base.slack', 'n8n-nodes-base.slackTrigger'],
-            'data_transformation': ['n8n-nodes-base.code', 'n8n-nodes-base.set', 'n8n-nodes-base.merge'],
-            'file_processing': ['n8n-nodes-base.readBinaryFile', 'n8n-nodes-base.writeBinaryFile', 'n8n-nodes-base.googleDrive'],
-            'scheduling': ['n8n-nodes-base.scheduleTrigger', 'n8n-nodes-base.cron'],
-            'api_integration': ['n8n-nodes-base.httpRequest', 'n8n-nodes-base.graphql'],
-            'database_operations': ['n8n-nodes-base.postgres', 'n8n-nodes-base.mysql', 'n8n-nodes-base.mongodb']
-        };
-        const nodes = taskNodeMap[task];
+        const nodes = Object.prototype.hasOwnProperty.call(TASK_NODE_MAP, task) ? TASK_NODE_MAP[task] : undefined;
         if (!nodes) {
             return [];
         }
@@ -311,19 +319,7 @@ class TemplateRepository {
         return result.count;
     }
     getTaskTemplatesCount(task) {
-        const taskNodeMap = {
-            'ai_automation': ['@n8n/n8n-nodes-langchain.openAi', '@n8n/n8n-nodes-langchain.agent', 'n8n-nodes-base.openAi'],
-            'data_sync': ['n8n-nodes-base.googleSheets', 'n8n-nodes-base.postgres', 'n8n-nodes-base.mysql'],
-            'webhook_processing': ['n8n-nodes-base.webhook'],
-            'email_automation': ['n8n-nodes-base.gmail', 'n8n-nodes-base.emailSend', 'n8n-nodes-base.emailReadImap'],
-            'slack_integration': ['n8n-nodes-base.slack', 'n8n-nodes-base.slackTrigger'],
-            'data_transformation': ['n8n-nodes-base.code', 'n8n-nodes-base.set', 'n8n-nodes-base.merge'],
-            'file_processing': ['n8n-nodes-base.readBinaryFile', 'n8n-nodes-base.writeBinaryFile', 'n8n-nodes-base.googleDrive'],
-            'scheduling': ['n8n-nodes-base.scheduleTrigger', 'n8n-nodes-base.cron'],
-            'api_integration': ['n8n-nodes-base.httpRequest', 'n8n-nodes-base.graphql'],
-            'database_operations': ['n8n-nodes-base.postgres', 'n8n-nodes-base.mysql', 'n8n-nodes-base.mongodb']
-        };
-        const nodes = taskNodeMap[task];
+        const nodes = Object.prototype.hasOwnProperty.call(TASK_NODE_MAP, task) ? TASK_NODE_MAP[task] : undefined;
         if (!nodes) {
             return 0;
         }

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NodeParser = void 0;
+exports.NodeParser = exports.ALL_VERSIONS = void 0;
 exports.normalizeNodeVersion = normalizeNodeVersion;
 const property_extractor_1 = require("./property-extractor");
 const node_types_1 = require("../types/node-types");
@@ -9,6 +9,7 @@ function normalizeNodeVersion(version) {
     const numeric = Number(version);
     return Number.isFinite(numeric) ? String(numeric) : String(version);
 }
+exports.ALL_VERSIONS = '*';
 class NodeParser {
     constructor() {
         this.propertyExtractor = new property_extractor_1.PropertyExtractor();
@@ -34,8 +35,20 @@ class NodeParser {
             isVersioned: this.detectVersioned(nodeClass),
             packageName: packageName,
             outputs: outputInfo.outputs,
-            outputNames: outputInfo.outputNames
+            outputNames: outputInfo.outputNames,
+            deprecatedVersions: this.extractDeprecatedVersions(nodeClass, description)
         };
+    }
+    extractDeprecatedVersions(nodeClass, base) {
+        const instance = (0, node_types_1.instantiateNode)(nodeClass);
+        const nodeVersions = instance?.nodeVersions ?? nodeClass.nodeVersions;
+        if (nodeVersions && typeof nodeVersions === 'object') {
+            return Object.entries(nodeVersions)
+                .filter(([, implementation]) => implementation?.description?.deprecated === true)
+                .map(([key]) => normalizeNodeVersion(key))
+                .sort((a, b) => Number(a) - Number(b));
+        }
+        return base.deprecated === true ? [exports.ALL_VERSIONS] : [];
     }
     parseVersions(nodeClass, packageName) {
         this.currentNodeClass = nodeClass;

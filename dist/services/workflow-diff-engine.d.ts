@@ -1,5 +1,6 @@
 import { WorkflowDiffRequest, WorkflowDiffResult } from '../types/workflow-diff';
 import { Workflow } from '../types/n8n-api';
+export declare const MAX_CONNECTION_INDEX = 1000;
 export declare class WorkflowDiffEngine {
     private renameMap;
     private warnings;
@@ -9,8 +10,11 @@ export declare class WorkflowDiffEngine {
     private tagsToRemove;
     private transferToProjectId;
     private authoredGroupNames;
+    private regexBudgetMs;
+    private patchGrowthBudget;
     applyDiff(workflow: Workflow, request: WorkflowDiffRequest): Promise<WorkflowDiffResult>;
     private validateOperation;
+    private validateReservedKeys;
     private applyOperation;
     private validateAddNode;
     private validateRemoveNode;

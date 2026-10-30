@@ -24,6 +24,18 @@ class ResourceSimilarityService {
             });
         }
     }
+    static setBounded(cache, key, value, maxEntries) {
+        if (key.length > ResourceSimilarityService.MAX_CACHE_KEY_LENGTH)
+            return;
+        cache.delete(key);
+        while (cache.size >= maxEntries) {
+            const oldest = cache.keys().next().value;
+            if (oldest === undefined)
+                break;
+            cache.delete(oldest);
+        }
+        cache.set(key, value);
+    }
     initializeCommonPatterns() {
         const patterns = new Map();
         patterns.set('googleDrive', [
@@ -73,6 +85,9 @@ class ResourceSimilarityService {
         return patterns;
     }
     findSimilarResources(nodeType, invalidResource, maxSuggestions = ResourceSimilarityService.MAX_SUGGESTIONS) {
+        if (typeof invalidResource === 'string' && invalidResource.length > ResourceSimilarityService.MAX_NAME_LENGTH) {
+            return [];
+        }
         if (Math.random() < 0.1) {
             this.cleanupExpiredEntries();
         }
@@ -134,7 +149,7 @@ class ResourceSimilarityService {
         }
         suggestions.sort((a, b) => b.confidence - a.confidence);
         const topSuggestions = suggestions.slice(0, maxSuggestions);
-        this.suggestionCache.set(cacheKey, topSuggestions);
+        ResourceSimilarityService.setBounded(this.suggestionCache, cacheKey, topSuggestions, ResourceSimilarityService.MAX_SUGGESTION_CACHE_ENTRIES);
         return topSuggestions;
     }
     getResourceValue(resource) {
@@ -198,7 +213,7 @@ class ResourceSimilarityService {
         catch (error) {
             logger_1.logger.warn(`Failed to extract resources for ${nodeType}:`, error);
         }
-        this.resourceCache.set(cacheKey, { resources, timestamp: Date.now() });
+        ResourceSimilarityService.setBounded(this.resourceCache, cacheKey, { resources, timestamp: Date.now() }, ResourceSimilarityService.MAX_RESOURCE_CACHE_ENTRIES);
         return resources;
     }
     extractImplicitResources(properties) {
@@ -304,22 +319,27 @@ class ResourceSimilarityService {
     levenshteinDistance(str1, str2) {
         const m = str1.length;
         const n = str2.length;
-        const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-        for (let i = 0; i <= m; i++)
-            dp[i][0] = i;
+        if (m === 0)
+            return n;
+        if (n === 0)
+            return m;
+        let prev = new Array(n + 1);
+        let curr = new Array(n + 1);
         for (let j = 0; j <= n; j++)
-            dp[0][j] = j;
+            prev[j] = j;
         for (let i = 1; i <= m; i++) {
+            curr[0] = i;
             for (let j = 1; j <= n; j++) {
                 if (str1[i - 1] === str2[j - 1]) {
-                    dp[i][j] = dp[i - 1][j - 1];
+                    curr[j] = prev[j - 1];
                 }
                 else {
-                    dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + 1);
+                    curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + 1);
                 }
             }
+            [prev, curr] = [curr, prev];
         }
-        return dp[m][n];
+        return prev[n];
     }
     getSimilarityReason(confidence, invalid, valid) {
         const { VERY_HIGH, HIGH, MEDIUM } = ResourceSimilarityService.CONFIDENCE_THRESHOLDS;
@@ -348,6 +368,10 @@ exports.ResourceSimilarityService = ResourceSimilarityService;
 ResourceSimilarityService.CACHE_DURATION_MS = 5 * 60 * 1000;
 ResourceSimilarityService.MIN_CONFIDENCE = 0.3;
 ResourceSimilarityService.MAX_SUGGESTIONS = 5;
+ResourceSimilarityService.MAX_NAME_LENGTH = 128;
+ResourceSimilarityService.MAX_CACHE_KEY_LENGTH = 512;
+ResourceSimilarityService.MAX_RESOURCE_CACHE_ENTRIES = 500;
+ResourceSimilarityService.MAX_SUGGESTION_CACHE_ENTRIES = 100;
 ResourceSimilarityService.CONFIDENCE_THRESHOLDS = {
     EXACT: 1.0,
     VERY_HIGH: 0.95,

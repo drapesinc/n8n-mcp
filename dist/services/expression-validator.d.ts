@@ -6,7 +6,9 @@ interface ExpressionValidationResult {
     usedNodes: Set<string>;
 }
 interface ExpressionContext {
-    availableNodes: string[];
+    availableNodes: string[] | {
+        has(name: string): boolean;
+    };
     currentNodeName?: string;
     isInLoop?: boolean;
     hasInputData?: boolean;

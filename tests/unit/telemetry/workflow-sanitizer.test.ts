@@ -1037,6 +1037,322 @@ describe('WorkflowSanitizer', () => {
     });
   });
 
+  describe('sticky notes', () => {
+    const wf = () => ({
+      nodes: [
+        { id: 's1', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [0, 0], parameters: { content: 'sticky prose text', width: 300 } },
+        { id: 'h1', name: 'Html', type: 'n8n-nodes-base.html', typeVersion: 1, position: [0, 0], parameters: { content: '<p>template body</p>' } },
+      ],
+      connections: {},
+    });
+
+    it.each([
+      ['sanitizeWorkflow', (w: any) => WorkflowSanitizer.sanitizeWorkflow(w)],
+      ['sanitizeWorkflowRaw', (w: any) => WorkflowSanitizer.sanitizeWorkflowRaw(w)],
+    ])('%s removes sticky-note content and keeps other node content', (_label, sanitize) => {
+      const out = sanitize(wf());
+      expect(JSON.stringify(out)).not.toContain('sticky prose text');
+      expect(out.nodes[0].parameters).toEqual({ width: 300 });
+      expect(out.nodes[1].parameters.content).toBe('<p>template body</p>');
+    });
+
+    it('removes sticky-note content from operations that target a sticky node', () => {
+      const ops = WorkflowSanitizer.sanitizeOperations<any[]>([
+        { type: 'addNode', node: { name: 'Note2', type: 'n8n-nodes-base.stickyNote', parameters: { content: 'added sticky text', color: 3 } } },
+        { type: 'updateNode', nodeName: 'Note', updates: { 'parameters.content': 'dotted sticky text', 'parameters.width': 400 } },
+        { type: 'updateNode', nodeId: 's1', updates: { parameters: { content: 'nested sticky text', height: 200 } } },
+        { type: 'patchNodeField', nodeId: 's1', fieldPath: 'parameters.content', patches: [{ find: 'a', replace: 'patched sticky text' }] },
+        { type: 'updateNode', nodeName: 'Html', updates: { 'parameters.content': '<p>kept</p>' } },
+        { type: 'patchNodeField', nodeName: 'Html', fieldPath: 'parameters.content', patches: [{ find: 'a', replace: 'kept patch' }] },
+      ], [wf()]);
+      const json = JSON.stringify(ops);
+      for (const text of ['added sticky text', 'dotted sticky text', 'nested sticky text', 'patched sticky text']) {
+        expect(json).not.toContain(text);
+      }
+      expect(ops[0].node.parameters).toEqual({ color: 3 });
+      expect(ops[1].updates).toEqual({ 'parameters.width': 400 });
+      expect(ops[2].updates.parameters).toEqual({ height: 200 });
+      expect(ops[3]).not.toHaveProperty('patches');
+      expect(ops[4].updates['parameters.content']).toBe('<p>kept</p>');
+      expect(ops[5].patches).toEqual([{ find: 'a', replace: 'kept patch' }]);
+    });
+  });
+
+  describe('sticky-note content in operations resolves targets conservatively', () => {
+    const before = () => ({
+      nodes: [
+        { id: 's1', name: 'Note', type: 'n8n-nodes-base.stickyNote', parameters: { content: 'x' } },
+        { id: 'h1', name: 'Html', type: 'n8n-nodes-base.html', parameters: { content: 'y' } },
+      ],
+    });
+    const content = (op: any) => JSON.stringify(op);
+
+    it.each([
+      ['id used as a name', { type: 'updateNode', nodeId: 'Note', updates: { 'parameters.content': 'leak-a' } }],
+      ['whitespace in the name', { type: 'updateNode', nodeName: ' Note ', updates: { 'parameters.content': 'leak-b' } }],
+      ['unknown target', { type: 'updateNode', nodeName: 'Ghost', updates: { 'parameters.content': 'leak-c' } }],
+      ['patch with id used as a name', { type: 'patchNodeField', nodeId: 'Note', fieldPath: 'parameters.content', patches: [{ find: 'a', replace: 'leak-d' }] }],
+    ])('drops content for %s', (_label, op) => {
+      const out = WorkflowSanitizer.sanitizeOperations<any[]>([op], [before()]);
+      expect(content(out)).not.toMatch(/leak-/);
+    });
+
+    it('drops content for names that exist only in the middle of a batch', () => {
+      const out = WorkflowSanitizer.sanitizeOperations<any[]>([
+        { type: 'updateNode', nodeName: 'Note', updates: { name: 'Mid' } },
+        { type: 'updateNode', nodeName: 'Mid', updates: { 'parameters.content': 'leak-rename' } },
+        { type: 'updateNode', nodeName: 'Mid', updates: { name: 'Note B' } },
+        { type: 'addNode', node: { name: 'Tmp', type: 'n8n-nodes-base.stickyNote', parameters: {} } },
+        { type: 'updateNode', nodeName: 'Tmp', updates: { 'parameters.content': 'leak-added' } },
+        { type: 'removeNode', nodeName: 'Tmp' },
+      ], [before()]);
+      expect(content(out)).not.toMatch(/leak-/);
+    });
+
+    it.each([
+      ['retype and content in one update', [
+        { type: 'updateNode', nodeName: 'Html', updates: { type: 'n8n-nodes-base.stickyNote', 'parameters.content': 'leak-retype-same' } },
+        { type: 'removeNode', nodeName: 'Html' },
+      ]],
+      ['retype by id, edit by name, retype back', [
+        { type: 'updateNode', nodeId: 'h1', updates: { type: 'n8n-nodes-base.stickyNote' } },
+        { type: 'updateNode', nodeName: 'Html', updates: { 'parameters.content': 'leak-alias' } },
+        { type: 'updateNode', nodeId: 'h1', updates: { type: 'n8n-nodes-base.html' } },
+      ]],
+      ['retype through a type patch', [
+        { type: 'patchNodeField', nodeId: 'h1', fieldPath: 'type', patches: [{ find: 'html', replace: 'stickyNote' }] },
+        { type: 'patchNodeField', nodeId: 'h1', fieldPath: 'parameters.content', patches: [{ find: 'a', replace: 'leak-type-patch' }] },
+        { type: 'removeNode', nodeId: 'h1' },
+      ]],
+      ['temporary name reuse through name patches', [
+        { type: 'patchNodeField', nodeName: 'Html', fieldPath: 'name', patches: [{ find: 'Html', replace: 'Page' }] },
+        { type: 'patchNodeField', nodeName: 'Note', fieldPath: 'name', patches: [{ find: 'Note', replace: 'Html' }] },
+        { type: 'updateNode', nodeName: 'Html', updates: { 'parameters.content': 'leak-name-patch' } },
+        { type: 'patchNodeField', nodeName: 'Html', fieldPath: 'name', patches: [{ find: 'Html', replace: 'Note' }] },
+        { type: 'patchNodeField', nodeName: 'Page', fieldPath: 'name', patches: [{ find: 'Page', replace: 'Html' }] },
+      ]],
+      ['sticky added later in the batch under a removed node name', [
+        { type: 'removeNode', nodeName: 'Html' },
+        { type: 'addConnection', source: 'Start', target: 'Html' },
+        { type: 'updateNode', nodeName: 'Html', updates: { 'parameters.content': 'leak-hoisted' } },
+        { type: 'addNode', node: { name: 'Html', type: 'n8n-nodes-base.stickyNote', parameters: {} } },
+        { type: 'removeNode', nodeName: 'Html' },
+      ]],
+    ])('drops content when the batch changes types or patches names: %s', (_label, batch) => {
+      const out = WorkflowSanitizer.sanitizeOperations<any[]>(batch as any[], [before()]);
+      expect(content(out)).not.toMatch(/leak-/);
+    });
+
+    it('keeps content edits on a known non-sticky node, including after a rename', () => {
+      const out = WorkflowSanitizer.sanitizeOperations<any[]>([
+        { type: 'updateNode', nodeName: 'Html', updates: { 'parameters.content': '<p>kept-1</p>' } },
+        { type: 'updateNode', nodeId: 'h1', updates: { name: 'Page' } },
+        { type: 'patchNodeField', nodeName: 'Page', fieldPath: 'parameters.content', patches: [{ find: 'a', replace: 'kept-2' }] },
+      ], [before()]);
+      expect(out[0].updates['parameters.content']).toBe('<p>kept-1</p>');
+      expect(out[2].patches).toEqual([{ find: 'a', replace: 'kept-2' }]);
+    });
+
+    it('does not modify its inputs', () => {
+      const ops = [{ type: 'updateNode', nodeName: 'Note', updates: { 'parameters.content': 'text', notes: 'n' }, description: 'd' }];
+      const wf = before();
+      const snapshot = JSON.stringify([ops, wf]);
+      WorkflowSanitizer.sanitizeOperations(ops, [wf]);
+      expect(JSON.stringify([ops, wf])).toBe(snapshot);
+    });
+  });
+
+  describe('sanitizeOperations', () => {
+    it('tolerates malformed operation lists', () => {
+      expect(WorkflowSanitizer.sanitizeOperations(null)).toBeNull();
+      expect(WorkflowSanitizer.sanitizeOperations('Bearer abcdefghijklmnop1234')).toBe('Bearer [REDACTED]');
+      expect(WorkflowSanitizer.sanitizeOperations([null, 'x', [1], { type: 'addNode', node: null, updates: [] }]))
+        .toEqual([null, 'x', [1], { type: 'addNode', node: null, updates: [] }]);
+    });
+  });
+
+  describe('node and workflow free-text fields', () => {
+    const KEY_A = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    const KEY_B = 'sk-proj-zyxwvutsrqponmlkjihgfedcba9876543210WXYZ';
+    const node = (name: string, extra: Record<string, unknown> = {}) => ({
+      id: `id-${name.length}-${name.slice(-4)}`,
+      name,
+      type: 'n8n-nodes-base.set',
+      typeVersion: 3,
+      position: [0, 0] as [number, number],
+      parameters: {},
+      ...extra,
+    });
+    const graph = () => ({
+      nodes: [
+        node('Start'),
+        node(`Call ${KEY_A}`, { notes: 'Bearer note-secret-value', notesInFlow: true }),
+        node(`Call ${KEY_B}`),
+        node('Code1'),
+      ],
+      connections: {
+        Start: { main: [[
+          { node: `Call ${KEY_A}`, type: 'main', index: 0 },
+          { node: `Call ${KEY_B}`, type: 'main', index: 0 },
+        ]] },
+        [`Call ${KEY_A}`]: { main: [[{ node: 'Code1', type: 'main', index: 0 }]] },
+      },
+    });
+
+    it.each([
+      ['sanitizeWorkflow', (wf: any) => WorkflowSanitizer.sanitizeWorkflow(wf)],
+      ['sanitizeWorkflowRaw', (wf: any) => WorkflowSanitizer.sanitizeWorkflowRaw(wf)],
+    ])('%s removes node notes and keeps notesInFlow', (_label, sanitize) => {
+      const out = sanitize(graph());
+      const json = JSON.stringify(out);
+      expect(json).not.toContain('note-secret-value');
+      expect(out.nodes.every((n: any) => !('notes' in n))).toBe(true);
+      expect(out.nodes[1].notesInFlow).toBe(true);
+    });
+
+    it.each([
+      ['sanitizeWorkflow', (wf: any) => WorkflowSanitizer.sanitizeWorkflow(wf)],
+      ['sanitizeWorkflowRaw', (wf: any) => WorkflowSanitizer.sanitizeWorkflowRaw(wf)],
+    ])('%s sanitizes node names and keeps connections consistent', (_label, sanitize) => {
+      const out = sanitize(graph());
+      const json = JSON.stringify(out);
+      expect(json).not.toContain(KEY_A);
+      expect(json).not.toContain(KEY_B);
+
+      const names = out.nodes.map((n: any) => n.name);
+      expect(new Set(names).size).toBe(names.length);
+      expect(names).toContain('Start');
+      expect(names).toContain('Code1');
+
+      const nameSet = new Set(names);
+      for (const [source, byType] of Object.entries<any>(out.connections)) {
+        expect(nameSet.has(source)).toBe(true);
+        for (const outputs of Object.values<any>(byType)) {
+          for (const conns of outputs) {
+            for (const conn of conns) expect(nameSet.has(conn.node)).toBe(true);
+          }
+        }
+      }
+      expect(out.connections.Start.main[0]).toHaveLength(2);
+      expect(out.connections.Start.main[0][0].node).not.toBe(out.connections.Start.main[0][1].node);
+    });
+
+    it('leaves ordinary node names and connections unchanged', () => {
+      const wf = {
+        nodes: [node('Webhook'), node('HTTP Request1')],
+        connections: { Webhook: { main: [[{ node: 'HTTP Request1', type: 'main', index: 0 }]] } },
+      };
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw(wf);
+      expect(out.nodes.map((n: any) => n.name)).toEqual(['Webhook', 'HTTP Request1']);
+      expect(out.connections).toEqual(wf.connections);
+    });
+
+    it('sanitizeWorkflowRaw sanitizes workflow-level fields and drops sharing and description', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw({
+        ...graph(),
+        name: 'Sync for jane.doe@example.com',
+        description: 'internal runbook text',
+        meta: { comment: 'Bearer meta-secret-value-123' },
+        tags: [{ id: 't1', name: 'owner jane.doe@example.com' }],
+        shared: [{ project: { name: 'Jane Doe <jane.doe@example.com>' } }],
+        homeProject: { name: 'Jane Doe <jane.doe@example.com>' },
+      });
+      const json = JSON.stringify(out);
+      expect(json).not.toContain('jane.doe@example.com');
+      expect(json).not.toContain('meta-secret-value-123');
+      expect(json).not.toContain('internal runbook text');
+      expect(out).not.toHaveProperty('shared');
+      expect(out).not.toHaveProperty('homeProject');
+      expect(out).not.toHaveProperty('description');
+      expect(out.name).toBe('Sync for [REDACTED_EMAIL]');
+    });
+
+    it('gives a redacted node the same name in the before and after snapshots', () => {
+      const before = WorkflowSanitizer.sanitizeWorkflowRaw(graph());
+      const after = WorkflowSanitizer.sanitizeWorkflowRaw({
+        nodes: [node('Start'), node(`Call ${KEY_B}`)],
+        connections: { Start: { main: [[{ node: `Call ${KEY_B}`, type: 'main', index: 0 }]] } },
+      });
+      expect(after.nodes[1].name).toBe(before.nodes[2].name);
+      expect(after.nodes[1].name).not.toBe(before.nodes[1].name);
+    });
+
+    it('sanitizes node fields other than the structural ones', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw({
+        nodes: [node('Webhook', { extra: { memo: 'Bearer extra-secret-value-123' }, disabled: true, onError: 'continueRegularOutput' })],
+        connections: {},
+      });
+      const json = JSON.stringify(out);
+      expect(json).not.toContain('extra-secret-value-123');
+      expect(out.nodes[0].disabled).toBe(true);
+      expect(out.nodes[0].onError).toBe('continueRegularOutput');
+    });
+
+    it('sanitizes nodes and connections that are not in the expected shape', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw({
+        nodes: { a: { parameters: { apiKey: 'nodes-object-secret-123' }, notes: 'Bearer nodes-object-note-123' } },
+        connections: {
+          A: 'Bearer conn-string-secret-123',
+          B: { main: 'Bearer conn-type-secret-123' },
+          C: { main: ['Bearer conn-entry-secret-123', [null, 'Bearer conn-item-secret-123']] },
+        },
+      });
+      const json = JSON.stringify(out);
+      for (const marker of ['nodes-object-secret-123', 'nodes-object-note-123', 'conn-string-secret-123', 'conn-type-secret-123', 'conn-entry-secret-123', 'conn-item-secret-123']) {
+        expect(json).not.toContain(marker);
+      }
+    });
+
+    it('sanitizeWorkflowRaw applies the full workflow pass to arrays of workflow versions', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw({
+        ...graph(),
+        versions: [{ versionId: 'v1', ...graph() }],
+      });
+      const json = JSON.stringify(out.versions);
+      expect(json).not.toContain(KEY_A);
+      expect(json).not.toContain('note-secret-value');
+    });
+
+    it('sanitizeWorkflowRaw keeps workflow metadata the backend reads', () => {
+      const wf = {
+        ...graph(),
+        id: 'Ab3dE5gH7jK9mN1p',
+        versionId: '7d0a6f3c-1b2e-4c5d-8e9f-0a1b2c3d4e5f',
+        active: true,
+        createdAt: '2026-10-01T10:00:00.000Z',
+        updatedAt: '2026-10-18T10:00:00.000Z',
+        settings: { executionOrder: 'v1', timezone: 'Europe/Warsaw', saveManualExecutions: true },
+      };
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw(wf);
+      expect(out.id).toBe(wf.id);
+      expect(out.versionId).toBe(wf.versionId);
+      expect(out.active).toBe(true);
+      expect(out.createdAt).toBe(wf.createdAt);
+      expect(out.updatedAt).toBe(wf.updatedAt);
+      expect(out.settings).toEqual(wf.settings);
+    });
+
+    it('sanitizeWorkflowRaw applies the full workflow pass to a nested active version', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw({
+        ...graph(),
+        activeVersion: {
+          versionId: '7d0a6f3c-1b2e-4c5d-8e9f-0a1b2c3d4e5f',
+          nodes: [node('HTTP', {
+            parameters: { headerParameters: { parameters: [{ name: 'Authorization', value: 'Bearer active-secret-123456' }] } },
+            credentials: { httpHeaderAuth: { id: '1', name: 'Prod key' } },
+            notes: 'active note text',
+          })],
+          connections: {},
+        },
+      });
+      const json = JSON.stringify(out.activeVersion);
+      expect(json).not.toContain('active-secret-123456');
+      expect(json).not.toContain('active note text');
+      expect(out.activeVersion.nodes[0]).not.toHaveProperty('credentials');
+      expect(out.activeVersion.versionId).toBe('7d0a6f3c-1b2e-4c5d-8e9f-0a1b2c3d4e5f');
+    });
+  });
+
   describe('non-secret workflow structure survives (n8n-mcp-backend#151)', () => {
     const NODE_ID = '6f1a2b3c-4d5e-4f60-8a9b-0c1d2e3f4a5b';
 
@@ -1345,6 +1661,192 @@ describe('WorkflowSanitizer', () => {
       expect(params.template).toBe('Bearer ${token}');
       expect(params.literal).toBe('Bearer [REDACTED]');
       expect(params.dollar).toBe('Bearer [REDACTED]');
+    });
+  });
+
+  describe('name/value parameters', () => {
+    const httpNode = (parameters: any) => ({
+      nodes: [{ id: '1', name: 'HTTP', type: 'n8n-nodes-base.httpRequest', position: [0, 0], parameters }],
+      connections: {},
+    });
+    const pairs = [
+      ['key', 'DuMmY0x7Kq2Lw9Pz'],
+      ['sig', 'DuMmY1x7Kq2Lw9Pz'],
+      ['signature', 'q8Zr+2bX/9LmPq4Tz7Wy+Kp1Nc6Vd3Hs/Ej5Fa0Gu8w='],
+      ['X-Amz-Signature', 'DuMmY3x7Kq2Lw9Pz'],
+      ['code', 'DuMmY4x7Kq2Lw9Pz'],
+      ['Ocp-Apim-Subscription-Key', 'DuMmY5x7Kq2Lw9Pz'],
+      ['x-functions-key', 'DuMmY6x7Kq2Lw9Pz'],
+    ];
+
+    it('redacts values of query and header parameters whose name holds a secret', () => {
+      const parameters = {
+        queryParameters: { parameters: pairs.map(([name, value]) => ({ name, value })) },
+        headerParameters: { parameters: pairs.map(([name, value]) => ({ name, value })) },
+      };
+      for (const out of [
+        WorkflowSanitizer.sanitizeWorkflow(httpNode(parameters)).nodes[0].parameters,
+        WorkflowSanitizer.sanitizeWorkflowRaw(httpNode(parameters)).nodes[0].parameters,
+      ]) {
+        const json = JSON.stringify(out);
+        for (const [, value] of pairs) expect(json).not.toContain(value);
+        expect(out.queryParameters.parameters.map((p: any) => p.name)).toEqual(pairs.map(([name]) => name));
+      }
+    });
+
+    it('keeps values of ordinary parameter names', () => {
+      const out = WorkflowSanitizer.sanitizeWorkflow(httpNode({
+        headerParameters: { parameters: [{ name: 'Content-Type', value: 'application/json' }] },
+        queryParameters: { parameters: [{ name: 'countryCode', value: 'PL' }, { name: 'keyLength', value: 'short' }] },
+      })).nodes[0].parameters;
+      expect(out.headerParameters.parameters[0].value).toBe('application/json');
+      expect(out.queryParameters.parameters[0].value).toBe('PL');
+      expect(out.queryParameters.parameters[1].value).toBe('short');
+    });
+  });
+
+  describe('serialized key/value text', () => {
+    const params = (parameters: any) => WorkflowSanitizer.sanitizeWorkflow({
+      nodes: [{ id: '1', name: 'HTTP', type: 'n8n-nodes-base.httpRequest', position: [0, 0], parameters }],
+      connections: {},
+    }).nodes[0].parameters;
+
+    it('redacts secret-named keys inside JSON header and body strings', () => {
+      const out = params({
+        jsonHeaders: '{\n  "X-API-Key": "hdrVDUMMY9q8w7e6r5t4",\n  "Authorization": "tokVDUMMYa1b2c3",\n  "Content-Type": "application/json"\n}',
+        jsonBody: '{"user": "svc", "password": "Pw0rdVDummy!x", "apiKey": "akVDUMMY12345abcde", "maxTokens": 500}',
+        expressionBody: '={ "token": "tkVDUMMY0099", "name": "{{ $json.name }}" }',
+      });
+      for (const value of ['hdrVDUMMY9q8w7e6r5t4', 'tokVDUMMYa1b2c3', 'Pw0rdVDummy!x', 'akVDUMMY12345abcde', 'tkVDUMMY0099']) {
+        expect(JSON.stringify(out)).not.toContain(value);
+      }
+      expect(JSON.parse(out.jsonHeaders)).toEqual({ 'X-API-Key': '[REDACTED]', Authorization: '[REDACTED]', 'Content-Type': 'application/json' });
+      expect(JSON.parse(out.jsonBody)).toEqual({ user: 'svc', password: '[REDACTED]', apiKey: '[REDACTED]', maxTokens: 500 });
+      expect(out.expressionBody.startsWith('=')).toBe(true);
+      expect(JSON.parse(out.expressionBody.slice(1))).toEqual({ token: '[REDACTED]', name: '{{ $json.name }}' });
+    });
+
+    it('applies name/value rules and nested JSON strings inside JSON text', () => {
+      const out = params({
+        jsonHeaders: '[{"name":"X-API-Key","value":"shortVDUMMY1"},{"name":"Accept","value":"text/plain"}]',
+        jsonBody: JSON.stringify({ payload: JSON.stringify({ password: 'shortVDUMMY2', mode: 'fast' }) }),
+      });
+      expect(JSON.parse(out.jsonHeaders)).toEqual([
+        { name: 'X-API-Key', value: '[REDACTED]' },
+        { name: 'Accept', value: 'text/plain' },
+      ]);
+      expect(JSON.parse(JSON.parse(out.jsonBody).payload)).toEqual({ password: '[REDACTED]', mode: 'fast' });
+    });
+
+    it('redacts JSON nested beyond the inspection depth', () => {
+      let value = JSON.stringify({ name: 'X-API-Key', value: 'shortVDUMMY3' });
+      for (let i = 0; i < 4; i++) value = JSON.stringify({ data: value });
+      const out = params({ jsonBody: value });
+      expect(JSON.stringify(out)).not.toContain('shortVDUMMY3');
+      expect(JSON.stringify(out)).toContain('[REDACTED_NESTED_JSON]');
+    });
+
+    it('keeps the output size close to the input size for deeply bracketed JSON', () => {
+      const text = '[\n          ' + '['.repeat(1000) + '{"password":"short"}' + ']'.repeat(1000) + ']';
+      const out = params({ jsonBody: text });
+      expect(out.jsonBody.length).toBeLessThanOrEqual(text.length);
+      expect(out.jsonBody).not.toContain('short"');
+    });
+
+    it('keeps JSON text without secrets as written', () => {
+      const text = '{ "a": 1,  "b": "x", "list": [1, 2] }';
+      expect(params({ jsonBody: text }).jsonBody).toBe(text);
+    });
+
+    it('redacts secret-named assignments in code and keeps the auth scheme', () => {
+      const out = params({
+        jsCode: [
+          "const apiKey = 'akVDUMMYcode77';",
+          'const headers = { Authorization: "Bearer bVDUMMYcode88" };',
+          "if ($json.password === 'not-a-secret') return [];",
+          "const model = 'gpt-4o-mini';",
+        ].join('\n'),
+      });
+      expect(out.jsCode).toContain("const apiKey = '[REDACTED]';");
+      expect(out.jsCode).toContain('Authorization: "Bearer [REDACTED]"');
+      expect(out.jsCode).toContain("$json.password === 'not-a-secret'");
+      expect(out.jsCode).toContain("const model = 'gpt-4o-mini';");
+    });
+
+    it('handles long serialized text', () => {
+      const inputs = ['"a":'.repeat(25_000), "'".repeat(99_000), '"password": "'.repeat(7_000), ' '.repeat(99_000) + ':"x"'];
+      const start = performance.now();
+      for (const input of inputs) WorkflowSanitizer.sanitizeTelemetryObject({ text: input });
+      expect(performance.now() - start).toBeLessThan(2000);
+    });
+  });
+
+  describe('input size and nesting bounds', () => {
+    it('handles long base64url text', () => {
+      const value = '-eyJ'.repeat(24_999);
+      const start = performance.now();
+      const out = WorkflowSanitizer.sanitizeTelemetryObject<any>({ a: value, b: value });
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(out.a).toBe(value);
+    });
+
+    it('handles many URL schemes in one value', () => {
+      const value = 'http://'.repeat(14_000);
+      const input = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`v${i}`, value]));
+      const start = performance.now();
+      const out = WorkflowSanitizer.sanitizeTelemetryObject<any>(input);
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(out.v0).toBe(value);
+    });
+
+    it('still redacts webhook URLs, JWTs and emails', () => {
+      const jwt = ['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxMjM0NTY3ODkwIn0', 'dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'].join('.');
+      const out = WorkflowSanitizer.sanitizeTelemetryObject<string>(
+        `see https://example.com/a/webhook-test/abc and http://x.test/path, token ${jwt}-- end`
+      );
+      expect(out).toBe('see [REDACTED_WEBHOOK] and http://x.test/path, token [REDACTED_JWT]-- end');
+      expect(WorkflowSanitizer.sanitizeTelemetryObject(`contact ${'j'.repeat(70)}@example.com`)).toBe('contact [REDACTED_EMAIL]');
+      expect(WorkflowSanitizer.sanitizeTelemetryObject('mail jane.doe@example.com now')).toBe('mail [REDACTED_EMAIL] now');
+    });
+
+    it('handles long keys', () => {
+      const keys = [...'ABCD'].map((c) => c.repeat(40_000)).concat([...'1234'].map((d) => d.repeat(40_000) + 'a'));
+      const start = performance.now();
+      const out = WorkflowSanitizer.sanitizeTelemetryObject<any>(Object.fromEntries(keys.map((k) => [k, 'v'])));
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(Object.values(out)).toEqual(keys.map(() => '[REDACTED]'));
+    });
+
+    it('replaces strings above the size cap', () => {
+      expect(WorkflowSanitizer.sanitizeTelemetryObject('x'.repeat(100_001))).toBe('[REDACTED_LONG_STRING]');
+      expect(WorkflowSanitizer.sanitizeTelemetryObject('x'.repeat(100_000))).toBe('x'.repeat(100_000));
+    });
+
+    it('handles deeply nested workflow-like values and bounds the depth', () => {
+      const chain = () => {
+        let nested: any = { nodes: [] };
+        for (let i = 0; i < 3000; i++) nested = { nodes: [], k: nested };
+        return nested;
+      };
+      const workflow = { nodes: [], connections: {}, first: chain(), second: chain() };
+      const start = performance.now();
+      const out = WorkflowSanitizer.sanitizeWorkflowRaw(workflow);
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(out.first.k.k.k).toBe('[REDACTED_NESTED_WORKFLOW]');
+      expect(workflow.first.k.k.k).toHaveProperty('nodes');
+    });
+
+    it('handles many operations on one node', () => {
+      const operations = Array.from({ length: 12_000 }, (_, i) => ({
+        type: 'updateNode',
+        nodeName: 'Set',
+        updates: { disabled: false },
+        node: { name: 'Set', type: 'k' + i },
+      }));
+      const start = performance.now();
+      const out = WorkflowSanitizer.sanitizeOperations<any[]>(operations);
+      expect(performance.now() - start).toBeLessThan(2000);
+      expect(out).toHaveLength(12_000);
     });
   });
 });

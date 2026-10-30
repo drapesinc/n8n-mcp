@@ -18,7 +18,7 @@ import dotenv from 'dotenv';
 import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
 import { PROJECT_VERSION } from './utils/version';
 import { v4 as uuidv4 } from 'uuid';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   negotiateProtocolVersion,
@@ -514,6 +514,21 @@ export class SingleSessionHTTPServer {
    * the wait would let a queued request write back values that a request ahead of it
    * has since replaced.
    */
+  /**
+   * Keyed digest of the fields that identify an instance configuration (#1045).
+   * `withAccessToken: false` leaves out the optional MCP access token.
+   */
+  private instanceConfigDigest(context: InstanceContext, withAccessToken = true): Buffer {
+    return createHmac('sha256', this.authToken ?? '')
+      .update(JSON.stringify({
+        url: context.n8nApiUrl,
+        instanceId: context.instanceId,
+        n8nApiKey: context.n8nApiKey,
+        n8nMcpAccessToken: withAccessToken ? context.n8nMcpAccessToken : undefined
+      }))
+      .digest();
+  }
+
   private async switchSessionContext(
     sessionId: string,
     newContext: InstanceContext,
@@ -804,9 +819,14 @@ export class SingleSessionHTTPServer {
           // concurrent-sessions opt-in, both allow multiple MCP clients to use the
           // same tenant/instance concurrently.
           if (isMultiTenantEnabled && sessionStrategy === 'instance' && !allowConcurrentSessions && instanceContext?.instanceId) {
+            // SECURITY (GHSA-q7jr-6fm4-vvhg): match the instance URL, ID and API key.
+            const incomingDigest = this.instanceConfigDigest(instanceContext, false);
             const sessionsToRemove: string[] = [];
             for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
-              if (context?.instanceId === instanceContext.instanceId) {
+              if (
+                context?.instanceId === instanceContext.instanceId &&
+                timingSafeEqual(this.instanceConfigDigest(context, false), incomingDigest)
+              ) {
                 sessionsToRemove.push(existingSessionId);
               }
             }
@@ -837,15 +857,7 @@ export class SingleSessionHTTPServer {
             // offline confirmation oracle for credential guesses (CodeQL
             // js/insufficient-password-hash). Any legitimate hash-comparing consumer
             // already holds AUTH_TOKEN, so cross-process comparability is preserved.
-            const configHash = createHmac('sha256', this.authToken ?? '')
-              .update(JSON.stringify({
-                url: instanceContext.n8nApiUrl,
-                instanceId: instanceContext.instanceId,
-                n8nApiKey: instanceContext.n8nApiKey,
-                n8nMcpAccessToken: instanceContext.n8nMcpAccessToken
-              }))
-              .digest('hex')
-              .substring(0, 8);
+            const configHash = this.instanceConfigDigest(instanceContext).toString('hex').substring(0, 8);
 
             sessionIdToUse = `instance-${instanceContext.instanceId}-${configHash}-${uuidv4()}`;
             logger.info('Multi-tenant mode: Creating instance-specific session', {
@@ -854,8 +866,8 @@ export class SingleSessionHTTPServer {
               sessionId: sessionIdToUse
             });
           } else {
-            // Use client-provided session ID or generate a standard one
-            sessionIdToUse = sessionId || uuidv4();
+            // SECURITY (GHSA-q7jr-6fm4-vvhg): the server assigns session IDs.
+            sessionIdToUse = uuidv4();
           }
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
@@ -1153,7 +1165,8 @@ export class SingleSessionHTTPServer {
     const app = express();
     
     // Create JSON parser middleware for endpoints that need it
-    const jsonParser = express.json({ limit: '10mb' });
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): no request-body decompression.
+    const jsonParser = express.json({ limit: '10mb', inflate: false });
     
     // Configure trust proxy for correct IP logging behind reverse proxies
     const trustProxy = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
@@ -1698,6 +1711,16 @@ export class SingleSessionHTTPServer {
     
     // Error handler
     app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (!res.headersSent && err?.type === 'encoding.unsupported') {
+        logger.debug('Rejected request body with a Content-Encoding');
+        res.status(415).json({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: 'Content-Encoding is not supported; send an uncompressed body' },
+          id: null
+        });
+        return;
+      }
+
       logger.error('Express error handler:', err);
       
       if (!res.headersSent) {

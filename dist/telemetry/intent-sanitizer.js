@@ -1,8 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.intentSanitizer = exports.IntentSanitizer = void 0;
+const email_redaction_1 = require("./email-redaction");
 const PII_PATTERNS = {
-    email: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/gi,
+    email: /\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/gi,
     url: /https?:\/\/[^\s]+/gi,
     ip: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
     phone: /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
@@ -16,13 +17,18 @@ const COMPANY_PATTERNS = {
     companySuffix: /\b\w+(?:\s+(?:Inc|LLC|Corp|Corporation|Ltd|Limited|GmbH|AG)\.?)\b/gi,
     businessContext: /\b(?:company|organization|client|customer)\s+(?:named?|called)\s+\w+/gi,
 };
+const MAX_INTENT_LENGTH = 10000;
+const EMAIL_DOMAIN = /[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/iy;
 class IntentSanitizer {
     sanitize(intent) {
         if (!intent) {
             return intent;
         }
+        if (intent.length > MAX_INTENT_LENGTH) {
+            return '[TRUNCATED]';
+        }
         let sanitized = intent;
-        sanitized = sanitized.replace(PII_PATTERNS.email, '[EMAIL]');
+        sanitized = (0, email_redaction_1.redactEmailAddresses)(sanitized, EMAIL_DOMAIN, '[EMAIL]');
         sanitized = sanitized.replace(PII_PATTERNS.url, '[URL]');
         sanitized = sanitized.replace(PII_PATTERNS.ip, '[IP_ADDRESS]');
         sanitized = sanitized.replace(PII_PATTERNS.phone, '[PHONE]');

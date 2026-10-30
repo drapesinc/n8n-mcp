@@ -75,6 +75,9 @@ class WebhookHandler extends base_handler_1.BaseTriggerHandler {
             else {
                 return this.errorResponse(input, 'No webhook path available. Provide webhookPath parameter or ensure workflow has a webhook trigger.', startTime);
             }
+            if (!this.isUnderTriggerPrefix(webhookUrl, baseUrl, 'webhook')) {
+                return this.errorResponse(input, 'Invalid webhook path', startTime);
+            }
             const httpMethod = input.httpMethod || triggerInfo?.httpMethod || 'POST';
             const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('../../utils/ssrf-protection')));
             const validation = await SSRFProtection.validateWebhookUrl(webhookUrl);

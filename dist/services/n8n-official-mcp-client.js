@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.N8nOfficialMcpClient = exports.OFFICIAL_RESULT_MAX_BYTES = exports.OFFICIAL_MCP_FAILURE_TTL_MS = exports.OFFICIAL_MCP_CACHE_TTL_MS = exports.AGENT_TOOL_NAMES = exports.OfficialMcpError = exports.OFFICIAL_MCP_HINTS = void 0;
 exports.mapOfficialTransportError = mapOfficialTransportError;
+exports.withResponseSizeLimit = withResponseSizeLimit;
 exports.probeOfficialMcp = probeOfficialMcp;
 const index_js_1 = require("@modelcontextprotocol/sdk/client/index.js");
 const streamableHttp_js_1 = require("@modelcontextprotocol/sdk/client/streamableHttp.js");
@@ -9,6 +10,7 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const ssrf_protection_1 = require("../utils/ssrf-protection");
 const version_1 = require("../utils/version");
 const logger_1 = require("../utils/logger");
+const n8n_api_client_1 = require("./n8n-api-client");
 const PERMISSIVE_JSON_SCHEMA_VALIDATOR = {
     getValidator: () => (input) => ({ valid: true, data: input, errorMessage: undefined }),
 };
@@ -75,6 +77,64 @@ function mapOfficialTransportError(err) {
         return new OfficialMcpError('OFFICIAL_MCP_TRANSPORT_ERROR', err.message.slice(0, 200), undefined, true);
     }
     return new OfficialMcpError('OFFICIAL_MCP_TRANSPORT_ERROR', 'Request to n8n MCP server failed');
+}
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304]);
+function responseTooLargeError(maxBytes) {
+    return new OfficialMcpError('OFFICIAL_MCP_TRANSPORT_ERROR', `The n8n MCP server response exceeded the ${(0, n8n_api_client_1.sizeLimitMb)(maxBytes)} MB size limit and was discarded. ${n8n_api_client_1.SIZE_LIMIT_HINT}`);
+}
+function byteLimitStream(maxBytes, perEvent) {
+    let count = 0;
+    let atLineStart = true;
+    let afterCR = false;
+    return new TransformStream({
+        transform(chunk, controller) {
+            if (!perEvent) {
+                count += chunk.byteLength;
+            }
+            else {
+                for (let i = 0; i < chunk.length; i++) {
+                    const byte = chunk[i];
+                    count++;
+                    if (count > maxBytes)
+                        break;
+                    if (byte === 0x0a && afterCR) {
+                        afterCR = false;
+                        continue;
+                    }
+                    afterCR = byte === 0x0d;
+                    if (byte === 0x0a || byte === 0x0d) {
+                        if (atLineStart)
+                            count = 0;
+                        atLineStart = true;
+                    }
+                    else {
+                        atLineStart = false;
+                    }
+                }
+            }
+            if (count > maxBytes) {
+                controller.error(responseTooLargeError(maxBytes));
+                return;
+            }
+            controller.enqueue(chunk);
+        },
+    });
+}
+function mediaType(header) {
+    return (header ?? '').split(';', 1)[0].trim().toLowerCase();
+}
+function withResponseSizeLimit(fetchFn, maxBytes) {
+    return async (url, init) => {
+        const response = await fetchFn(url, init);
+        if (!response.body || NULL_BODY_STATUSES.has(response.status))
+            return response;
+        const perEvent = response.ok && mediaType(response.headers.get('content-type')) === 'text/event-stream';
+        return new Response(response.body.pipeThrough(byteLimitStream(maxBytes, perEvent)), {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+        });
+    };
 }
 function structuredSize(value) {
     try {
@@ -163,7 +223,7 @@ class N8nOfficialMcpClient {
             const pinned = ssrf_protection_1.SSRFProtection.createPinnedFetch(addresses);
             const transport = new streamableHttp_js_1.StreamableHTTPClientTransport(new URL(this.endpoint), {
                 requestInit: { headers: { Authorization: `Bearer ${this.token}` } },
-                fetch: pinned.fetch,
+                fetch: withResponseSizeLimit(pinned.fetch, (0, n8n_api_client_1.getMaxResponseBytes)()),
             });
             const client = new index_js_1.Client({ name: 'n8n-mcp', version: version_1.PROJECT_VERSION }, { capabilities: {}, jsonSchemaValidator: PERMISSIVE_JSON_SCHEMA_VALIDATOR });
             try {

@@ -12,10 +12,7 @@ function isExpression(value) {
     return typeof value === 'string' && value.startsWith('=');
 }
 function containsExpression(value) {
-    if (typeof value !== 'string') {
-        return false;
-    }
-    return /\{\{.*\}\}/s.test(value);
+    return hasBracketExpression(value);
 }
 function shouldSkipLiteralValidation(value) {
     return isExpression(value) || containsExpression(value);

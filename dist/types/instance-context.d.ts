@@ -6,6 +6,8 @@ export interface InstanceContext {
     n8nMcpAccessToken?: string;
     instanceId?: string;
     sessionId?: string;
+    uiAppsEnabled?: boolean;
+    instanceArgument?: boolean;
     metadata?: Record<string, any>;
 }
 export declare function pickInstanceContextFields(source: InstanceContext): InstanceContext;

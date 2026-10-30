@@ -20,6 +20,7 @@ const workflow_settings_1 = require("../constants/workflow-settings");
 exports.N8N_VERSION_UNAVAILABLE_NOTE = 'Not reported. n8n stopped exposing its version to API clients in 1.119.0, so this is expected ' +
     'and is not an error. Feature availability is detected from API responses instead.';
 const VERSION_CACHE_TTL_MS = 5 * 60 * 1000;
+const SETTINGS_RESPONSE_MAX_BYTES = 1024 * 1024;
 const versionCache = new Map();
 function parseVersion(versionString) {
     const match = versionString.match(/^v?(\d+)\.(\d+)\.(\d+)/);
@@ -72,6 +73,7 @@ async function fetchN8nVersion(baseUrl, options) {
             maxRedirects: 0,
             httpAgent: pinnedAgents?.httpAgent,
             httpsAgent: pinnedAgents?.httpsAgent,
+            maxContentLength: SETTINGS_RESPONSE_MAX_BYTES,
         });
         const settings = response.status === 200 ? response.data?.data : undefined;
         const versionString = typeof settings?.n8nVersion === 'string'

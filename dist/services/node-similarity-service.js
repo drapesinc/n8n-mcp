@@ -90,9 +90,10 @@ class NodeSimilarityService {
             suggestions.push(mistakeSuggestion);
         }
         const allNodes = await this.getCachedNodes();
+        const query = this.prepareQuery(invalidType);
         const scores = allNodes.map(node => ({
             node,
-            score: this.calculateSimilarityScore(invalidType, node)
+            score: this.calculateSimilarityScore(query, node)
         }));
         scores.sort((a, b) => b.score.totalScore - a.score.totalScore);
         for (const { node, score } of scores) {
@@ -169,11 +170,20 @@ class NodeSimilarityService {
         }
         return null;
     }
-    calculateSimilarityScore(invalidType, node) {
+    prepareQuery(invalidType) {
         const cleanInvalid = this.normalizeNodeType(invalidType);
+        return {
+            cleanInvalid,
+            isShortSearch: invalidType.length <= NodeSimilarityService.SHORT_SEARCH_LENGTH,
+            invalidTokens: new Set(invalidType.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)),
+            invalidPackage: cleanInvalid.split(/[.-]/)[0]
+        };
+    }
+    calculateSimilarityScore(invalidType, node) {
+        const query = typeof invalidType === 'string' ? this.prepareQuery(invalidType) : invalidType;
+        const { cleanInvalid, isShortSearch, invalidTokens, invalidPackage } = query;
         const cleanValid = this.normalizeNodeType(node.nodeType);
         const displayNameClean = this.normalizeNodeType(node.displayName);
-        const isShortSearch = invalidType.length <= NodeSimilarityService.SHORT_SEARCH_LENGTH;
         let nameSimilarity = Math.max(this.getStringSimilarity(cleanInvalid, cleanValid), this.getStringSimilarity(cleanInvalid, displayNameClean)) * 40;
         if (isShortSearch && (cleanValid.includes(cleanInvalid) || displayNameClean.includes(cleanInvalid))) {
             nameSimilarity = Math.max(nameSimilarity, 10);
@@ -182,16 +192,14 @@ class NodeSimilarityService {
         if (node.category) {
             const categoryClean = this.normalizeNodeType(node.category);
             if (categoryClean.length >= NodeSimilarityService.MIN_CATEGORY_MATCH_LENGTH) {
-                const invalidTokens = invalidType.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-                if (invalidTokens.includes(categoryClean)) {
+                if (invalidTokens.has(categoryClean)) {
                     categoryMatch = 20;
                 }
             }
         }
         let packageMatch = 0;
-        const invalidParts = cleanInvalid.split(/[.-]/);
         const validParts = cleanValid.split(/[.-]/);
-        if (invalidParts[0] === validParts[0]) {
+        if (invalidPackage === validParts[0]) {
             packageMatch = 15;
         }
         let patternMatch = 0;

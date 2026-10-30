@@ -6,12 +6,17 @@ exports.searchToolDocumentation = searchToolDocumentation;
 exports.getToolsByCategory = getToolsByCategory;
 exports.getAllCategories = getAllCategories;
 const tool_docs_1 = require("./tool-docs");
+const expression_helpers_1 = require("./tool-docs/guides/expression-helpers");
+const native_first_1 = require("./native-first");
 function getToolDocumentation(toolName, depth = 'essentials', disabledOperations) {
     if (toolName === 'javascript_code_node_guide') {
         return getJavaScriptCodeNodeGuide(depth);
     }
     if (toolName === 'python_code_node_guide') {
         return getPythonCodeNodeGuide(depth);
+    }
+    if (toolName === 'expression_helpers') {
+        return (0, expression_helpers_1.getExpressionHelpersGuide)(depth);
     }
     const tool = tool_docs_1.toolsDocumentation[toolName];
     if (!tool) {
@@ -79,14 +84,11 @@ function getToolsOverview(depth = 'essentials', disabledToolOps) {
     if (depth === 'essentials') {
         return `# n8n MCP Tools Reference
 
+${(0, native_first_1.renderNodeSelectionSection)()}
+
 ## Important: Compatibility Notice
 ⚠️ This MCP server is tested with n8n version ${supportedN8nVersion}. 
 Inform the user to check their n8n version matches or is compatible with the supported version listed above.
-
-## Code Node Configuration
-When working with Code nodes, always start by calling the relevant guide:
-- tools_documentation({topic: "javascript_code_node_guide"}) for JavaScript Code nodes
-- tools_documentation({topic: "python_code_node_guide"}) for Python Code nodes
 
 ## Standard Workflow Pattern
 
@@ -171,12 +173,14 @@ tools_documentation({topic: "tool_name", depth: "full"})${buildDisabledOpsOvervi
     const categories = getAllCategories();
     return `# n8n MCP Tools - Complete Reference
 
+${(0, native_first_1.renderNodeSelectionSection)()}
+
 ## Important: Compatibility Notice
 ⚠️ This MCP server is tested with n8n version ${supportedN8nVersion}. 
 Run n8n_health_check() to verify your n8n instance compatibility and API connectivity.
 
-## Code Node Guides
-For Code node configuration, use these comprehensive guides:
+## Guides
+- tools_documentation({topic: "expression_helpers", depth: "full"}) - Helper methods for expressions (arrays, strings, objects, numbers, dates)
 - tools_documentation({topic: "javascript_code_node_guide", depth: "full"}) - JavaScript patterns, n8n variables, error handling
 - tools_documentation({topic: "python_code_node_guide", depth: "full"}) - Python patterns, data access, debugging
 

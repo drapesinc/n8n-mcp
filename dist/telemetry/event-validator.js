@@ -1,14 +1,40 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.TelemetryEventValidator = exports.workflowTelemetrySchema = exports.telemetryEventSchema = void 0;
+exports.sanitizeEventString = sanitizeEventString;
 const zod_1 = require("zod");
 const logger_1 = require("../utils/logger");
-const sanitizedString = zod_1.z.string().transform(val => {
-    let sanitized = val.replace(/https?:\/\/[^\s]+/gi, '[URL]');
+const EMAIL_PATTERN = /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+const EMAIL_LOCAL_CHAR = /[a-zA-Z0-9._%+-]/;
+const MAX_STRING_LENGTH = 10000;
+function redactEmails(val) {
+    let result = '';
+    let copied = 0;
+    for (const match of val.matchAll(EMAIL_PATTERN)) {
+        let start = match.index;
+        while (start > copied && EMAIL_LOCAL_CHAR.test(val[start - 1]))
+            start--;
+        result += `${val.substring(copied, start)}[EMAIL]`;
+        copied = match.index + match[0].length;
+    }
+    return copied === 0 ? val : result + val.substring(copied);
+}
+function boundLength(val) {
+    if (val.length <= MAX_STRING_LENGTH) {
+        return val;
+    }
+    let cut = MAX_STRING_LENGTH;
+    while (cut > 0 && !/\s/.test(val[cut]))
+        cut--;
+    return `${val.substring(0, cut)} [TRUNCATED]`;
+}
+function sanitizeEventString(val) {
+    let sanitized = boundLength(val).replace(/https?:\/\/[^\s]+/gi, '[URL]');
     sanitized = sanitized.replace(/[a-zA-Z0-9_-]{32,}/g, '[KEY]');
-    sanitized = sanitized.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
+    sanitized = redactEmails(sanitized);
     return sanitized;
-});
+}
+const sanitizedString = zod_1.z.string().transform(sanitizeEventString);
 const eventPropertiesSchema = zod_1.z.record(zod_1.z.unknown()).transform(obj => {
     const sanitized = {};
     for (const [key, value] of Object.entries(obj)) {
@@ -75,12 +101,7 @@ const toolUsagePropertiesSchema = zod_1.z.object({
     duration: zod_1.z.number().min(0).max(3600000),
 });
 const searchQueryPropertiesSchema = zod_1.z.object({
-    query: zod_1.z.string().max(100).transform(val => {
-        let sanitized = val.replace(/https?:\/\/[^\s]+/gi, '[URL]');
-        sanitized = sanitized.replace(/[a-zA-Z0-9_-]{32,}/g, '[KEY]');
-        sanitized = sanitized.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
-        return sanitized;
-    }),
+    query: zod_1.z.string().max(100).transform(sanitizeEventString),
     resultsFound: zod_1.z.number().int().min(0),
     searchType: zod_1.z.string().max(50),
     hasResults: zod_1.z.boolean(),
@@ -156,7 +177,9 @@ function sanitizeNestedObject(obj, maxDepth) {
         return '[NESTED]';
     }
     if (Array.isArray(obj)) {
-        return obj.slice(0, 10).map(item => typeof item === 'object' ? sanitizeNestedObject(item, maxDepth - 1) : item);
+        return obj.slice(0, 10).map(item => typeof item === 'object'
+            ? sanitizeNestedObject(item, maxDepth - 1)
+            : typeof item === 'string' ? sanitizeEventString(item) : item);
     }
     const sanitized = {};
     let keyCount = 0;

@@ -7,6 +7,7 @@ interface WorkflowNode {
     credentials?: any;
     disabled?: boolean;
     typeVersion?: number;
+    notes?: string;
 }
 interface SanitizedWorkflow {
     nodes: WorkflowNode[];
@@ -31,18 +32,52 @@ export declare class WorkflowSanitizer {
     private static readonly TOPOLOGY_KEY_WORDS;
     private static readonly URL_KEY_WORDS;
     private static readonly AUTH_SCHEME_PREFIX;
+    private static readonly WEBHOOK_PATH;
+    private static readonly SECRET_PARAM_LAST_WORDS;
+    private static readonly SECRET_PARAM_NAMES;
+    private static readonly MAX_STRING_LENGTH;
+    private static readonly MAX_KEY_LENGTH;
+    private static readonly MAX_NESTED_WORKFLOW_DEPTH;
+    private static readonly MAX_JSON_DEPTH;
+    private static readonly MAX_JSON_WORK;
+    private static readonly MAX_JSON_NESTING;
+    private static jsonDepth;
+    private static jsonBudget;
+    private static readonly EMAIL_DOMAIN;
     static sanitizeWorkflow(workflow: any): SanitizedWorkflow;
+    static sanitizeOperations<T = any>(operations: any, workflows?: any[]): T;
+    private static stripGroupDescriptions;
     static sanitizeTelemetryObject<T = any>(value: any): T;
     private static sanitizeNode;
+    private static isStickyType;
+    private static isKnownNonSticky;
+    private static withoutContent;
+    private static nodeKey;
+    private static nodeKindsByKey;
+    private static recordNodeKind;
+    private static sanitizeGraph;
+    static sanitizeNodeName(name: string): string;
     private static sanitizeObject;
     private static sanitizeString;
+    private static sameJson;
+    private static sanitizeJsonText;
+    private static jsonNesting;
+    private static sanitizeText;
     private static applyPatterns;
+    private static redactJwts;
+    private static jwtStart;
+    private static lastWordCharEnd;
+    private static redactKeyedLiterals;
+    private static keyBefore;
     private static redactSecret;
     private static redactUrlValue;
     private static classifyKey;
+    private static keyWords;
+    private static classifyParamName;
     private static sanitizeConnections;
     static generateWorkflowHash(workflow: any): string;
     static sanitizeWorkflowRaw(workflow: any): any;
+    private static sanitizeWorkflowRawInPlace;
 }
 export {};
 //# sourceMappingURL=workflow-sanitizer.d.ts.map

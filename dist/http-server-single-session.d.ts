@@ -31,6 +31,7 @@ export declare class SingleSessionHTTPServer {
     private sanitizeErrorForClient;
     private updateSessionAccess;
     private authenticateRequest;
+    private instanceConfigDigest;
     private switchSessionContext;
     private performContextSwitch;
     private getSessionMetrics;

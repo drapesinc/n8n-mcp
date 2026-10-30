@@ -44,6 +44,7 @@ const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const tools_1 = require("./tools");
 const ui_1 = require("./ui");
+const request_context_1 = require("../utils/request-context");
 const skills_1 = require("./skills");
 const tools_n8n_manager_1 = require("./tools-n8n-manager");
 const tool_policy_1 = require("./tool-policy");
@@ -57,7 +58,6 @@ const node_repository_1 = require("../database/node-repository");
 const database_adapter_1 = require("../database/database-adapter");
 const shared_database_1 = require("../database/shared-database");
 const property_filter_1 = require("../services/property-filter");
-const task_templates_1 = require("../services/task-templates");
 const config_validator_1 = require("../services/config-validator");
 const enhanced_config_validator_1 = require("../services/enhanced-config-validator");
 const property_dependencies_1 = require("../services/property-dependencies");
@@ -76,11 +76,15 @@ const tools_documentation_1 = require("./tools-documentation");
 const version_1 = require("../utils/version");
 const node_utils_1 = require("../utils/node-utils");
 const node_type_normalizer_1 = require("../utils/node-type-normalizer");
+const deprecated_nodes_1 = require("../services/deprecated-nodes");
+const search_intents_1 = require("../services/search-intents");
 const typeversion_1 = require("../utils/typeversion");
+const native_first_1 = require("./native-first");
 const validation_schemas_1 = require("../utils/validation-schemas");
 const protocol_version_1 = require("../utils/protocol-version");
 const breaking_change_detector_1 = require("../services/breaking-change-detector");
 const node_parser_1 = require("../parsers/node-parser");
+const instance_argument_1 = require("./instance-argument");
 const telemetry_1 = require("../telemetry");
 const startup_checkpoints_1 = require("../telemetry/startup-checkpoints");
 const STDIO_MAX_BUFFER_SIZE = Math.max(1024 * 1024, parseInt(process.env.N8N_MCP_STDIO_MAX_BUFFER_SIZE || '', 10) || 64 * 1024 * 1024);
@@ -95,6 +99,7 @@ class N8NDocumentationMCPServer {
         this.templateService = null;
         this.cache = new simple_cache_1.SimpleCache();
         this.clientInfo = null;
+        this.requireRequestContext = false;
         this.previousTool = null;
         this.previousToolTimestamp = Date.now();
         this.earlyLogger = null;
@@ -110,7 +115,8 @@ class N8NDocumentationMCPServer {
         if (process.env.MCP_MODE && process.env.MCP_MODE !== 'http') {
             (0, stdio_guard_1.installStdioGuard)();
         }
-        this.instanceContext = instanceContext;
+        this.sessionInstanceContext = instanceContext;
+        this.requireRequestContext = options?.requireRequestContext === true;
         this.earlyLogger = earlyLogger || null;
         this.registerAdditionalTools(options?.additionalTools || []);
         const envDbPath = process.env.NODE_DB_PATH;
@@ -178,10 +184,23 @@ class N8NDocumentationMCPServer {
                 tools: {},
                 resources: {},
             },
+            instructions: native_first_1.SERVER_INSTRUCTIONS,
         });
         ui_1.UIAppRegistry.load();
         skills_1.SkillResourceRegistry.load();
         this.setupHandlers();
+    }
+    get instanceContext() {
+        const scope = (0, request_context_1.getRequestScope)(this);
+        if (scope)
+            return scope.instanceContext;
+        if (this.requireRequestContext) {
+            throw new Error('Instance context is not available for this request');
+        }
+        return this.sessionInstanceContext;
+    }
+    set instanceContext(instanceContext) {
+        this.sessionInstanceContext = instanceContext;
     }
     registerAdditionalTools(additionalTools) {
         const builtInToolNames = new Set([
@@ -467,6 +486,7 @@ class N8NDocumentationMCPServer {
                     name: 'n8n-documentation-mcp',
                     version: version_1.PROJECT_VERSION,
                 },
+                instructions: native_first_1.SERVER_INSTRUCTIONS,
             };
             logger_1.logger.info('MCP Initialize response', { response });
             return response;
@@ -528,15 +548,22 @@ class N8NDocumentationMCPServer {
             if (disabledToolOps.size > 0 && this.filteredToolDefinitionsCache) {
                 tools = tools.map(tool => this.filteredToolDefinitionsCache.get(tool.name) ?? tool);
             }
-            ui_1.UIAppRegistry.injectToolMeta(tools);
+            if ((0, ui_1.isUIAppsEnabled)(this.instanceContext)) {
+                tools = ui_1.UIAppRegistry.injectToolMeta(tools);
+            }
+            if ((0, instance_argument_1.isInstanceArgumentEnabled)(this.instanceContext)) {
+                const managementToolNames = new Set(tools_n8n_manager_1.n8nManagementTools.map(tool => tool.name));
+                tools = tools.map(tool => managementToolNames.has(tool.name) ? (0, instance_argument_1.withInstanceArgument)(tool) : tool);
+            }
             return { tools };
         });
         this.server.setRequestHandler(types_js_1.CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
             const isAdditionalTool = this.additionalToolsByName.has(name);
-            const resultMeta = !isAdditionalTool && ui_1.UIAppRegistry.getAppForTool(name)?.html
-                ? { _meta: { 'n8n-mcp/toolName': name } }
-                : {};
+            const hasUIApp = !isAdditionalTool
+                && (0, ui_1.isUIAppsEnabled)(this.instanceContext)
+                && Boolean(ui_1.UIAppRegistry.getAppForTool(name)?.html);
+            const resultMeta = hasUIApp ? { _meta: { 'n8n-mcp/toolName': name } } : {};
             logger_1.logger.info('Tool call received', {
                 toolName: name,
                 ...(0, redaction_1.summarizeToolCallArgs)(args),
@@ -604,6 +631,9 @@ class N8NDocumentationMCPServer {
             processedArgs = this.coerceStringifiedJsonParams(name, processedArgs);
             if (processedArgs) {
                 processedArgs = JSON.parse(JSON.stringify(processedArgs));
+            }
+            if (!isAdditionalTool) {
+                processedArgs = (0, instance_argument_1.withoutInstanceArgument)(processedArgs);
             }
             const disabledToolOps = this.getDisabledToolOperations();
             const disabledOpsForTool = disabledToolOps.get(name);
@@ -736,7 +766,7 @@ class N8NDocumentationMCPServer {
             }
         });
         this.server.setRequestHandler(types_js_1.ListResourcesRequestSchema, async () => {
-            const apps = ui_1.UIAppRegistry.getAllApps();
+            const apps = (0, ui_1.isUIAppsEnabled)(this.instanceContext) ? ui_1.UIAppRegistry.getAllApps() : [];
             const skills = skills_1.SkillResourceRegistry.getAll();
             return {
                 resources: [
@@ -978,6 +1008,10 @@ class N8NDocumentationMCPServer {
             }
             return workspaceContext;
         }
+        const requestContext = this.instanceContext;
+        if (requestContext?.n8nApiUrl && requestContext?.n8nApiKey) {
+            return requestContext;
+        }
         const defaultWorkspace = manager.getDefaultWorkspace();
         if (defaultWorkspace) {
             const resolvedContext = (0, workspace_api_client_1.resolveWorkspaceContext)(defaultWorkspace);
@@ -1079,8 +1113,7 @@ class N8NDocumentationMCPServer {
                     }
                     catch (e) {
                         logger_1.logger.warn(`Failed to parse string→${expectedType} for param "${key}" in tool "${toolName}"`, {
-                            error: e instanceof Error ? e.message : String(e),
-                            valuePreview: trimmed.substring(0, 200),
+                            errorName: e instanceof Error ? e.name : typeof e,
                             valueLength: trimmed.length,
                         });
                     }
@@ -1096,8 +1129,7 @@ class N8NDocumentationMCPServer {
                     }
                     catch (e) {
                         logger_1.logger.warn(`Failed to parse string→${expectedType} for param "${key}" in tool "${toolName}"`, {
-                            error: e instanceof Error ? e.message : String(e),
-                            valuePreview: trimmed.substring(0, 200),
+                            errorName: e instanceof Error ? e.name : typeof e,
                             valueLength: trimmed.length,
                         });
                     }
@@ -1571,8 +1603,9 @@ class N8NDocumentationMCPServer {
                 };
             });
         }
+        const { deprecatedVersions: _deprecatedVersions, ...nodeFields } = node;
         const result = {
-            ...node,
+            ...nodeFields,
             workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package ?? 'n8n-nodes-base', node.nodeType),
             aiToolCapabilities,
             outputs
@@ -1580,6 +1613,10 @@ class N8NDocumentationMCPServer {
         const toolVariantInfo = this.buildToolVariantGuidance(node);
         if (toolVariantInfo) {
             result.toolVariantInfo = toolVariantInfo;
+        }
+        const deprecation = this.buildDeprecationInfo(node);
+        if (deprecation) {
+            result.deprecation = deprecation;
         }
         return result;
     }
@@ -1610,13 +1647,15 @@ class N8NDocumentationMCPServer {
     async searchNodesFTS(query, limit, mode, options) {
         if (!this.db)
             throw new Error('Database not initialized');
-        const cleanedQuery = query.trim();
+        let cleanedQuery = query.trim();
         if (!cleanedQuery) {
             return { query, results: [], totalCount: 0 };
         }
         if (mode === 'FUZZY') {
             return this.searchNodesFuzzy(cleanedQuery, limit, { includeOperations: options?.includeOperations });
         }
+        const { intent, query: intentQuery } = this.resolveSearchIntent(cleanedQuery, options?.source);
+        cleanedQuery = intentQuery;
         let ftsQuery;
         if (cleanedQuery.startsWith('"') && cleanedQuery.endsWith('"')) {
             ftsQuery = cleanedQuery;
@@ -1685,9 +1724,12 @@ class N8NDocumentationMCPServer {
                 logger_1.logger.debug('FTS missed HTTP Request node, augmenting with LIKE search');
                 return this.searchNodesLIKE(query, limit, options);
             }
+            const rankedNodes = intent
+                ? this.applySearchIntent(scoredNodes, intent.nodeTypes, cleanedQuery, limit)
+                : scoredNodes;
             const result = {
                 query,
-                results: scoredNodes.map(node => {
+                results: rankedNodes.map(node => {
                     const nodeResult = {
                         nodeType: node.node_type,
                         workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package_name, node.node_type),
@@ -1695,7 +1737,9 @@ class N8NDocumentationMCPServer {
                         description: node.description,
                         category: node.category,
                         package: node.package_name,
-                        relevance: this.calculateRelevance(node, cleanedQuery)
+                        relevance: intent?.nodeTypes.includes(node.node_type)
+                            ? 'high'
+                            : this.calculateRelevance(node, cleanedQuery)
                     };
                     if (node.is_community === 1) {
                         nodeResult.isCommunity = true;
@@ -1707,6 +1751,9 @@ class N8NDocumentationMCPServer {
                             nodeResult.npmDownloads = node.npm_downloads;
                         }
                     }
+                    if (this.isDeprecatedSearchRow(node)) {
+                        nodeResult.deprecated = true;
+                    }
                     if (options?.includeOperations) {
                         const opsTree = this.buildOperationsTree(node.operations);
                         if (opsTree) {
@@ -1715,7 +1762,7 @@ class N8NDocumentationMCPServer {
                     }
                     return nodeResult;
                 }),
-                totalCount: scoredNodes.length
+                totalCount: rankedNodes.length
             };
             if (mode !== 'OR') {
                 result.mode = mode;
@@ -1746,22 +1793,46 @@ class N8NDocumentationMCPServer {
                     logger_1.logger.error(`Failed to add examples:`, error);
                 }
             }
-            telemetry_1.telemetry.trackSearchQuery(query, scoredNodes.length, mode ?? 'OR');
+            telemetry_1.telemetry.trackSearchQuery(query, rankedNodes.length, mode ?? 'OR');
             return result;
         }
         catch (error) {
             logger_1.logger.warn('FTS5 search failed, falling back to LIKE search:', error.message);
             if (error.message.includes('syntax error') || error.message.includes('fts5')) {
                 logger_1.logger.warn(`FTS5 syntax error for query "${query}" in mode ${mode}`);
-                const likeResult = await this.searchNodesLIKE(query, limit);
+                const likeResult = await this.searchNodesLIKE(query, limit, options);
                 telemetry_1.telemetry.trackSearchQuery(query, likeResult.results?.length ?? 0, `${mode}_LIKE_FALLBACK`);
                 return {
                     ...likeResult,
                     mode
                 };
             }
-            return this.searchNodesLIKE(query, limit);
+            return this.searchNodesLIKE(query, limit, options);
         }
+    }
+    resolveSearchIntent(query, source) {
+        if (source === 'community' || source === 'verified')
+            return { query };
+        const intent = (0, search_intents_1.matchSearchIntent)(query);
+        return intent ? { intent, query: (0, search_intents_1.normalizeIntentQuery)(query) } : { query };
+    }
+    applySearchIntent(rows, nodeTypes, query, limit) {
+        const lowerQuery = query.toLowerCase();
+        const exactMatches = rows.filter(row => row.display_name.toLowerCase() === lowerQuery);
+        const placed = new Set(exactMatches.map(row => row.node_type));
+        const promoted = [];
+        for (const nodeType of nodeTypes) {
+            if (placed.has(nodeType))
+                continue;
+            const row = rows.find(r => r.node_type === nodeType)
+                ?? this.db.prepare('SELECT * FROM nodes WHERE node_type = ? AND is_community = 0').get(nodeType);
+            if (!row)
+                continue;
+            promoted.push(row);
+            placed.add(nodeType);
+        }
+        const rest = rows.filter(row => !placed.has(row.node_type));
+        return [...exactMatches, ...promoted, ...rest].slice(0, limit);
     }
     async searchNodesFuzzy(query, limit, options) {
         if (!this.db)
@@ -1773,6 +1844,11 @@ class N8NDocumentationMCPServer {
         const candidateNodes = this.db.prepare(`
       SELECT * FROM nodes
     `).all();
+        const queryLength = query.toLowerCase().length;
+        const maxScorableLength = candidateNodes.reduce((max, node) => Math.max(max, this.getFuzzyQueryLengthLimit(node.display_name.toLowerCase(), node.node_type.toLowerCase())), 0);
+        if (queryLength > maxScorableLength) {
+            return { query, results: [], totalCount: 0, mode: 'FUZZY' };
+        }
         const scoredNodes = candidateNodes.map(node => {
             const score = this.calculateFuzzyScore(node, query);
             return { node, score };
@@ -1800,6 +1876,9 @@ class N8NDocumentationMCPServer {
                     category: node.category,
                     package: node.package_name
                 };
+                if (this.isDeprecatedSearchRow(node)) {
+                    nodeResult.deprecated = true;
+                }
                 if (options?.includeOperations) {
                     const opsTree = this.buildOperationsTree(node.operations);
                     if (opsTree) {
@@ -1819,12 +1898,15 @@ class N8NDocumentationMCPServer {
         if (displayNameLower === queryLower || nodeTypeClean === queryLower) {
             return 1000;
         }
+        if (queryLower.length > this.getFuzzyQueryLengthLimit(displayNameLower, nodeTypeClean)) {
+            return 0;
+        }
         const nameDistance = this.getEditDistance(queryLower, displayNameLower);
         const typeDistance = this.getEditDistance(queryLower, nodeTypeClean);
         const nameWords = displayNameLower.split(/\s+/);
+        const wordDistances = nameWords.map(word => this.getEditDistance(queryLower, word));
         let minWordDistance = Infinity;
-        for (const word of nameWords) {
-            const distance = this.getEditDistance(queryLower, word);
+        for (const distance of wordDistances) {
             if (distance < minWordDistance) {
                 minWordDistance = distance;
             }
@@ -1832,11 +1914,9 @@ class N8NDocumentationMCPServer {
         const bestDistance = Math.min(nameDistance, typeDistance, minWordDistance);
         let matchedLen = queryLower.length;
         if (minWordDistance === bestDistance) {
-            for (const word of nameWords) {
-                if (this.getEditDistance(queryLower, word) === minWordDistance) {
-                    matchedLen = Math.max(queryLower.length, word.length);
-                    break;
-                }
+            const bestWordIndex = wordDistances.indexOf(minWordDistance);
+            if (bestWordIndex !== -1) {
+                matchedLen = Math.max(queryLower.length, nameWords[bestWordIndex].length);
             }
         }
         else if (typeDistance === bestDistance) {
@@ -1862,25 +1942,34 @@ class N8NDocumentationMCPServer {
         }
         return similarity * 300;
     }
+    getFuzzyQueryLengthLimit(displayNameLower, nodeTypeLower) {
+        const longest = Math.max(displayNameLower.length, nodeTypeLower.length);
+        return Math.max(Math.floor(longest * 1.5), longest + 3);
+    }
     getEditDistance(s1, s2) {
         const m = s1.length;
         const n = s2.length;
-        const dp = Array(m + 1).fill(null).map(() => Array(n + 1).fill(0));
-        for (let i = 0; i <= m; i++)
-            dp[i][0] = i;
+        if (m === 0)
+            return n;
+        if (n === 0)
+            return m;
+        let prev = new Array(n + 1);
+        let curr = new Array(n + 1);
         for (let j = 0; j <= n; j++)
-            dp[0][j] = j;
+            prev[j] = j;
         for (let i = 1; i <= m; i++) {
+            curr[0] = i;
             for (let j = 1; j <= n; j++) {
                 if (s1[i - 1] === s2[j - 1]) {
-                    dp[i][j] = dp[i - 1][j - 1];
+                    curr[j] = prev[j - 1];
                 }
                 else {
-                    dp[i][j] = 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+                    curr[j] = 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
                 }
             }
+            [prev, curr] = [curr, prev];
         }
-        return dp[m][n];
+        return prev[n];
     }
     async searchNodesLIKE(query, limit, options) {
         if (!this.db)
@@ -1928,6 +2017,9 @@ class N8NDocumentationMCPServer {
                             nodeResult.npmDownloads = node.npm_downloads;
                         }
                     }
+                    if (this.isDeprecatedSearchRow(node)) {
+                        nodeResult.deprecated = true;
+                    }
                     if (options?.includeOperations) {
                         const opsTree = this.buildOperationsTree(node.operations);
                         if (opsTree) {
@@ -1966,7 +2058,8 @@ class N8NDocumentationMCPServer {
             }
             return result;
         }
-        const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+        const { intent, query: searchQuery } = this.resolveSearchIntent(query, sourceValue);
+        const words = searchQuery.toLowerCase().split(/\s+/).filter(w => w.length > 0);
         if (words.length === 0) {
             return { query, results: [], totalCount: 0 };
         }
@@ -1979,7 +2072,10 @@ class N8NDocumentationMCPServer {
       ${sourceFilter}
       LIMIT ?
     `).all(...params);
-        const rankedNodes = this.rankSearchResults(nodes, query, limit);
+        const relevant = this.rankSearchResults(nodes, searchQuery, limit);
+        const rankedNodes = intent
+            ? this.applySearchIntent(relevant, intent.nodeTypes, searchQuery, limit)
+            : relevant;
         const result = {
             query,
             results: rankedNodes.map(node => {
@@ -2000,6 +2096,9 @@ class N8NDocumentationMCPServer {
                     if (node.npm_downloads) {
                         nodeResult.npmDownloads = node.npm_downloads;
                     }
+                }
+                if (this.isDeprecatedSearchRow(node)) {
+                    nodeResult.deprecated = true;
                 }
                 if (options?.includeOperations) {
                     const opsTree = this.buildOperationsTree(node.operations);
@@ -2378,12 +2477,12 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             throw new Error(`Node ${nodeType} not found`);
         }
         const allProperties = node.properties || [];
-        const essentials = property_filter_1.PropertyFilter.getEssentials(allProperties, node.nodeType);
-        const operations = node.operations || [];
         const isCommunityNode = node.isCommunity === true;
         const parsedVersion = (0, typeversion_1.parseTypeVersion)(node.version);
         const latestVersion = parsedVersion ?? 1;
         const versionWasCoerced = parsedVersion === null && node.version != null;
+        const essentials = property_filter_1.PropertyFilter.getEssentials(allProperties, node.nodeType, latestVersion);
+        const operations = node.operations || [];
         const versionNotice = isCommunityNode
             ? `⚠️ Use typeVersion: ${latestVersion} when creating this node. Community node typeVersion comes from the node descriptor (typically 1) and is independent of the npm package version.`
             : `⚠️ Use typeVersion: ${latestVersion} when creating this node`;
@@ -2430,6 +2529,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         const toolVariantInfo = this.buildToolVariantGuidance(node);
         if (toolVariantInfo) {
             result.toolVariantInfo = toolVariantInfo;
+        }
+        const deprecation = this.buildDeprecationInfo(node);
+        if (deprecation) {
+            result.deprecation = deprecation;
         }
         if (includeExamples) {
             try {
@@ -2526,6 +2629,10 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 const toolVariantInfo = this.buildToolVariantGuidance(node);
                 if (toolVariantInfo) {
                     result.toolVariantInfo = toolVariantInfo;
+                }
+                const deprecation = this.buildDeprecationInfo(node);
+                if (deprecation) {
+                    result.deprecation = deprecation;
                 }
                 return result;
             }
@@ -2857,42 +2964,6 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
         }
         return value;
     }
-    async listTasks(category) {
-        if (category) {
-            const categories = task_templates_1.TaskTemplates.getTaskCategories();
-            const tasks = categories[category];
-            if (!tasks) {
-                throw new Error(`Unknown category: ${category}. Available categories: ${Object.keys(categories).join(', ')}`);
-            }
-            return {
-                category,
-                tasks: tasks.map(task => {
-                    const template = task_templates_1.TaskTemplates.getTaskTemplate(task);
-                    return {
-                        task,
-                        description: template?.description || '',
-                        nodeType: template?.nodeType || ''
-                    };
-                })
-            };
-        }
-        const categories = task_templates_1.TaskTemplates.getTaskCategories();
-        const result = {
-            totalTasks: task_templates_1.TaskTemplates.getAllTasks().length,
-            categories: {}
-        };
-        for (const [cat, tasks] of Object.entries(categories)) {
-            result.categories[cat] = tasks.map(task => {
-                const template = task_templates_1.TaskTemplates.getTaskTemplate(task);
-                return {
-                    task,
-                    description: template?.description || '',
-                    nodeType: template?.nodeType || ''
-                };
-            });
-        }
-        return result;
-    }
     resolveConfigVersion(requested, nodeVersion) {
         const numeric = typeof requested === 'number' ? requested
             : typeof requested === 'string' && requested.trim() !== '' ? Number(requested) : NaN;
@@ -2929,6 +3000,15 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             '@version': this.resolveConfigVersion(config['@version'], node.version)
         };
         const validationResult = enhanced_config_validator_1.EnhancedConfigValidator.validateWithMode(node.nodeType, configWithVersion, properties, mode, profile);
+        if ((0, deprecated_nodes_1.isDeprecatedNodeVersion)(node, configWithVersion['@version'])) {
+            validationResult.errors.push({
+                type: 'incompatible',
+                property: 'nodeType',
+                message: (0, deprecated_nodes_1.deprecatedNodeMessage)((0, node_utils_1.getWorkflowNodeType)(node.package, node.nodeType)),
+                fix: (0, deprecated_nodes_1.deprecatedNodeReplacementHint)(node.toolVariantOf ?? node.nodeType)
+            });
+            validationResult.valid = false;
+        }
         return {
             nodeType: node.nodeType,
             workflowNodeType: (0, node_utils_1.getWorkflowNodeType)(node.package, node.nodeType),
@@ -3070,6 +3150,28 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
             'Process and transform data',
             'Extend AI agent capabilities'
         ];
+    }
+    isDeprecatedSearchRow(row) {
+        if (!row.deprecated_versions)
+            return false;
+        let deprecatedVersions;
+        try {
+            deprecatedVersions = JSON.parse(row.deprecated_versions);
+        }
+        catch {
+            return false;
+        }
+        return (0, deprecated_nodes_1.isDeprecatedNodeVersion)({ nodeType: row.node_type, version: row.version, deprecatedVersions }, undefined);
+    }
+    buildDeprecationInfo(node) {
+        const deprecatedVersions = node.deprecatedVersions ?? [];
+        if (deprecatedVersions.length === 0)
+            return undefined;
+        return {
+            deprecatedVersions,
+            message: (0, deprecated_nodes_1.deprecatedNodeMessage)((0, node_utils_1.getWorkflowNodeType)(node.package ?? 'n8n-nodes-base', node.nodeType)),
+            replacement: (0, deprecated_nodes_1.deprecatedNodeReplacementHint)(node.toolVariantOf ?? node.nodeType)
+        };
     }
     buildToolVariantGuidance(node) {
         const isToolVariant = !!node.isToolVariant;
@@ -3427,11 +3529,13 @@ Full documentation is being prepared. For now, use get_node_essentials for confi
                 errors: result.errors.map(e => ({
                     node: e.nodeName || 'workflow',
                     message: e.message,
+                    ...(e.code ? { code: e.code } : {}),
                     details: e.details
                 })),
                 warnings: result.warnings.map(w => ({
                     node: w.nodeName || 'workflow',
                     message: w.message,
+                    ...(w.code ? { code: w.code } : {}),
                     details: w.details
                 }))
             };
