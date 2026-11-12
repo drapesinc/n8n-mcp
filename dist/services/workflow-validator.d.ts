@@ -77,6 +77,11 @@ export declare class WorkflowValidator {
     private nodeRepository;
     private nodeValidator;
     private currentWorkflow;
+    private loopBackReach;
+    private loopBackSteps;
+    private loopBackIncompleteReported;
+    private lowerCaseNames;
+    private mainInputTargets;
     private similarityService;
     constructor(nodeRepository: NodeRepository, nodeValidator: typeof EnhancedConfigValidator);
     validateWorkflow(workflow: WorkflowJson, options?: {
@@ -88,6 +93,7 @@ export declare class WorkflowValidator {
     private validateAINodes;
     private validateNodeGroups;
     private validateWorkflowStructure;
+    private checkDeprecatedNode;
     private validateAllNodes;
     private validateConnections;
     private validateConnectionOutputs;
@@ -102,6 +108,9 @@ export declare class WorkflowValidator {
     private getShortNodeType;
     private isCorePackageType;
     private isAdvisoryProfile;
+    private checkNativeAlternative;
+    private checkHttpRequestCredential;
+    private actionNodesByCredential;
     private getMainOutputCount;
     private getConditionalOutputInfo;
     private validateOutputIndexBounds;
@@ -121,8 +130,11 @@ export declare class WorkflowValidator {
     private checkNodeErrorHandling;
     private checkWebhookErrorHandling;
     private generateErrorHandlingSuggestions;
+    private lowerCaseNodeNames;
     private validateSplitInBatchesConnection;
     private checkForLoopBack;
+    private collectLoopBackReach;
+    private reportIncompleteLoopBackCheck;
     private addErrorRecoverySuggestions;
 }
 export {};

@@ -4,10 +4,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.UIAppRegistry = void 0;
+exports.isUIAppsEnabled = isUIAppsEnabled;
 const fs_1 = require("fs");
 const path_1 = __importDefault(require("path"));
 const logger_1 = require("../../utils/logger");
 const app_configs_1 = require("./app-configs");
+function isUIAppsEnabled(context) {
+    if (process.env.N8N_MCP_DISABLE_UI_APPS === 'true')
+        return false;
+    return context?.uiAppsEnabled !== false;
+}
 class UIAppRegistry {
     static load() {
         const packageRoot = path_1.default.resolve(__dirname, '..', '..', '..');
@@ -52,17 +58,20 @@ class UIAppRegistry {
     }
     static injectToolMeta(tools) {
         if (!this.loaded)
-            return;
-        for (const tool of tools) {
+            return tools;
+        return tools.map(tool => {
             const entry = this.toolIndex.get(tool.name);
-            if (entry && entry.html) {
-                tool._meta = {
+            if (!entry?.html)
+                return tool;
+            return {
+                ...tool,
+                _meta: {
                     ...(tool._meta ?? {}),
                     ui: { resourceUri: entry.config.uri },
                     'ui/resourceUri': entry.config.uri,
-                };
-            }
-        }
+                },
+            };
+        });
     }
     static reset() {
         this.entries.clear();

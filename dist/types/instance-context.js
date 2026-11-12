@@ -7,6 +7,7 @@ exports.getInstanceScopeId = getInstanceScopeId;
 const crypto_1 = require("crypto");
 const ssrf_protection_1 = require("../utils/ssrf-protection");
 const n8n_api_1 = require("../config/n8n-api");
+const strip_trailing_slashes_1 = require("../utils/strip-trailing-slashes");
 const INSTANCE_CONTEXT_KEYS = [
     'n8nApiUrl',
     'n8nApiKey',
@@ -15,6 +16,8 @@ const INSTANCE_CONTEXT_KEYS = [
     'n8nMcpAccessToken',
     'instanceId',
     'sessionId',
+    'uiAppsEnabled',
+    'instanceArgument',
     'metadata'
 ];
 const _instanceContextKeysExhaustive = true;
@@ -91,9 +94,12 @@ function isInstanceContext(obj) {
     const hasValidSessionId = obj.sessionId === undefined || typeof obj.sessionId === 'string';
     const hasValidMetadata = obj.metadata === undefined ||
         (typeof obj.metadata === 'object' && obj.metadata !== null);
+    const hasValidUiAppsEnabled = obj.uiAppsEnabled === undefined || typeof obj.uiAppsEnabled === 'boolean';
+    const hasValidInstanceArgument = obj.instanceArgument === undefined || typeof obj.instanceArgument === 'boolean';
     return hasValidUrl && hasValidKey && hasValidTimeout && hasValidRetries &&
         hasValidMcpAccessToken &&
-        hasValidInstanceId && hasValidSessionId && hasValidMetadata;
+        hasValidInstanceId && hasValidSessionId && hasValidMetadata &&
+        hasValidUiAppsEnabled && hasValidInstanceArgument;
 }
 function validateInstanceContext(context) {
     const errors = [];
@@ -163,6 +169,12 @@ function validateInstanceContext(context) {
             errors.push(`Invalid n8nApiMaxRetries: ${context.n8nApiMaxRetries} - Must be a finite number (not Infinity or NaN)`);
         }
     }
+    if (context.uiAppsEnabled !== undefined && typeof context.uiAppsEnabled !== 'boolean') {
+        errors.push(`Invalid uiAppsEnabled: Must be a boolean, got ${typeof context.uiAppsEnabled}`);
+    }
+    if (context.instanceArgument !== undefined && typeof context.instanceArgument !== 'boolean') {
+        errors.push(`Invalid instanceArgument: Must be a boolean, got ${typeof context.instanceArgument}`);
+    }
     return {
         valid: errors.length === 0,
         errors: errors.length > 0 ? errors : undefined
@@ -170,7 +182,7 @@ function validateInstanceContext(context) {
 }
 function getInstanceScopeId(context) {
     if (context?.n8nApiUrl && context?.n8nApiKey) {
-        const url = context.n8nApiUrl.trim().replace(/\/+$/, '').toLowerCase();
+        const url = (0, strip_trailing_slashes_1.stripTrailingSlashes)(context.n8nApiUrl.trim()).toLowerCase();
         return (0, crypto_1.createHash)('sha256')
             .update(`n8n-mcp-wv:${url}:${context.n8nApiKey}`)
             .digest('hex')

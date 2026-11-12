@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.BaseTriggerHandler = void 0;
 const n8n_api_1 = require("../../config/n8n-api");
+const strip_trailing_slashes_1 = require("../../utils/strip-trailing-slashes");
 class BaseTriggerHandler {
     constructor(client, context) {
         this.client = client;
@@ -9,6 +10,19 @@ class BaseTriggerHandler {
     }
     validate(input) {
         return this.inputSchema.parse(input);
+    }
+    isUnderTriggerPrefix(triggerUrl, baseUrl, prefix) {
+        try {
+            const target = new URL(triggerUrl);
+            const base = new URL(baseUrl);
+            const triggerRoot = `${(0, strip_trailing_slashes_1.stripTrailingSlashes)(base.pathname)}/${prefix}/`;
+            return target.origin === base.origin &&
+                target.pathname.startsWith(triggerRoot) &&
+                !/%(2e|2f|5c)/i.test(target.pathname.slice(triggerRoot.length));
+        }
+        catch {
+            return false;
+        }
     }
     getBaseUrl() {
         if (this.context?.n8nApiUrl) {

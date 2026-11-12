@@ -5,17 +5,48 @@
 [![npm version](https://img.shields.io/npm/v/n8n-mcp.svg)](https://www.npmjs.com/package/n8n-mcp)
 [![codecov](https://codecov.io/gh/czlonkowski/n8n-mcp/graph/badge.svg?token=YOUR_TOKEN)](https://codecov.io/gh/czlonkowski/n8n-mcp)
 [![Tests](https://img.shields.io/badge/tests-6524%20passing-brightgreen.svg)](https://github.com/czlonkowski/n8n-mcp/actions)
-[![n8n version](https://img.shields.io/badge/n8n-2.41.4-orange.svg)](https://github.com/n8n-io/n8n)
+[![n8n version](https://img.shields.io/badge/n8n-2.46.7-orange.svg)](https://github.com/n8n-io/n8n)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fczlonkowski%2Fn8n--mcp-green.svg)](https://github.com/czlonkowski/n8n-mcp/pkgs/container/n8n-mcp)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/16495/badge)](https://www.bestpractices.dev/projects/16495)
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/n8n-mcp?referralCode=n8n-mcp)
 
-A Model Context Protocol (MCP) server that provides AI assistants with comprehensive access to n8n node documentation, properties, and operations. Deploy in minutes to give Claude and other AI assistants deep knowledge about n8n's 2,951 workflow automation nodes (838 core + 2,113 community).
+n8n-MCP is an open-source MCP server that lets Claude, ChatGPT, Cursor, and other AI assistants operate n8n: read failed executions, edit workflows in place, validate and test them, manage credentials, and build new workflows. It works with any n8n instance that has the Public API enabled, and can use n8n's built-in MCP server as a second backend.
 
-## Overview
+## What You Can Do With It
 
-n8n-MCP serves as a bridge between n8n's workflow automation platform and AI models, enabling them to understand and work with n8n nodes effectively. It provides structured access to:
+- **Debug failing workflows** - `n8n_executions` reads an execution and, with `mode: "error"`, returns the error, the failing node, and sample items from the node before it.
+- **Edit workflows in place** - `n8n_update_partial_workflow` applies targeted operations to the nodes and connections named in the request, so the assistant does not resend the whole workflow. This includes find-and-replace inside one large field such as a Code node (`patchNodeField`). By default n8n-MCP saves a snapshot before it changes a workflow's nodes or connections, and `n8n_workflow_versions` can diff and roll back.
+- **Validate and fix before going live** - `validate_node`, `validate_workflow`, and `n8n_validate_workflow` report unknown nodes, invalid node versions, missing required fields, and broken connections or expressions. `n8n_autofix_workflow` repairs the common ones.
+- **Test** - `n8n_test_workflow` runs a workflow through its webhook, form, or chat trigger, or, through n8n's built-in MCP server, with pinned data when it has no such trigger.
+- **Manage the instance** - create, update, and delete credentials, work with data tables and folders, and run a security audit (`n8n_audit_instance`).
+- **Build new workflows** - bundled knowledge of 3,501 nodes and 2,352 templates, so the assistant configures real nodes instead of guessing.
+- **Work across several n8n instances** - on the [hosted service](https://www.n8n-mcp.com/docs/multi-instance), register production, staging, and client instances once and name the target on each call. Self-hosted HTTP mode can serve several instances with [per-request instance headers](./docs/HTTP_DEPLOYMENT.md#per-request-instance-headers-multi-tenant).
 
-- **2,951 n8n nodes** - 838 core nodes + 2,113 community nodes (1,730 verified)
+## n8n-MCP and n8n's Built-In MCP Server
+
+n8n ships its own instance-level MCP server, and it covers a lot: building and editing workflows, executions, version history, data tables, and Agents. n8n-MCP does not replace it. The two differ in how they are built:
+
+| | n8n's built-in MCP server | n8n-MCP |
+|---|---|---|
+| Runs | Inside one n8n instance | As a separate server that talks to n8n |
+| Instances per connection | One | Several (hosted service, or multi-tenant HTTP mode) |
+| Credentials | Lists credentials and edits their descriptions | Creates, updates, and deletes credentials |
+| n8n versions | Present since late n8n 1.x; most tools need n8n 2.12 or later, and each tool has its own minimum version | Workflow and execution tools work through the Public API on older versions too, including the 1.x line. Credential actions depend on what that version's API exposes, and newer tools state the version they need |
+| Workflow access | Most operations need the workflow's "Available in MCP" setting, which is off by default | Every workflow the API key can reach |
+
+**The built-in server is enough when** you work with a single instance on a recent n8n 2.x, build and edit workflows on that instance, and set up credentials yourself in the n8n UI.
+
+**Add n8n-MCP when** you run more than one instance, want the assistant to create and update credentials, are on an older n8n version that predates the built-in tools you need, or want autofix, execution error analysis, templates, and a security audit.
+
+**Or use both through one connection.** Set `N8N_MCP_ACCESS_TOKEN` and n8n-MCP routes the operations the Public API cannot perform to n8n's own server: test runs with pinned data, n8n's native version history, live dropdown values, n8n Agents, and data-table column changes. The assistant still sees one MCP server. See [Official MCP Setup](./docs/OFFICIAL_MCP_SETUP.md).
+
+> **Naming note:** n8n's documentation uses `n8n-mcp` as the example connection name for its built-in server in some client configurations (for example `claude mcp add --transport http n8n-mcp https://<your-n8n-domain>/mcp-server/http`). That name points at n8n's own server. This project is a separate open-source server: `github.com/czlonkowski/n8n-mcp`, published on npm as `n8n-mcp`.
+
+## Node and Template Coverage
+
+The documentation and validation tools work without an n8n connection, against a bundled database:
+
+- **3,501 n8n nodes** - 842 core nodes + 2,659 community nodes (2,228 verified)
 - **Node properties** - 99% coverage with detailed schemas
 - **Node operations** - 66.5% coverage of available actions
 - **Documentation** - 86% coverage from official n8n docs (including AI nodes)
@@ -36,15 +67,15 @@ n8n-MCP serves as a bridge between n8n's workflow automation platform and AI mod
 
 > 💼 **Need it built for you?** Work with [AiAdvisors — n8n automation audits, builds, and operations](https://aiadvisors.pl/en), run by the author of n8n-mcp and n8n-skills.
 
-## Important Safety Warning
+## Working Safely on Live Workflows
 
-**NEVER edit your production workflows directly with AI!** Always:
-- Make a copy of your workflow before using AI tools
-- Test in development environment first
-- Export backups of important workflows
-- Validate changes before deploying to production
+AI results can be unpredictable, and n8n-MCP can change real workflows. **Try changes to important production workflows on a copy or a staging instance first.**
 
-AI results can be unpredictable. Protect your work!
+- **Snapshots and rollback** - by default n8n-MCP saves a version of a workflow before it changes its nodes or connections, and keeps up to 10 per workflow. `n8n_workflow_versions` lists, diffs, and rolls back those versions. A snapshot that fails to save does not stop the edit, so check that a version exists before relying on rollback for an important change.
+- **One editor at a time** - n8n-MCP reads a workflow, applies the change, and writes the whole workflow back, because n8n's Public API has no conditional write. An edit made in the n8n UI in between is overwritten, so do not edit a workflow in the UI while the assistant is working on it.
+- **Validate before deploying** - run `validate_workflow` on the change, and `n8n_validate_workflow` once it is in n8n.
+- **Keep exports** of workflows you cannot afford to lose.
+- **Limit what the assistant can do** - [Read-Only Deployment](#read-only-deployment) disables write operations.
 
 ## Quick Start
 
@@ -53,11 +84,14 @@ AI results can be unpredictable. Protect your work!
 **[dashboard.n8n-mcp.com](https://dashboard.n8n-mcp.com)**
 
 - Free tier: 100 tool calls/day
-- Instant access: Start building workflows immediately
+- Instant access: Connect your n8n instance and start working on your workflows
+- Several n8n instances through one connection, on every plan ([multi-instance guide](https://www.n8n-mcp.com/docs/multi-instance))
+- OAuth sign-in for claude.ai and ChatGPT, API keys for IDEs and other MCP clients
+- Your n8n API key is stored encrypted and is never returned to the AI client
 - Always up-to-date: Latest n8n nodes and templates
 - No infrastructure: We handle everything
 
-Just sign up, get your API key, and connect your MCP client.
+The hosted service is run by the author of this project. Just sign up, connect your n8n instance, and connect your MCP client.
 
 **Want to self-host?** See the [Self-Hosting Guide](./docs/SELF_HOSTING.md) for npx, Docker, Railway, and local installation options.
 
@@ -95,6 +129,7 @@ n8n-MCP works with multiple AI-powered IDEs and tools:
 - [Cursor](./docs/CURSOR_SETUP.md) - Step-by-step Cursor IDE setup
 - [Windsurf](./docs/WINDSURF_SETUP.md) - Windsurf integration with project rules
 - [Codex](./docs/CODEX_SETUP.md) - Codex integration guide
+- [Kiro](./docs/KIRO_SETUP.md) - Kiro IDE and CLI setup
 - [Antigravity](./docs/ANTIGRAVITY_SETUP.md) - Antigravity integration guide
 
 ## Add Claude Skills (Optional)

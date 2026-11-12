@@ -18,7 +18,7 @@ import dotenv from 'dotenv';
 import { getStartupBaseUrl, formatEndpointUrls, detectBaseUrl } from './utils/url-detector';
 import { PROJECT_VERSION } from './utils/version';
 import { v4 as uuidv4 } from 'uuid';
-import { createHmac } from 'crypto';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import {
   negotiateProtocolVersion,
@@ -466,6 +466,22 @@ export class SingleSessionHTTPServer {
    * Returns true if authentication succeeds, false if it fails
    * (and the response has already been sent with a 401 status).
    */
+  /**
+   * Reply 404 to a request whose mcp-session-id matches no live session, so the
+   * client starts a new session (MCP Streamable HTTP spec). Every caller runs
+   * after authentication, so the response is exempted from the auth limiter's
+   * failure count: a client retrying an expired session must not lock its IP
+   * out of the initialize request it needs to recover.
+   */
+  private sendSessionNotFound(res: express.Response, id: unknown = null): void {
+    if (res.locals) res.locals.mcpSessionNotFound = true;
+    res.status(404).json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Session not found or expired' },
+      id,
+    });
+  }
+
   private authenticateRequest(req: express.Request, res: express.Response): boolean {
     const authHeader = req.headers.authorization;
 
@@ -514,6 +530,21 @@ export class SingleSessionHTTPServer {
    * the wait would let a queued request write back values that a request ahead of it
    * has since replaced.
    */
+  /**
+   * Keyed digest of the fields that identify an instance configuration (#1045).
+   * `withAccessToken: false` leaves out the optional MCP access token.
+   */
+  private instanceConfigDigest(context: InstanceContext, withAccessToken = true): Buffer {
+    return createHmac('sha256', this.authToken ?? '')
+      .update(JSON.stringify({
+        url: context.n8nApiUrl,
+        instanceId: context.instanceId,
+        n8nApiKey: context.n8nApiKey,
+        n8nMcpAccessToken: withAccessToken ? context.n8nMcpAccessToken : undefined
+      }))
+      .digest();
+  }
+
   private async switchSessionContext(
     sessionId: string,
     newContext: InstanceContext,
@@ -804,9 +835,14 @@ export class SingleSessionHTTPServer {
           // concurrent-sessions opt-in, both allow multiple MCP clients to use the
           // same tenant/instance concurrently.
           if (isMultiTenantEnabled && sessionStrategy === 'instance' && !allowConcurrentSessions && instanceContext?.instanceId) {
+            // SECURITY (GHSA-q7jr-6fm4-vvhg): match the instance URL, ID and API key.
+            const incomingDigest = this.instanceConfigDigest(instanceContext, false);
             const sessionsToRemove: string[] = [];
             for (const [existingSessionId, context] of Object.entries(this.sessionContexts)) {
-              if (context?.instanceId === instanceContext.instanceId) {
+              if (
+                context?.instanceId === instanceContext.instanceId &&
+                timingSafeEqual(this.instanceConfigDigest(context, false), incomingDigest)
+              ) {
                 sessionsToRemove.push(existingSessionId);
               }
             }
@@ -837,15 +873,7 @@ export class SingleSessionHTTPServer {
             // offline confirmation oracle for credential guesses (CodeQL
             // js/insufficient-password-hash). Any legitimate hash-comparing consumer
             // already holds AUTH_TOKEN, so cross-process comparability is preserved.
-            const configHash = createHmac('sha256', this.authToken ?? '')
-              .update(JSON.stringify({
-                url: instanceContext.n8nApiUrl,
-                instanceId: instanceContext.instanceId,
-                n8nApiKey: instanceContext.n8nApiKey,
-                n8nMcpAccessToken: instanceContext.n8nMcpAccessToken
-              }))
-              .digest('hex')
-              .substring(0, 8);
+            const configHash = this.instanceConfigDigest(instanceContext).toString('hex').substring(0, 8);
 
             sessionIdToUse = `instance-${instanceContext.instanceId}-${configHash}-${uuidv4()}`;
             logger.info('Multi-tenant mode: Creating instance-specific session', {
@@ -854,8 +882,8 @@ export class SingleSessionHTTPServer {
               sessionId: sessionIdToUse
             });
           } else {
-            // Use client-provided session ID or generate a standard one
-            sessionIdToUse = sessionId || uuidv4();
+            // SECURITY (GHSA-q7jr-6fm4-vvhg): the server assigns session IDs.
+            sessionIdToUse = uuidv4();
           }
 
           const server = new N8NDocumentationMCPServer(instanceContext, undefined, {
@@ -950,11 +978,7 @@ export class SingleSessionHTTPServer {
               return;
             }
             logger.warn('handleRequest: Session removed between check and use (TOCTOU)', { sessionId });
-            res.status(404).json({
-              jsonrpc: '2.0',
-              error: { code: -32000, message: 'Session not found or expired' },
-              id: req.body?.id ?? null,
-            });
+            this.sendSessionNotFound(res, req.body?.id ?? null);
             return;
           }
 
@@ -1020,16 +1044,15 @@ export class SingleSessionHTTPServer {
 
           logger.warn('handleRequest: Invalid request - no session ID and not initialize', errorDetails);
 
-          let errorMessage = 'Bad Request: No valid session ID provided and not an initialize request';
-          let statusCode = 400;
-          if (sessionId && !this.isValidSessionId(sessionId)) {
-            errorMessage = 'Bad Request: Invalid session ID format';
-          } else if (sessionId && !this.transports[sessionId]) {
-            errorMessage = 'Session not found or expired';
-            statusCode = 404;
+          if (sessionId && this.isValidSessionId(sessionId) && !this.transports[sessionId]) {
+            this.sendSessionNotFound(res, req.body?.id ?? null);
+            return;
           }
 
-          res.status(statusCode).json({
+          const errorMessage = sessionId
+            ? 'Bad Request: Invalid session ID format'
+            : 'Bad Request: No valid session ID provided and not an initialize request';
+          res.status(400).json({
             jsonrpc: '2.0',
             error: {
               code: -32000,
@@ -1153,7 +1176,8 @@ export class SingleSessionHTTPServer {
     const app = express();
     
     // Create JSON parser middleware for endpoints that need it
-    const jsonParser = express.json({ limit: '10mb' });
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): no request-body decompression.
+    const jsonParser = express.json({ limit: '10mb', inflate: false });
     
     // Configure trust proxy for correct IP logging behind reverse proxies
     const trustProxy = process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 0;
@@ -1224,8 +1248,11 @@ export class SingleSessionHTTPServer {
       // the default predicate counts anything at or above 400. The guard that
       // emits it runs after authentication, so an unauthenticated caller can
       // never reach it and this cannot help a brute-forcer (#994, #265).
+      // The same holds for "session not found" (see sendSessionNotFound).
       requestWasSuccessful: (_req: express.Request, res: express.Response) =>
-        res.statusCode < 400 || res.locals?.mcpMethodNotFound === true,
+        res.statusCode < 400 ||
+        res.locals?.mcpMethodNotFound === true ||
+        res.locals?.mcpSessionNotFound === true,
       handler: (req, res) => {
         logger.warn('Rate limit exceeded', {
           ip: req.ip,
@@ -1299,7 +1326,9 @@ export class SingleSessionHTTPServer {
       // Handle StreamableHTTP transport requests with new pattern
       const sessionId = req.headers['mcp-session-id'] as string | undefined;
       const existingTransport = sessionId ? this.transports[sessionId] : undefined;
-      if (existingTransport && existingTransport instanceof StreamableHTTPServerTransport) {
+      if (sessionId && existingTransport instanceof StreamableHTTPServerTransport) {
+        // Keep the session alive while a GET stream is open.
+        this.updateSessionAccess(sessionId);
         // Let the StreamableHTTPServerTransport handle the GET request
         try {
           await existingTransport.handleRequest(req, res, undefined);
@@ -1310,6 +1339,13 @@ export class SingleSessionHTTPServer {
         }
       }
       
+      // Checked before the SSE redirect: Streamable HTTP clients open their GET
+      // stream with Accept: text/event-stream too.
+      if (sessionId && !existingTransport) {
+        this.sendSessionNotFound(res);
+        return;
+      }
+
       // SSE clients should use GET /sse instead (SDK pattern: separate endpoints)
       const accept = req.headers.accept;
       if (accept && accept.includes('text/event-stream')) {
@@ -1346,7 +1382,7 @@ export class SingleSessionHTTPServer {
         });
         return;
       }
-      
+
       // Standard response for non-n8n mode
       res.json({
         description: 'n8n Documentation MCP Server',
@@ -1698,6 +1734,16 @@ export class SingleSessionHTTPServer {
     
     // Error handler
     app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (!res.headersSent && err?.type === 'encoding.unsupported') {
+        logger.debug('Rejected request body with a Content-Encoding');
+        res.status(415).json({
+          jsonrpc: '2.0',
+          error: { code: -32600, message: 'Content-Encoding is not supported; send an uncompressed body' },
+          id: null
+        });
+        return;
+      }
+
       logger.error('Express error handler:', err);
       
       if (!res.headersSent) {

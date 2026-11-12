@@ -67,8 +67,8 @@ function buildManifest() {
     display_name: 'n8n-MCP',
     version: pkg.version,
     description:
-      'MCP server providing AI assistants with comprehensive access to n8n node ' +
-      'documentation and workflow management capabilities',
+      'MCP server that lets AI assistants operate n8n: debug, edit, validate, test ' +
+      'and build workflows on any n8n instance',
     author: {
       name: 'Romuald Członkowski',
       url: 'https://aiadvisors.pl/en',
@@ -131,8 +131,10 @@ function buildManifest() {
       platforms: ['darwin', 'win32', 'linux'],
       runtimes: {
         // npx needs a host Node install; declaring it lets hosts fail fast with a
-        // clear message instead of npx erroring at launch.
-        node: '>=20',
+        // clear message instead of npx erroring at launch. Kept looser than
+        // package.json `engines`: hosts enforce this check, and a host's own
+        // Node may trail Node security releases.
+        node: '>=22.12.0',
       },
     },
     tools_generated: false,

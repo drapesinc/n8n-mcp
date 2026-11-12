@@ -10,6 +10,103 @@ const SKIP_FIELDS = new Set([
     'position',
     'credentials',
 ]);
+function isWordCode(c) {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+}
+function isJwtCode(c) {
+    return isWordCode(c) || c === 45;
+}
+function isEmailLocalCode(c) {
+    return isWordCode(c) || c === 46 || c === 37 || c === 43 || c === 45;
+}
+function runEnd(run, text, from) {
+    run.lastIndex = from;
+    run.exec(text);
+    return run.lastIndex;
+}
+function stickyMatch(sticky, text, at) {
+    sticky.lastIndex = at;
+    const match = sticky.exec(text);
+    return match ? match[0] : null;
+}
+function jwtFinder(regex) {
+    const sticky = new RegExp(regex.source, 'y');
+    return (text) => {
+        let start = text.indexOf('eyJ');
+        while (start !== -1) {
+            let end = start + 3;
+            while (end < text.length && isJwtCode(text.charCodeAt(end)))
+                end++;
+            if (end - start - 3 >= 10) {
+                const match = stickyMatch(sticky, text, start);
+                if (match !== null)
+                    return match;
+            }
+            start = text.indexOf('eyJ', end);
+        }
+        return null;
+    };
+}
+function emailFinder(regex) {
+    const sticky = new RegExp(regex.source, 'y');
+    return (text) => {
+        let at = text.indexOf('@');
+        while (at !== -1) {
+            let runStart = at;
+            while (runStart > 0 && isEmailLocalCode(text.charCodeAt(runStart - 1)))
+                runStart--;
+            for (let start = runStart; start < at; start++) {
+                const prev = start > 0 ? text.charCodeAt(start - 1) : -1;
+                if (prev === 123)
+                    continue;
+                if ((prev !== -1 && isWordCode(prev)) !== isWordCode(text.charCodeAt(start))) {
+                    const match = stickyMatch(sticky, text, start);
+                    if (match !== null)
+                        return match;
+                    break;
+                }
+            }
+            at = text.indexOf('@', at + 1);
+        }
+        return null;
+    };
+}
+function urlWithAuthFinder(regex) {
+    const sticky = new RegExp(regex.source, 'y');
+    const scheme = /(?:https?|postgres|mysql|mongodb|redis|amqp):\/\//g;
+    const userRun = /[^:"\s]*/y;
+    const passRun = /[^@"\s]*/y;
+    const hostChar = /[^\s"]/y;
+    return (text) => {
+        let passFrom = -1;
+        let passEnd = -1;
+        scheme.lastIndex = 0;
+        let found;
+        while ((found = scheme.exec(text)) !== null) {
+            const start = found.index;
+            const userStart = start + found[0].length;
+            const userEnd = runEnd(userRun, text, userStart);
+            if (userEnd > userStart && text.charCodeAt(userEnd) === 58) {
+                const passStart = userEnd + 1;
+                if (passStart < passFrom || passStart > passEnd) {
+                    passFrom = passStart;
+                    passEnd = runEnd(passRun, text, passStart);
+                }
+                hostChar.lastIndex = passEnd + 1;
+                if (passEnd > passStart && text.charCodeAt(passEnd) === 64 && hostChar.test(text)) {
+                    const match = stickyMatch(sticky, text, start);
+                    if (match !== null)
+                        return match;
+                }
+            }
+            scheme.lastIndex = start + 1;
+        }
+        return null;
+    };
+}
+function withFinder(pattern, makeFinder) {
+    return { ...pattern, find: makeFinder(pattern.regex) };
+}
 exports.SECRET_PATTERNS = [
     { regex: /sk-(?:proj-)?[A-Za-z0-9]{20,}/, label: 'openai_key', category: 'AI/ML', severity: 'critical' },
     { regex: /sk-ant-[A-Za-z0-9_-]{20,}/, label: 'anthropic_key', category: 'AI/ML', severity: 'critical' },
@@ -30,7 +127,7 @@ exports.SECRET_PATTERNS = [
     { regex: /gho_[A-Za-z0-9]{36,}/, label: 'github_oauth', category: 'GitHub', severity: 'critical' },
     { regex: /ghs_[A-Za-z0-9]{36,}/, label: 'github_server', category: 'GitHub', severity: 'critical' },
     { regex: /ghr_[A-Za-z0-9]{36,}/, label: 'github_refresh', category: 'GitHub', severity: 'critical' },
-    { regex: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, label: 'jwt_token', category: 'Auth tokens', severity: 'critical' },
+    withFinder({ regex: /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, label: 'jwt_token', category: 'Auth tokens', severity: 'critical' }, jwtFinder),
     { regex: /sbp_[a-f0-9]{40,}/, label: 'supabase_secret', category: 'Auth tokens', severity: 'critical' },
     { regex: /xox[bps]-[0-9]{10,}-[A-Za-z0-9-]+/, label: 'slack_token', category: 'Communication', severity: 'critical' },
     { regex: /\b\d{8,10}:A[a-zA-Z0-9_-]{34}\b/, label: 'telegram_bot', category: 'Communication', severity: 'critical' },
@@ -63,10 +160,10 @@ exports.SECRET_PATTERNS = [
     { regex: /dp\.(?:pt|st|sa)\.[a-zA-Z0-9._-]{40,}/, label: 'doppler_token', category: 'Other', severity: 'critical' },
     { regex: /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/, label: 'private_key', category: 'Generic', severity: 'critical' },
     { regex: /Bearer\s+[A-Za-z0-9._-]{32,}/i, label: 'bearer_token', category: 'Generic', severity: 'high' },
-    { regex: /(?:https?|postgres|mysql|mongodb|redis|amqp):\/\/[^:"\s]+:[^@"\s]+@[^\s"]+/, label: 'url_with_auth', category: 'Generic', severity: 'critical' },
+    withFinder({ regex: /(?:https?|postgres|mysql|mongodb|redis|amqp):\/\/[^:"\s]+:[^@"\s]+@[^\s"]+/, label: 'url_with_auth', category: 'Generic', severity: 'critical' }, urlWithAuthFinder),
 ];
 exports.PII_PATTERNS = [
-    { regex: /(?<!\{)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!\})/, label: 'email', category: 'PII', severity: 'medium' },
+    withFinder({ regex: /(?<!\{)\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!\})/, label: 'email', category: 'PII', severity: 'medium' }, emailFinder),
     { regex: /(?<!\d)\+?\d{1,3}[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/, label: 'phone', category: 'PII', severity: 'medium' },
     { regex: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/, label: 'credit_card', category: 'PII', severity: 'high' },
 ];
@@ -110,14 +207,14 @@ function collectStrings(obj, parts, depth = 0) {
 function scanText(parts, location, detections) {
     const text = parts.join('\n');
     for (const pattern of ALL_PATTERNS) {
-        const match = pattern.regex.exec(text);
+        const match = pattern.find ? pattern.find(text) : pattern.regex.exec(text)?.[0] ?? null;
         if (match) {
             detections.push({
                 label: pattern.label,
                 category: pattern.category,
                 severity: pattern.severity,
                 location,
-                maskedSnippet: maskSecret(match[0]),
+                maskedSnippet: maskSecret(match),
             });
         }
     }

@@ -16,6 +16,7 @@ export declare class NodeRepository {
     constructor(dbOrService: DatabaseAdapter | SQLiteStorageService);
     transaction<T>(fn: () => T): T;
     pruneExpiredWorkflowVersions(): void;
+    private ensureDeprecatedVersionsColumn;
     saveNode(node: ParsedNode & Partial<CommunityNodeFields>): void;
     getNode(nodeType: string): any;
     getAITools(): any[];
@@ -25,6 +26,7 @@ export declare class NodeRepository {
     getNodesByCategory(category: string): any[];
     searchNodes(query: string, mode?: 'OR' | 'AND' | 'FUZZY', limit?: number): any[];
     getAllNodes(limit?: number): any[];
+    getActionNodesByCredentialType(): Map<string, string[]>;
     getNodeCount(): number;
     getAIToolNodes(): any[];
     getToolVariant(baseNodeType: string): any | null;

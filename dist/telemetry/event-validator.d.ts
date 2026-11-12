@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { TelemetryEvent, WorkflowTelemetry } from './telemetry-types';
+export declare function sanitizeEventString(val: string): string;
 export declare const telemetryEventSchema: z.ZodObject<{
     user_id: z.ZodString;
     event: z.ZodString;

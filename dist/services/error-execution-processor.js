@@ -1,5 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.hasRecordedError = hasRecordedError;
 exports.processErrorExecution = processErrorExecution;
 const logger_1 = require("../utils/logger");
 const execution_run_data_1 = require("./execution-run-data");
@@ -26,6 +27,13 @@ const SENSITIVE_PATTERNS = [
     'cookie',
     'authorization'
 ];
+function hasRecordedError(execution) {
+    const resultData = execution.data?.resultData;
+    if (resultData?.error)
+        return true;
+    const runData = resultData?.runData || {};
+    return Object.values(runData).some(nodeRuns => (0, execution_run_data_1.getRunError)(nodeRuns) !== undefined);
+}
 function processErrorExecution(execution, options = {}) {
     const { itemsLimit = 2, includeStackTrace = false, includeExecutionPath = true, workflow } = options;
     const resultData = execution.data?.resultData;
@@ -49,7 +57,10 @@ function processErrorExecution(execution, options = {}) {
 }
 function extractPrimaryError(error, lastNode, runData, includeFullStackTrace) {
     const errorNode = error?.node;
-    const nodeName = errorNode?.name || lastNode || 'Unknown';
+    const nodeName = errorNode?.name
+        || (error ? lastNode : findNodeWithError(runData, lastNode))
+        || lastNode
+        || 'Unknown';
     const nodeRunData = runData[nodeName];
     const nodeError = (0, execution_run_data_1.getRunError)(nodeRunData);
     const stackTrace = (error?.stack || nodeError?.stack);
@@ -62,6 +73,11 @@ function extractPrimaryError(error, lastNode, runData, includeFullStackTrace) {
         nodeParameters: extractRelevantParameters(errorNode?.parameters),
         stackTrace: includeFullStackTrace ? stackTrace : truncateStackTrace(stackTrace)
     };
+}
+function findNodeWithError(runData, lastNode) {
+    if (lastNode && (0, execution_run_data_1.getRunError)(runData[lastNode]) !== undefined)
+        return lastNode;
+    return Object.keys(runData).find(name => (0, execution_run_data_1.getRunError)(runData[name]) !== undefined);
 }
 function extractUpstreamContext(errorNodeName, runData, workflow, itemsLimit = 2) {
     if (workflow) {

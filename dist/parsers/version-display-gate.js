@@ -40,6 +40,8 @@ function filterPropertiesForVersion(properties, version) {
 function filterList(properties, version) {
     const result = [];
     for (const property of properties) {
+        if (property == null)
+            continue;
         if (!isShownAtVersion(property, version))
             continue;
         if (property.type === 'collection' && Array.isArray(property.options)) {

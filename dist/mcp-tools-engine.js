@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MCPEngine = void 0;
 const property_filter_1 = require("./services/property-filter");
+const typeversion_1 = require("./utils/typeversion");
 const enhanced_config_validator_1 = require("./services/enhanced-config-validator");
 const workflow_validator_1 = require("./services/workflow-validator");
 class MCPEngine {
@@ -22,7 +23,7 @@ class MCPEngine {
         const node = await this.repository.getNodeByType(args.nodeType);
         if (!node)
             return null;
-        const essentials = property_filter_1.PropertyFilter.getEssentials(node.properties || [], args.nodeType);
+        const essentials = property_filter_1.PropertyFilter.getEssentials(node.properties || [], args.nodeType, (0, typeversion_1.parseTypeVersion)(node.version) ?? undefined);
         return {
             nodeType: node.nodeType,
             displayName: node.displayName,
@@ -56,7 +57,7 @@ class MCPEngine {
             return { missingFields: [], error: 'Node type not found' };
         }
         const missingFields = [];
-        const requiredFields = property_filter_1.PropertyFilter.getEssentials(node.properties || [], args.nodeType).required;
+        const requiredFields = property_filter_1.PropertyFilter.getEssentials(node.properties || [], args.nodeType, (0, typeversion_1.parseTypeVersion)(node.version) ?? undefined).required;
         for (const field of requiredFields) {
             if (!args.config[field.name]) {
                 missingFields.push(field.name);

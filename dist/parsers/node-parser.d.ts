@@ -20,6 +20,7 @@ export interface ParsedNode {
     isToolVariant?: boolean;
     toolVariantOf?: string;
     hasToolVariant?: boolean;
+    deprecatedVersions?: string[];
 }
 export interface ParsedNodeVersion {
     nodeType: string;
@@ -37,10 +38,12 @@ export interface ParsedNodeVersion {
     deprecatedProperties: string[];
 }
 export declare function normalizeNodeVersion(version: unknown): string;
+export declare const ALL_VERSIONS = "*";
 export declare class NodeParser {
     private propertyExtractor;
     private currentNodeClass;
     parse(nodeClass: NodeClass, packageName: string): ParsedNode;
+    private extractDeprecatedVersions;
     parseVersions(nodeClass: NodeClass, packageName: string): ParsedNodeVersion[];
     private getNodeDescription;
     private detectStyle;

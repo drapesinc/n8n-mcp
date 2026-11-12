@@ -6,11 +6,17 @@ const uuid_1 = require("uuid");
 const workflow_validator_1 = require("./workflow-validator");
 const node_similarity_service_1 = require("./node-similarity-service");
 const logger_1 = require("../utils/logger");
+const object_keys_1 = require("../utils/object-keys");
 const node_version_service_1 = require("./node-version-service");
 const breaking_change_detector_1 = require("./breaking-change-detector");
 const node_migration_service_1 = require("./node-migration-service");
 const post_update_validator_1 = require("./post-update-validator");
+const workflow_diff_engine_1 = require("./workflow-diff-engine");
 const logger = new logger_1.Logger({ prefix: '[WorkflowAutoFixer]' });
+function pathSegmentKey(segment) {
+    const bracket = segment.indexOf('[');
+    return bracket === -1 ? segment : segment.slice(0, bracket);
+}
 exports.CONNECTION_FIX_TYPES = [
     'connection-numeric-keys',
     'connection-invalid-type',
@@ -117,6 +123,10 @@ class WorkflowAutoFixer {
             const updatedParameters = JSON.parse(JSON.stringify(node.parameters || {}));
             for (const issue of nodeIssues) {
                 const fieldPath = issue.fieldPath.split('.');
+                if (fieldPath.some(segment => (0, object_keys_1.isReservedObjectKey)(pathSegmentKey(segment)))) {
+                    logger.warn('Skipping expression format fix for reserved field path', { node: nodeName });
+                    continue;
+                }
                 this.setNestedValue(updatedParameters, fieldPath, issue.correctedValue);
                 fixes.push({
                     node: nodeName,
@@ -322,6 +332,10 @@ class WorkflowAutoFixer {
         if (path.length === 0) {
             throw new Error('Cannot set value with empty path');
         }
+        const reservedSegment = path.find(segment => (0, object_keys_1.isReservedObjectKey)(pathSegmentKey(segment)));
+        if (reservedSegment !== undefined) {
+            throw new Error(`Cannot set value: path contains a reserved key (${pathSegmentKey(reservedSegment)})`);
+        }
         try {
             let current = obj;
             for (let i = 0; i < path.length - 1; i++) {
@@ -336,7 +350,7 @@ class WorkflowAutoFixer {
                     if (isNaN(index) || index < 0) {
                         throw new Error(`Invalid array index: ${indexStr}`);
                     }
-                    if (!current[arrayKey]) {
+                    if (!(0, object_keys_1.hasOwnKey)(current, arrayKey) || !current[arrayKey]) {
                         current[arrayKey] = [];
                     }
                     if (!Array.isArray(current[arrayKey])) {
@@ -348,7 +362,7 @@ class WorkflowAutoFixer {
                     current = current[arrayKey][index];
                 }
                 else {
-                    if (current[key] === null || current[key] === undefined) {
+                    if (!(0, object_keys_1.hasOwnKey)(current, key) || current[key] === null || current[key] === undefined) {
                         current[key] = {};
                     }
                     if (typeof current[key] !== 'object' || Array.isArray(current[key])) {
@@ -368,7 +382,7 @@ class WorkflowAutoFixer {
                 if (isNaN(index) || index < 0) {
                     throw new Error(`Invalid array index: ${indexStr}`);
                 }
-                if (!current[arrayKey]) {
+                if (!(0, object_keys_1.hasOwnKey)(current, arrayKey) || !current[arrayKey]) {
                     current[arrayKey] = [];
                 }
                 if (!Array.isArray(current[arrayKey])) {
@@ -546,7 +560,11 @@ class WorkflowAutoFixer {
         const sourceNodes = Object.keys(conn);
         for (const sourceName of sourceNodes) {
             const nodeConn = conn[sourceName];
-            const numericKeys = Object.keys(nodeConn).filter(k => /^\d+$/.test(k));
+            const allNumericKeys = Object.keys(nodeConn).filter(k => /^\d+$/.test(k));
+            const numericKeys = allNumericKeys.filter(k => parseInt(k, 10) <= workflow_diff_engine_1.MAX_CONNECTION_INDEX);
+            if (numericKeys.length < allNumericKeys.length) {
+                logger.warn(`Skipped numeric connection key(s) above ${workflow_diff_engine_1.MAX_CONNECTION_INDEX} on node "${sourceName}"`);
+            }
             if (numericKeys.length === 0)
                 continue;
             if (!nodeConn['main']) {
@@ -603,6 +621,8 @@ class WorkflowAutoFixer {
             newKeyCount.set(r.newKey, (newKeyCount.get(r.newKey) || 0) + 1);
         }
         const safeRenames = renames.filter(r => {
+            if ((0, object_keys_1.isReservedObjectKey)(r.newKey))
+                return false;
             if ((newKeyCount.get(r.newKey) || 0) > 1) {
                 logger.warn(`Skipping ambiguous ID-to-name rename: "${r.oldKey}" → "${r.newKey}" (multiple IDs map to same name)`);
                 return false;

@@ -77,12 +77,14 @@ class ConfidenceScorer {
         if (!content.includes('{{') || !content.includes('}}')) {
             return false;
         }
-        const patterns = [
-            /\{\{.*\.(id|Id|ID|key|Key|name|Name|path|Path|url|Url|uri|Uri).*\}\}/i,
-            /\{\{.*_(id|Id|ID|key|Key|name|Name|path|Path|url|Url|uri|Uri).*\}\}/i,
-            /\{\{.*(id|Id|ID|key|Key|name|Name|path|Path|url|Url|uri|Uri).*\}\}/i
-        ];
-        return patterns.some(pattern => pattern.test(content));
+        const keyword = /id|key|name|path|url|uri/i;
+        return content.split(/[\n\r\u2028\u2029]/).some(line => {
+            const open = line.indexOf('{{');
+            if (open === -1)
+                return false;
+            const close = line.lastIndexOf('}}');
+            return close > open + 2 && keyword.test(line.slice(open + 2, close));
+        });
     }
     static checkNodeCategory(nodeType) {
         const nodeBase = nodeType.split('.').pop()?.toLowerCase() || '';

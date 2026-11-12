@@ -79,10 +79,15 @@ async function credentialTypeHint(args, data, client, context) {
         return undefined;
     try {
         const credential = await api.getCredential(credentialId);
+        const supported = agent_model_providers_1.AGENT_SUPPORTED_CREDENTIAL_TYPES.join(', ');
+        const condition = agent_model_providers_1.AGENT_CONDITIONAL_CREDENTIAL_TYPES[credential.type];
+        if (condition) {
+            return `Credential ${credentialId} is type ${credential.type}, which n8n's agents runtime ${condition}. Otherwise use a credential of one of these types: ${supported}.`;
+        }
         const reason = agent_model_providers_1.AGENT_UNSUPPORTED_CREDENTIAL_TYPES[credential.type];
         if (!reason)
             return undefined;
-        return `Credential ${credentialId} is type ${credential.type}, which n8n's agents runtime does not accept (${reason}). Use a credential of one of these types: ${agent_model_providers_1.AGENT_SUPPORTED_CREDENTIAL_TYPES.join(', ')}.`;
+        return `Credential ${credentialId} is type ${credential.type}, which n8n's agents runtime does not accept (${reason}). Use a credential of one of these types: ${supported}.`;
     }
     catch {
         return undefined;

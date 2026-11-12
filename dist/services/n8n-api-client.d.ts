@@ -7,6 +7,14 @@ export interface N8nApiClientConfig {
     cfClientId?: string;
     cfClientSecret?: string;
 }
+export declare function getMaxResponseBytes(): number;
+export declare function responseSizeLimits(): {
+    maxContentLength: number;
+    maxBodyLength: number;
+};
+export declare const SIZE_LIMIT_HINT = "Set N8N_MCP_MAX_RESPONSE_SIZE (bytes) to change the limit.";
+export declare function sizeLimitMb(maxBytes: number): number;
+export declare function describeSizeLimitError(error: unknown): string | null;
 export interface WorkflowWriteOptions {
     authoredGroups?: Set<string>;
     onWarning?: (message: string) => void;

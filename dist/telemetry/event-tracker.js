@@ -175,11 +175,19 @@ class TelemetryEventTracker {
     trackValidationDetails(nodeType, errorType, details) {
         if (!this.isEnabled())
             return;
+        const sanitize = (value) => workflow_sanitizer_1.WorkflowSanitizer.sanitizeTelemetryObject((0, event_validator_1.sanitizeEventString)(value));
+        const sanitizedDetails = details && typeof details === 'object'
+            ? Object.fromEntries(Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? sanitize(value) : value]))
+            : details;
+        const sanitizedName = workflow_sanitizer_1.WorkflowSanitizer.sanitizeNodeName(nodeType);
+        const safeName = sanitizedName === nodeType
+            ? nodeType
+            : `[REDACTED]${sanitizedName.slice(sanitizedName.lastIndexOf(' #'))}`;
         this.trackEvent('validation_details', {
-            nodeType: nodeType.replace(/[^a-zA-Z0-9_.-]/g, '_'),
+            nodeType: safeName.replace(/[^a-zA-Z0-9_.-]/g, '_'),
             errorType: this.sanitizeErrorType(errorType),
             errorCategory: this.categorizeError(errorType),
-            details
+            details: sanitizedDetails
         });
     }
     trackToolSequence(previousTool, currentTool, timeDelta) {

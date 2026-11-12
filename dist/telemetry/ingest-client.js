@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.IngestClient = void 0;
 exports.resetIngestClientProcessStateForTests = resetIngestClientProcessStateForTests;
 const telemetry_fetch_1 = require("./telemetry-fetch");
+const strip_trailing_slashes_1 = require("../utils/strip-trailing-slashes");
 const STREAM = {
     telemetry_events: 'events',
     telemetry_workflows: 'workflows',
@@ -42,7 +43,7 @@ function parseRetryAfterMs(header, now) {
 class IngestClient {
     constructor(opts) {
         this.opts = opts;
-        this.base = opts.url.replace(/\/+$/, '');
+        this.base = (0, strip_trailing_slashes_1.stripTrailingSlashes)(opts.url);
         this.fetchImpl = opts.fetchImpl ?? telemetry_fetch_1.telemetryFetch;
     }
     from(table) {

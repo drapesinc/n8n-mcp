@@ -20,6 +20,8 @@ import { isNonExecutableNode } from '../utils/node-classification';
 import { validateConditionNodeStructure } from './n8n-validation';
 import { checkNodeGroups } from './node-groups';
 import { ToolVariantGenerator } from './tool-variant-generator';
+import { isDeprecatedNodeVersion, deprecatedNodeMessage, deprecatedNodeReplacementHint } from './deprecated-nodes';
+import { findNativeAlternative } from './code-native-alternatives';
 const logger = new Logger({ prefix: '[WorkflowValidator]' });
 
 /**
@@ -43,6 +45,17 @@ export const VALID_CONNECTION_TYPES = new Set<string>([
   'ai_retriever',
   'ai_reranker',
 ]);
+
+/**
+ * Credential types any HTTP API can use (httpHeaderAuth, httpMultipleHeadersAuth,
+ * oAuth2Api, ...); they say nothing about a native node.
+ */
+function isGenericCredentialType(type: string): boolean {
+  return type.startsWith('http') || ['oAuth1Api', 'oAuth2Api', 'jwtAuth'].includes(type);
+}
+
+/** Credential type -> native node names, computed once per repository. */
+const ACTION_NODES_BY_CREDENTIAL = new WeakMap<object, Map<string, string[]>>();
 
 interface WorkflowNode {
   id: string;
@@ -266,8 +279,16 @@ function collectMalformedConnectionErrors(connections: Record<string, unknown>):
   return errors;
 }
 
+// Total connection steps the SplitInBatches loop-back checks may walk in one validation
+const MAX_LOOP_BACK_STEPS = 1_000_000;
+
 export class WorkflowValidator {
   private currentWorkflow: WorkflowJson | null = null;
+  private loopBackReach = new Map<string, { reached: Set<string>; complete: boolean }>();
+  private loopBackSteps = 0;
+  private loopBackIncompleteReported = false;
+  private lowerCaseNames = new Map<WorkflowNode, { type: string; name: string }>();
+  private mainInputTargets: { workflow: WorkflowJson; targets: Set<string> } | null = null;
   private similarityService: NodeSimilarityService;
 
   constructor(
@@ -294,6 +315,11 @@ export class WorkflowValidator {
   ): Promise<WorkflowValidationResult> {
     // Store current workflow for access in helper methods
     this.currentWorkflow = workflow;
+    this.loopBackReach = new Map();
+    this.loopBackSteps = MAX_LOOP_BACK_STEPS;
+    this.loopBackIncompleteReported = false;
+    this.lowerCaseNames = new Map();
+    this.mainInputTargets = null;
 
     const {
       validateNodes = true,
@@ -456,14 +482,21 @@ export class WorkflowValidator {
   private validateNodeGroups(workflow: WorkflowJson, result: WorkflowValidationResult): void {
     if (!Array.isArray(workflow.nodeGroups) || workflow.nodeGroups.length === 0) return;
 
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): one lookup per node type
+    const triggerByType = new Map<string, boolean>();
     const issues = checkNodeGroups(
       { nodes: workflow.nodes as any, nodeGroups: workflow.nodeGroups },
       {
         isTrigger: node => {
-          const nodeInfo = this.nodeRepository.getNode(
-            NodeTypeNormalizer.normalizeToFullForm(node.type)
-          );
-          return nodeInfo ? Boolean(nodeInfo.isTrigger) : isTriggerNode(node.type);
+          let trigger = triggerByType.get(node.type);
+          if (trigger === undefined) {
+            const nodeInfo = this.nodeRepository.getNode(
+              NodeTypeNormalizer.normalizeToFullForm(node.type)
+            );
+            trigger = nodeInfo ? Boolean(nodeInfo.isTrigger) : isTriggerNode(node.type);
+            triggerByType.set(node.type, trigger);
+          }
+          return trigger;
         }
       }
     );
@@ -619,6 +652,23 @@ export class WorkflowValidator {
   }
 
   /**
+   * Warn about a node on a deprecated typeVersion. A warning, not an error: the validator
+   * cannot tell a node the caller is adding or editing (which n8n rejects) from an untouched
+   * one in a saved workflow (which n8n accepts).
+   */
+  private checkDeprecatedNode(node: WorkflowNode, nodeInfo: any, result: WorkflowValidationResult): void {
+    if (!nodeInfo || !isDeprecatedNodeVersion(nodeInfo, node.typeVersion)) return;
+
+    result.warnings.push({
+      type: 'warning',
+      nodeId: node.id,
+      nodeName: node.name,
+      code: 'DEPRECATED_NODE',
+      message: `${deprecatedNodeMessage(node.type)} ${deprecatedNodeReplacementHint(nodeInfo.toolVariantOf ?? nodeInfo.nodeType)}`
+    });
+  }
+
+  /**
    * Validate all nodes in the workflow
    */
   private async validateAllNodes(
@@ -626,7 +676,28 @@ export class WorkflowValidator {
     result: WorkflowValidationResult,
     profile: string
   ): Promise<void> {
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): index of reported errors by node name and message
+    const reportedErrors = new Map<unknown, Set<unknown>>();
+    let reportedErrorsIndexed = 0;
+    const hasReportedError = (nodeName: string, message: string): boolean => {
+      for (; reportedErrorsIndexed < result.errors.length; reportedErrorsIndexed++) {
+        const e = result.errors[reportedErrorsIndexed];
+        let messages = reportedErrors.get(e.nodeName);
+        if (!messages) {
+          messages = new Set();
+          reportedErrors.set(e.nodeName, messages);
+        }
+        messages.add(e.message);
+      }
+      return reportedErrors.get(nodeName)?.has(message) ?? false;
+    };
+
     for (const node of workflow.nodes) {
+      // Looked up once per node and reused below. The deprecation check runs before the
+      // disabled skip: n8n checks disabled nodes too, and toggling one is an edit.
+      const storedNodeInfo = this.nodeRepository.getNode(NodeTypeNormalizer.normalizeToFullForm(node.type));
+      this.checkDeprecatedNode(node, storedNodeInfo, result);
+
       if (node.disabled || isNonExecutableNode(node.type)) continue;
 
       try {
@@ -665,8 +736,8 @@ export class WorkflowValidator {
         // but n8n API requires full form (n8n-nodes-base.*). Never modify the input workflow.
         const normalizedType = NodeTypeNormalizer.normalizeToFullForm(node.type);
 
-        // Get node definition using normalized type (needed for typeVersion validation)
-        let nodeInfo = this.nodeRepository.getNode(normalizedType);
+        // Node definition using the normalized type (needed for typeVersion validation)
+        let nodeInfo = storedNodeInfo;
 
         // Check if this is a dynamic Tool variant (e.g., googleDriveTool, googleSheetsTool)
         // n8n creates these at runtime when ANY node is used in an AI Agent's tool slot,
@@ -878,12 +949,15 @@ export class WorkflowValidator {
           });
         });
 
+        this.checkNativeAlternative(node, profile, result);
+        this.checkHttpRequestCredential(node, profile, result);
+
         // The config validator above already runs the operator checks, but it keeps one
         // error per property; this direct call reports every operator, skipping the one the
         // config validator already surfaced so nothing appears twice.
         if (node.type === 'n8n-nodes-base.if' || node.type === 'n8n-nodes-base.switch' || node.type === 'n8n-nodes-base.filter') {
           for (const err of validateConditionNodeStructure(node as any)) {
-            if (result.errors.some(e => e.nodeName === node.name && e.message === err)) continue;
+            if (hasReportedError(node.name, err)) continue;
             result.errors.push({
               type: 'error',
               nodeId: node.id,
@@ -1451,6 +1525,76 @@ export class WorkflowValidator {
   }
 
   /**
+   * A short JavaScript Code node whose whole job a native node does (map fields,
+   * collect values, split a list, sort, ...). A warning under the advisory
+   * profiles, a suggestion under runtime, nothing under minimal. Notes starting
+   * with "Why Code:" opt the node out.
+   */
+  private checkNativeAlternative(node: WorkflowNode, profile: string, result: WorkflowValidationResult): void {
+    if (profile === 'minimal' || node.type !== 'n8n-nodes-base.code') return;
+    const parameters = node.parameters ?? {};
+    if ((parameters.language ?? 'javaScript') !== 'javaScript') return;
+    if (typeof node.notes === 'string' && /^\s*why code:/i.test(node.notes)) return;
+
+    const alternative = findNativeAlternative(parameters.jsCode, parameters.mode);
+    if (!alternative) return;
+
+    // A Code node set to execute once sees only its first input item; so must the native node
+    const runOnce = alternative.executeOnce || node.executeOnce === true ? ' with its "Execute Once" setting on' : '';
+    const nativeNode = `the ${alternative.node} node (${alternative.nodeType})${runOnce} does this without code.`;
+    const message = `Code node "${node.name}" only ${alternative.does}. ` +
+      (alternative.when ? `If ${alternative.when}, ${nativeNode}` : nativeNode.charAt(0).toUpperCase() + nativeNode.slice(1)) +
+      ' If this needs a Code node, start its notes with "Why Code:" and the reason.';
+    if (this.isAdvisoryProfile(profile)) {
+      result.warnings.push({ type: 'warning', nodeId: node.id, nodeName: node.name, message, code: 'NATIVE_ALTERNATIVE' });
+    } else {
+      result.suggestions.push(message);
+    }
+  }
+
+  /**
+   * An HTTP Request node signed with a service credential that a native node
+   * uses: point at that node, unless it lacks the operation. A suggestion under
+   * the advisory profiles only: the credential says nothing about whether the
+   * node covers the endpoint.
+   */
+  private checkHttpRequestCredential(node: WorkflowNode, profile: string, result: WorkflowValidationResult): void {
+    if (!this.isAdvisoryProfile(profile) || node.type !== 'n8n-nodes-base.httpRequest') return;
+    const parameters = node.parameters ?? {};
+    const credentialType = parameters.nodeCredentialType;
+    if (parameters.authentication !== 'predefinedCredentialType' || typeof credentialType !== 'string') return;
+    if (isGenericCredentialType(credentialType)) return;
+
+    const nodes = this.actionNodesByCredential()?.get(credentialType);
+    // A credential shared by many nodes (aws, googleApi) does not say which node fits
+    if (!nodes || nodes.length === 0 || nodes.length > 3) return;
+
+    const names = nodes.join(' or ');
+    result.suggestions.push(
+      `HTTP Request node "${node.name}" uses the ${credentialType} credential of the ${names} node. ` +
+      `Use the ${names} node unless it lacks this operation.`
+    );
+  }
+
+  private actionNodesByCredential(): Map<string, string[]> | undefined {
+    const repository = this.nodeRepository;
+    // Repository stubs may not have this method
+    if (typeof repository.getActionNodesByCredentialType !== 'function') return undefined;
+    let map = ACTION_NODES_BY_CREDENTIAL.get(repository);
+    if (!map) {
+      try {
+        map = repository.getActionNodesByCredentialType();
+      } catch (error) {
+        // A hint must not turn into a node validation failure
+        logger.debug('Could not build the credential map for the HTTP Request hint', error);
+        map = new Map();
+      }
+      ACTION_NODES_BY_CREDENTIAL.set(repository, map);
+    }
+    return map;
+  }
+
+  /**
    * Natural (non-error) main output count for a node, from its DB description
    * with dynamic overrides for conditional nodes (IF/Filter/Switch).
    *
@@ -1785,12 +1929,12 @@ export class WorkflowValidator {
     }
 
     // BFS from all trigger nodes
-    const reachable = new Set<string>();
-    const queue: string[] = [...triggerNodes];
-    for (const t of triggerNodes) reachable.add(t);
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): each name is queued once and read by index
+    const reachable = new Set<string>(triggerNodes);
+    const queue: string[] = [...reachable];
 
-    while (queue.length > 0) {
-      const current = queue.shift()!;
+    for (let head = 0; head < queue.length; head++) {
+      const current = queue[head];
       const neighbors = adjacency.get(current);
       if (neighbors) {
         for (const neighbor of neighbors) {
@@ -1827,8 +1971,11 @@ export class WorkflowValidator {
    */
   private hasCycle(workflow: WorkflowJson): boolean {
     const visited = new Set<string>();
-    const recursionStack = new Set<string>();
+    // Position of each node on the current DFS path
+    const pathPosition = new Map<string, number>();
     const path: string[] = [];
+    // exitCounts[k]: potential cycle exits among path[0..k-1], filled on demand
+    const exitCounts: number[] = [0];
     const nodeTypeMap = new Map<string, string>();
     const nodeMap = new Map<string, WorkflowNode>();
 
@@ -1888,9 +2035,19 @@ export class WorkflowValidator {
       return outputCount !== null && outputCount > 1;
     };
 
+    // Whether any node on the current path from position `start` onwards is a potential exit
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): exit counts along the current path
+    const pathFromHasExit = (start: number): boolean => {
+      while (exitCounts.length <= path.length) {
+        const k = exitCounts.length - 1;
+        exitCounts.push(exitCounts[k] + (isPotentialCycleExit(path[k]) ? 1 : 0));
+      }
+      return exitCounts[path.length] > exitCounts[start];
+    };
+
     const hasCycleDFS = (nodeName: string): boolean => {
       visited.add(nodeName);
-      recursionStack.add(nodeName);
+      pathPosition.set(nodeName, path.length);
       path.push(nodeName);
 
       const connections = workflow.connections[nodeName];
@@ -1908,20 +2065,20 @@ export class WorkflowValidator {
         for (const target of allTargets) {
           if (!visited.has(target)) {
             if (hasCycleDFS(target)) return true;
-          } else if (recursionStack.has(target)) {
+          } else if (pathPosition.has(target)) {
             // Back edge found: the cycle is the current path segment from the
             // target onwards. Evaluate the exit condition over the WHOLE
             // cycle, not just the nodes on the first DFS path into it.
-            const cycleNodes = path.slice(path.indexOf(target));
-            if (!cycleNodes.some(isPotentialCycleExit)) {
+            if (!pathFromHasExit(pathPosition.get(target)!)) {
               return true; // No exit mechanism anywhere on the cycle
             }
           }
         }
       }
 
-      recursionStack.delete(nodeName);
+      pathPosition.delete(nodeName);
       path.pop();
+      if (exitCounts.length > path.length + 1) exitCounts.length = path.length + 1;
       return false;
     };
 
@@ -1943,7 +2100,8 @@ export class WorkflowValidator {
     result: WorkflowValidationResult,
     profile: string = 'runtime'
   ): void {
-    const nodeNames = workflow.nodes.map(n => n.name);
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): one name set shared by every node's expression context
+    const nodeNameSet = new Set(workflow.nodes.map(n => n.name));
 
     for (const node of workflow.nodes) {
       if (node.disabled || isNonExecutableNode(node.type)) continue;
@@ -1957,7 +2115,7 @@ export class WorkflowValidator {
 
       // Create expression context
       const context = {
-        availableNodes: nodeNames.filter(n => n !== node.name),
+        availableNodes: { has: (name: string) => name !== node.name && nodeNameSet.has(name) },
         currentNodeName: node.name,
         hasInputData: this.nodeHasInput(node.name, workflow),
         isInLoop: false // Could be enhanced to detect loop nodes
@@ -2060,16 +2218,19 @@ export class WorkflowValidator {
    * Check if a node has input connections
    */
   private nodeHasInput(nodeName: string, workflow: WorkflowJson): boolean {
-    for (const [sourceName, outputs] of Object.entries(workflow.connections)) {
-      if (outputs.main) {
-        for (const outputConnections of outputs.main) {
-          if (outputConnections?.some(conn => conn.node === nodeName)) {
-            return true;
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): collect main-input targets once per workflow
+    if (this.mainInputTargets?.workflow !== workflow) {
+      const targets = new Set<string>();
+      for (const outputs of Object.values(workflow.connections)) {
+        if (outputs.main) {
+          for (const outputConnections of outputs.main) {
+            outputConnections?.forEach(conn => targets.add(conn.node));
           }
         }
       }
+      this.mainInputTargets = { workflow, targets };
     }
-    return false;
+    return this.mainInputTargets.targets.has(nodeName);
   }
 
   /**
@@ -2140,6 +2301,8 @@ export class WorkflowValidator {
    * never under a top-level `error` connection key.
    */
   private workflowHasErrorHandling(workflow: WorkflowJson): boolean {
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): whether a node name has any wired main output, per name
+    const hasWiredMainOutput = new Map<string, boolean>();
     return workflow.nodes.some(node => {
       if (node.disabled) return false;
       if (node.type.toLowerCase().includes('errortrigger')) return true;
@@ -2155,7 +2318,12 @@ export class WorkflowValidator {
       if (!Array.isArray(mainOutputs)) return false;
       const errorOutputIndex = this.getMainOutputCount(node);
       if (errorOutputIndex === null) {
-        return mainOutputs.some(conns => Array.isArray(conns) && conns.length > 0);
+        let wired = hasWiredMainOutput.get(node.name);
+        if (wired === undefined) {
+          wired = mainOutputs.some(conns => Array.isArray(conns) && conns.length > 0);
+          hasWiredMainOutput.set(node.name, wired);
+        }
+        return wired;
       }
       const errorConnections = mainOutputs[errorOutputIndex];
       return Array.isArray(errorConnections) && errorConnections.length > 0;
@@ -2280,19 +2448,6 @@ export class WorkflowValidator {
     if (workflow.nodes.length > 20) {
       result.suggestions.push(
         'Consider breaking this workflow into smaller sub-workflows for better maintainability'
-      );
-    }
-
-    // Suggest using Code node for complex logic
-    const complexExpressionNodes = workflow.nodes.filter(node => {
-      const jsonString = JSON.stringify(node.parameters);
-      const expressionCount = (jsonString.match(/\{\{/g) || []).length;
-      return expressionCount > 5;
-    });
-
-    if (complexExpressionNodes.length > 0) {
-      result.suggestions.push(
-        'Consider using a Code node for complex data transformations instead of multiple expressions'
       );
     }
 
@@ -2691,6 +2846,18 @@ export class WorkflowValidator {
   }
 
   /**
+   * Lower-cased node type and name, computed once per node per validation
+   */
+  private lowerCaseNodeNames(node: WorkflowNode): { type: string; name: string } {
+    let names = this.lowerCaseNames.get(node);
+    if (!names) {
+      names = { type: node.type.toLowerCase(), name: node.name.toLowerCase() };
+      this.lowerCaseNames.set(node, names);
+    }
+    return names;
+  }
+
+  /**
    * Validate SplitInBatches node connections for common mistakes
    */
   private validateSplitInBatchesConnection(
@@ -2709,8 +2876,7 @@ export class WorkflowValidator {
     if (outputIndex === 0) {
       // This is the "done" output (index 0)
       // Check if target looks like it should be in the loop
-      const targetType = targetNode.type.toLowerCase();
-      const targetName = targetNode.name.toLowerCase();
+      const { type: targetType, name: targetName } = this.lowerCaseNodeNames(targetNode);
       
       // Common patterns that suggest this node should be inside the loop
       if (targetType.includes('function') || 
@@ -2723,7 +2889,9 @@ export class WorkflowValidator {
         // Check if this node connects back to the SplitInBatches
         const hasLoopBack = this.checkForLoopBack(targetNode.name, sourceNode.name, nodeMap);
         
-        if (hasLoopBack) {
+        if (hasLoopBack === null) {
+          this.reportIncompleteLoopBackCheck(result);
+        } else if (hasLoopBack) {
           result.errors.push({
             type: 'error',
             nodeId: sourceNode.id,
@@ -2742,8 +2910,7 @@ export class WorkflowValidator {
     } else if (outputIndex === 1) {
       // This is the "loop" output (index 1)
       // Check if target looks like it should be after the loop
-      const targetType = targetNode.type.toLowerCase();
-      const targetName = targetNode.name.toLowerCase();
+      const { type: targetType, name: targetName } = this.lowerCaseNodeNames(targetNode);
       
       // Common patterns that suggest this node should be after the loop
       if (targetType.includes('aggregate') ||
@@ -2765,7 +2932,9 @@ export class WorkflowValidator {
       
       // Check if loop output doesn't eventually connect back
       const hasLoopBack = this.checkForLoopBack(targetNode.name, sourceNode.name, nodeMap);
-      if (!hasLoopBack) {
+      if (hasLoopBack === null) {
+        this.reportIncompleteLoopBackCheck(result);
+      } else if (!hasLoopBack) {
         result.warnings.push({
           type: 'warning',
           nodeId: sourceNode.id,
@@ -2777,47 +2946,77 @@ export class WorkflowValidator {
   }
 
   /**
-   * Check if a node eventually connects back to a target node
+   * Check if a node eventually connects back to a target node.
+   * Returns null when the step budget ran out before the answer was known.
    */
   private checkForLoopBack(
     startNode: string,
     targetNode: string,
+    nodeMap: Map<string, WorkflowNode>
+  ): boolean | null {
+    // SECURITY (GHSA-xvxq-x6hr-xc2c): reuse reachability per start node, with a step budget
+    let entry = this.loopBackReach.get(startNode);
+    if (!entry) {
+      const reached = new Set<string>();
+      const complete = this.collectLoopBackReach(startNode, nodeMap, new Set(), 50, reached);
+      entry = { reached, complete };
+      this.loopBackReach.set(startNode, entry);
+    }
+    if (entry.reached.has(targetNode)) return true;
+    return entry.complete ? false : null;
+  }
+
+  /**
+   * Collect every node name a depth-first walk from startNode reaches through
+   * connections, up to maxDepth levels. Returns false if the step budget ran out,
+   * leaving `reached` holding the part of the walk done so far.
+   */
+  private collectLoopBackReach(
+    startNode: string,
     nodeMap: Map<string, WorkflowNode>,
-    visited: Set<string> = new Set(),
-    maxDepth: number = 50
+    visited: Set<string>,
+    maxDepth: number,
+    reached: Set<string>
   ): boolean {
-    if (maxDepth <= 0) return false; // Prevent stack overflow
-    if (visited.has(startNode)) return false;
+    if (maxDepth <= 0) return true; // Prevent stack overflow
+    if (visited.has(startNode)) return true;
     visited.add(startNode);
 
     const node = nodeMap.get(startNode);
-    if (!node) return false;
+    if (!node) return true;
 
-    // Access connections from the workflow structure, not the node
-    // We need to access this.currentWorkflow.connections[startNode]
     const connections = this.currentWorkflow?.connections[startNode];
-    if (!connections) return false;
+    if (!connections) return true;
+    if (this.loopBackSteps <= 0) return false;
 
-    for (const [outputType, outputs] of Object.entries(connections)) {
+    for (const outputs of Object.values(connections)) {
+      if (--this.loopBackSteps < 0) return false;
       if (!Array.isArray(outputs)) continue;
-      
+
       for (const outputConnections of outputs) {
+        if (--this.loopBackSteps < 0) return false;
         if (!Array.isArray(outputConnections)) continue;
-        
+
         for (const conn of outputConnections) {
-          if (conn.node === targetNode) {
-            return true;
-          }
-          
-          // Recursively check connected nodes
-          if (this.checkForLoopBack(conn.node, targetNode, nodeMap, visited, maxDepth - 1)) {
-            return true;
-          }
+          if (--this.loopBackSteps < 0) return false;
+          reached.add(conn.node);
+          if (!this.collectLoopBackReach(conn.node, nodeMap, visited, maxDepth - 1, reached)) return false;
         }
       }
     }
+    return true;
+  }
 
-    return false;
+  /**
+   * Add one workflow-level warning when a loop-back check could not be completed
+   */
+  private reportIncompleteLoopBackCheck(result: WorkflowValidationResult): void {
+    if (this.loopBackIncompleteReported) return;
+    this.loopBackIncompleteReported = true;
+    result.warnings.push({
+      type: 'warning',
+      message: 'The workflow\'s loop structure is too large to check fully. Some SplitInBatches loop-back checks were skipped.'
+    });
   }
 
   /**

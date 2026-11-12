@@ -19,7 +19,7 @@ class MutationTracker {
             }
             const workflowBefore = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowBefore);
             const workflowAfter = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeWorkflowRaw(data.workflowAfter);
-            const sanitizedOperations = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.operations);
+            const sanitizedOperations = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeOperations(data.operations, [data.workflowBefore, data.workflowAfter]);
             const sanitizedValidationBefore = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.validationBefore);
             const sanitizedValidationAfter = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.validationAfter);
             const sanitizedMutationError = workflow_sanitizer_js_1.WorkflowSanitizer.sanitizeTelemetryObject(data.mutationError);

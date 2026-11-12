@@ -1,5 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.isVersionCheckDisabled = isVersionCheckDisabled;
+exports.getUpToDate = getUpToDate;
 exports.checkNpmVersion = checkNpmVersion;
 exports.compareVersions = compareVersions;
 exports.clearVersionCheckCache = clearVersionCheckCache;
@@ -8,14 +10,44 @@ const logger_1 = require("./logger");
 let versionCheckCache = null;
 let lastCheckTime = 0;
 const CACHE_TTL_MS = 1 * 60 * 60 * 1000;
+const FAILURE_CACHE_TTL_MS = 5 * 60 * 1000;
+let warnedInvalidOptOut = false;
+function isVersionCheckDisabled() {
+    const value = process.env.N8N_MCP_VERSION_CHECK_DISABLED;
+    if (value === undefined)
+        return false;
+    const normalized = value.toLowerCase().trim();
+    if (!['true', '1', 'false', '0', ''].includes(normalized) && !warnedInvalidOptOut) {
+        warnedInvalidOptOut = true;
+        logger_1.logger.warn(`Ignoring N8N_MCP_VERSION_CHECK_DISABLED="${value}": use "true" or "1" to disable the npm version check`);
+    }
+    return normalized === 'true' || normalized === '1';
+}
+function getUpToDate(result) {
+    return result.status === 'ok' ? !result.isOutdated : null;
+}
 async function checkNpmVersion(forceRefresh = false) {
     const now = Date.now();
-    if (!forceRefresh && versionCheckCache && (now - lastCheckTime) < CACHE_TTL_MS) {
-        logger_1.logger.debug('Returning cached npm version check result');
-        return versionCheckCache;
-    }
     const packageJson = require('../../package.json');
     const currentVersion = packageJson.version;
+    if (isVersionCheckDisabled()) {
+        return {
+            status: 'disabled',
+            currentVersion,
+            latestVersion: null,
+            isOutdated: false,
+            updateAvailable: false,
+            error: null,
+            checkedAt: new Date()
+        };
+    }
+    if (!forceRefresh && versionCheckCache) {
+        const ttl = versionCheckCache.status === 'ok' ? CACHE_TTL_MS : FAILURE_CACHE_TTL_MS;
+        if ((now - lastCheckTime) < ttl) {
+            logger_1.logger.debug('Returning cached npm version check result');
+            return versionCheckCache;
+        }
+    }
     try {
         const response = await fetch('https://registry.npmjs.org/n8n-mcp/latest', {
             headers: {
@@ -29,6 +61,7 @@ async function checkNpmVersion(forceRefresh = false) {
                 statusText: response.statusText
             });
             const result = {
+                status: 'failed',
                 currentVersion,
                 latestVersion: null,
                 isOutdated: false,
@@ -57,6 +90,7 @@ async function checkNpmVersion(forceRefresh = false) {
         }
         const isOutdated = compareVersions(currentVersion, latestVersion) < 0;
         const result = {
+            status: 'ok',
             currentVersion,
             latestVersion,
             isOutdated,
@@ -79,6 +113,7 @@ async function checkNpmVersion(forceRefresh = false) {
             error: error instanceof Error ? error.message : String(error)
         });
         const result = {
+            status: 'failed',
             currentVersion,
             latestVersion: null,
             isOutdated: false,
@@ -111,6 +146,9 @@ function clearVersionCheckCache() {
     lastCheckTime = 0;
 }
 function formatVersionMessage(result) {
+    if (result.status === 'disabled') {
+        return `Version check disabled (N8N_MCP_VERSION_CHECK_DISABLED). Current version: ${result.currentVersion}`;
+    }
     if (result.error) {
         return `Version check failed: ${result.error}. Current version: ${result.currentVersion}`;
     }

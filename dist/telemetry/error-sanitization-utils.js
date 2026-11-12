@@ -18,7 +18,7 @@ function sanitizeErrorMessageCore(errorMessage) {
             .replace(/Bearer\s+[^\s]+/gi, 'Bearer [TOKEN]');
         sanitized = sanitized.replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[EMAIL]');
         sanitized = sanitized
-            .replace(/\b[a-zA-Z0-9_-]{32,}\b/g, '[KEY]')
+            .replace(/\b[a-zA-Z0-9_-]{32,}(?:\b|(?<=-))/g, '[KEY]')
             .replace(/(['"])[a-zA-Z0-9_-]{16,}\1/g, '$1[TOKEN]$1');
         sanitized = sanitized
             .replace(/password\s*[=:]\s*\S+/gi, 'password=[REDACTED]')

@@ -21,7 +21,7 @@ export type NodeGroupInput = z.infer<typeof nodeGroupInputSchema>;
 export declare function parseNodeGroupsInput(value: unknown): WorkflowNodeGroup[] | undefined;
 export declare function toWorkflowNodeGroup(group: NodeGroupInput): WorkflowNodeGroup;
 export interface NodeGroupIssue {
-    code: 'group-member-removed' | 'group-empty' | 'group-unknown-keys' | 'group-malformed' | 'group-duplicate-name' | 'group-node-in-multiple-groups' | 'group-contains-trigger' | 'group-rejected-by-n8n';
+    code: 'group-member-removed' | 'group-empty' | 'group-unknown-keys' | 'group-malformed' | 'group-duplicate-name' | 'group-node-in-multiple-groups' | 'group-contains-trigger' | 'group-rejected-by-n8n' | 'group-issues-truncated';
     group: string;
     message: string;
 }

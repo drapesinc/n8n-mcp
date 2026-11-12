@@ -13,6 +13,7 @@ export declare abstract class BaseTriggerHandler<T extends BaseTriggerInput = Ba
     constructor(client: N8nApiClient, context?: InstanceContext);
     validate(input: unknown): T;
     abstract execute(input: T, workflow: Workflow, triggerInfo?: DetectedTrigger): Promise<TriggerResponse>;
+    protected isUnderTriggerPrefix(triggerUrl: string, baseUrl: string, prefix: string): boolean;
     protected getBaseUrl(): string | undefined;
     protected getApiKey(): string | undefined;
     protected normalizeResponse(result: unknown, input: T, startTime: number, extra?: Partial<TriggerResponse>): TriggerResponse;

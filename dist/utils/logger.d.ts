@@ -9,6 +9,7 @@ export interface LoggerConfig {
     prefix?: string;
     timestamp?: boolean;
 }
+export declare function stripLineBreaks(value: string): string;
 export declare class Logger {
     private config;
     private static instance;

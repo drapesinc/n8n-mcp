@@ -14,6 +14,7 @@ import {
   DetectedTrigger,
   BaseTriggerInput,
 } from '../types';
+import { stripTrailingSlashes } from '../../utils/strip-trailing-slashes';
 
 /**
  * Constructor type for trigger handlers
@@ -69,6 +70,24 @@ export abstract class BaseTriggerHandler<T extends BaseTriggerInput = BaseTrigge
     workflow: Workflow,
     triggerInfo?: DetectedTrigger
   ): Promise<TriggerResponse>;
+
+  /**
+   * SECURITY (GHSA-q7jr-6fm4-vvhg): whether a trigger URL, once parsed, is on the
+   * base URL's origin and under `<base path>/<prefix>/`, with no encoded dot,
+   * slash or backslash after the prefix.
+   */
+  protected isUnderTriggerPrefix(triggerUrl: string, baseUrl: string, prefix: string): boolean {
+    try {
+      const target = new URL(triggerUrl);
+      const base = new URL(baseUrl);
+      const triggerRoot = `${stripTrailingSlashes(base.pathname)}/${prefix}/`;
+      return target.origin === base.origin &&
+        target.pathname.startsWith(triggerRoot) &&
+        !/%(2e|2f|5c)/i.test(target.pathname.slice(triggerRoot.length));
+    } catch {
+      return false;
+    }
+  }
 
   /**
    * Get the n8n instance base URL from context or environment config

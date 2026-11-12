@@ -550,6 +550,7 @@ export declare const workflowSettingsSchema: z.ZodObject<{
     timeSavedMode: z.ZodOptional<z.ZodEnum<["fixed", "dynamic"]>>;
     timeSavedPerExecution: z.ZodOptional<z.ZodNumber>;
     redactionPolicy: z.ZodOptional<z.ZodEnum<["none", "non-manual", "manual-only", "all"]>>;
+    redactCallerExecutions: z.ZodOptional<z.ZodBoolean>;
     availableInMCP: z.ZodOptional<z.ZodBoolean>;
     customTelemetryTags: z.ZodOptional<z.ZodArray<z.ZodObject<{
         key: z.ZodString;
@@ -580,6 +581,7 @@ export declare const workflowSettingsSchema: z.ZodObject<{
     }[] | undefined;
     redactionPolicy?: "all" | "none" | "non-manual" | "manual-only" | undefined;
     timeSavedMode?: "fixed" | "dynamic" | undefined;
+    redactCallerExecutions?: boolean | undefined;
 }, {
     saveExecutionProgress?: boolean | undefined;
     saveManualExecutions?: boolean | undefined;
@@ -599,6 +601,7 @@ export declare const workflowSettingsSchema: z.ZodObject<{
     }[] | undefined;
     redactionPolicy?: "all" | "none" | "non-manual" | "manual-only" | undefined;
     timeSavedMode?: "fixed" | "dynamic" | undefined;
+    redactCallerExecutions?: boolean | undefined;
 }>;
 export declare const defaultWorkflowSettings: {
     executionOrder: "v1";

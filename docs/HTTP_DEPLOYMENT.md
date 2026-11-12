@@ -49,7 +49,7 @@ Claude Desktop → mcp-remote → https://your-server.com
 ## 📋 Prerequisites
 
 **Server Requirements:**
-- Node.js 16+ or Docker
+- Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` (or Docker)
 - 512MB RAM minimum
 - Public IP or domain name
 - (Recommended) SSL certificate for HTTPS
@@ -160,6 +160,10 @@ Skip HTTP entirely and use stdio mode directly:
 | `PUBLIC_URL` | Alternative to BASE_URL | Auto-detected | v2.7.14 |
 | `CORS_ORIGIN` | CORS allowed origins | `*` | v2.7.8 |
 | `AUTH_TOKEN_FILE` | Path to token file | - | v2.7.10 |
+| `AUTH_RATE_LIMIT_WINDOW` | Window for the authentication rate limit (ms) | `900000` | v2.16.3 |
+| `AUTH_RATE_LIMIT_MAX` | Failed authentication attempts allowed per IP within the window | `20` | v2.16.3 |
+| `N8N_MCP_MAX_SESSIONS` | Maximum concurrent MCP sessions; new sessions are refused while the cap is reached | `100` | v2.28.4 |
+| `SESSION_TIMEOUT_MINUTES` | Idle time after which a session is closed | `30` | v2.33.5 |
 
 ### n8n Management Tools (Optional)
 
@@ -173,6 +177,7 @@ Enable 21 additional tools for managing n8n workflows by configuring API access:
 | `N8N_API_KEY` | n8n API key (from Settings > API) | `n8n_api_key_xxx` |
 | `N8N_API_TIMEOUT` | Request timeout (ms) | `30000` |
 | `N8N_API_MAX_RETRIES` | Max retry attempts | `3` |
+| `N8N_MCP_MAX_RESPONSE_SIZE` | Maximum size of an n8n response, in bytes after decompression | `52428800` (50 MB) |
 | `N8N_MCP_ACCESS_TOKEN` | MCP API key from n8n Settings → Instance-level MCP → set MCP status to Enabled (optional; separate from `N8N_API_KEY`) | `n8n_mcp_xxx` |
 
 #### What This Enables

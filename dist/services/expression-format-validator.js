@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ExpressionFormatValidator = void 0;
 const universal_expression_validator_1 = require("./universal-expression-validator");
 const confidence_scorer_1 = require("./confidence-scorer");
+const object_keys_1 = require("../utils/object-keys");
 class ExpressionFormatValidator {
     static shouldUseResourceLocator(fieldName, nodeType) {
         const nodeBase = nodeType.split('.').pop()?.toLowerCase() || '';
@@ -162,6 +163,8 @@ class ExpressionFormatValidator {
             }
             Object.entries(obj).forEach(([key, value]) => {
                 if (key.startsWith('__'))
+                    return;
+                if (key.split('.').some(object_keys_1.isReservedObjectKey))
                     return;
                 if (key === 'jsCode' || key === 'pythonCode' || key === 'functionCode')
                     return;

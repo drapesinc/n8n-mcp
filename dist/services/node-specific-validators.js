@@ -4,6 +4,14 @@ exports.NodeSpecificValidators = void 0;
 const jmespath_checks_1 = require("../utils/jmespath-checks");
 const MAX_CODE_LENGTH = 200000;
 const MAX_SHORT_INPUT_LENGTH = 2000;
+const JS_SPACE = /\s/;
+const PY_LINE_BREAK = /[\n\r\u2028\u2029]/;
+function isJsSpace(char) {
+    return char !== undefined && JS_SPACE.test(char);
+}
+function isWordChar(char) {
+    return char !== undefined && /\w/.test(char);
+}
 const MAX_PARAM_SCAN = 2000;
 const MAX_HEADER_LINES = 50;
 const MAX_RETURN_LOOKAHEAD = 5000;
@@ -1019,11 +1027,9 @@ class NodeSpecificValidators {
                 });
             }
         });
-        const functionWithAwait = /function\s+\w*\s*\([^)]*\)\s*{[^}]*await/;
-        const arrowWithAwait = /\([^)]*\)\s*=>\s*{[^}]*await/;
         if (code.length <= MAX_CODE_LENGTH
-            && (functionWithAwait.test(code) || arrowWithAwait.test(code))
-            && !code.includes('async')) {
+            && !code.includes('async')
+            && this.hasAwaitInFunctionBody(code)) {
             warnings.push({
                 type: 'best_practice',
                 message: 'Using await inside a non-async function',
@@ -1040,6 +1046,76 @@ class NodeSpecificValidators {
                 suggestion: 'Use DateTime.now() or DateTime.fromISO() for date operations'
             });
         }
+    }
+    static hasAwaitInFunctionBody(code) {
+        const finder = (needle) => {
+            let askedFrom = Infinity;
+            let found = -1;
+            return (from) => {
+                if (askedFrom <= from && (found === -1 || found >= from))
+                    return found;
+                askedFrom = from;
+                found = code.indexOf(needle, from);
+                return found;
+            };
+        };
+        const paramsChecker = (arrow) => {
+            const nextParen = finder(')');
+            const nextBrace = finder('}');
+            const nextAwait = finder('await');
+            let lastClose = -1;
+            return (openParen) => {
+                const close = nextParen(openParen + 1);
+                if (close === -1)
+                    return null;
+                if (close === lastClose)
+                    return false;
+                lastClose = close;
+                let at = close + 1;
+                while (isJsSpace(code[at]))
+                    at++;
+                if (arrow) {
+                    if (code[at] !== '=' || code[at + 1] !== '>')
+                        return false;
+                    at += 2;
+                    while (isJsSpace(code[at]))
+                        at++;
+                }
+                if (code[at] !== '{')
+                    return false;
+                const bodyEnd = nextBrace(at + 1);
+                const awaitAt = nextAwait(at + 1);
+                return awaitAt !== -1 && (bodyEnd === -1 || awaitAt < bodyEnd);
+            };
+        };
+        const checkFunction = paramsChecker(false);
+        for (let at = code.indexOf('function'); at !== -1; at = code.indexOf('function', at + 1)) {
+            let i = at + 8;
+            if (!isJsSpace(code[i]))
+                continue;
+            while (isJsSpace(code[i]))
+                i++;
+            while (isWordChar(code[i]))
+                i++;
+            while (isJsSpace(code[i]))
+                i++;
+            if (code[i] !== '(')
+                continue;
+            const awaits = checkFunction(i);
+            if (awaits === null)
+                break;
+            if (awaits)
+                return true;
+        }
+        const checkArrow = paramsChecker(true);
+        for (let at = code.indexOf('('); at !== -1; at = code.indexOf('(', at + 1)) {
+            const awaits = checkArrow(at);
+            if (awaits === null)
+                break;
+            if (awaits)
+                return true;
+        }
+        return false;
     }
     static pythonRemovedGlobalFix(name, isEachItem) {
         switch (name) {
@@ -1083,7 +1159,14 @@ class NodeSpecificValidators {
         return delta;
     }
     static pythonTargetName(target) {
-        const bare = target.trim().replace(/^[(\[\s]+|[)\]\s]+$/g, '').replace(/^\*+/, '').trim();
+        const trimmed = target.trim();
+        let from = 0;
+        let to = trimmed.length;
+        while (from < to && (trimmed[from] === '(' || trimmed[from] === '[' || JS_SPACE.test(trimmed[from])))
+            from++;
+        while (to > from && (trimmed[to - 1] === ')' || trimmed[to - 1] === ']' || JS_SPACE.test(trimmed[to - 1])))
+            to--;
+        const bare = trimmed.slice(from, to).replace(/^\*+/, '').trim();
         const name = bare.split(/[:=]/)[0].trim();
         return /^[A-Za-z_]\w*$/.test(name) ? name : null;
     }
@@ -1178,19 +1261,46 @@ class NodeSpecificValidators {
         }
         return names;
     }
+    static pythonForTarget(line, afterFor, inEnds) {
+        let start = afterFor;
+        while (line[start] === ' ' || line[start] === '\t')
+            start++;
+        if (start >= line.length || PY_LINE_BREAK.test(line[start]))
+            return { target: null, stop: start };
+        for (let i = start + 1; i < line.length; i++) {
+            const char = line[i];
+            if (PY_LINE_BREAK.test(char))
+                return { target: null, stop: i };
+            if (char !== ' ' && char !== '\t')
+                continue;
+            let runEnd = i;
+            while (line[runEnd] === ' ' || line[runEnd] === '\t')
+                runEnd++;
+            if (line.startsWith('in', runEnd) && inEnds(line[runEnd + 2])) {
+                return { target: line.slice(start, i), resume: runEnd + 2 };
+            }
+            i = runEnd - 1;
+        }
+        return { target: null, stop: line.length };
+    }
     static pythonBindingsOnLine(line) {
         const names = [];
-        const assignment = /^[ \t]*([^=\n]+?)(?<![=!<>+\-*/%&|^~])=(?!=)/.exec(line);
-        if (assignment) {
-            this.pythonSplitTopLevel(assignment[1]).forEach(target => {
+        const equals = line.indexOf('=');
+        const newline = line.indexOf('\n');
+        if (equals > 0 && (newline === -1 || newline > equals)
+            && !'=!<>+-*/%&|^~'.includes(line[equals - 1]) && line[equals + 1] !== '=') {
+            this.pythonSplitTopLevel(line.slice(0, equals)).forEach(target => {
                 const name = this.pythonTargetName(target);
                 if (name)
                     names.push(name);
             });
         }
-        const forStatement = /^[ \t]*(?:async[ \t]+)?for[ \t]+(.+?)[ \t]+in[ \t]/.exec(line);
-        if (forStatement) {
-            this.pythonSplitTopLevel(forStatement[1]).forEach(target => {
+        const forHead = /^[ \t]*(?:async[ \t]+)?for[ \t]/.exec(line);
+        const forStatement = forHead
+            ? this.pythonForTarget(line, forHead[0].length - 1, next => next === ' ' || next === '\t')
+            : null;
+        if (forStatement && forStatement.target !== null) {
+            this.pythonSplitTopLevel(forStatement.target).forEach(target => {
                 const name = this.pythonTargetName(target);
                 if (name)
                     names.push(name);
@@ -1213,35 +1323,23 @@ class NodeSpecificValidators {
         }
         return false;
     }
-    static pythonEnclosingGroup(line, index) {
-        let closers = 0;
-        let start = -1;
-        for (let i = index - 1; i >= 0; i--) {
-            const char = line[i];
-            if (char === ')' || char === ']' || char === '}')
-                closers++;
-            else if (char === '(' || char === '[' || char === '{') {
-                if (closers === 0) {
-                    start = i;
-                    break;
-                }
-                closers--;
-            }
-        }
-        if (start === -1)
-            return null;
-        let depth = 0;
-        for (let i = start; i < line.length; i++) {
+    static pythonBracketGroups(line) {
+        const openAt = new Int32Array(line.length + 1);
+        const closeOf = new Int32Array(line.length).fill(line.length);
+        const stack = [];
+        for (let i = 0; i < line.length; i++) {
+            openAt[i] = stack.length > 0 ? stack[stack.length - 1] : -1;
             const char = line[i];
             if (char === '(' || char === '[' || char === '{')
-                depth++;
-            else if (char === ')' || char === ']' || char === '}') {
-                depth--;
-                if (depth === 0)
-                    return { start, end: i };
-            }
+                stack.push(i);
+            else if ((char === ')' || char === ']' || char === '}') && stack.length > 0)
+                closeOf[stack.pop()] = i;
         }
-        return { start, end: line.length };
+        openAt[line.length] = stack.length > 0 ? stack[stack.length - 1] : -1;
+        return index => {
+            const start = openAt[index];
+            return start === -1 ? null : { start, end: closeOf[start] };
+        };
     }
     static pythonLineLocalBindings(line) {
         const bindings = [];
@@ -1252,15 +1350,42 @@ class NodeSpecificValidators {
                     bindings.push({ name, ...range });
             });
         };
-        const forTargets = /\bfor[ \t]+(.+?)[ \t]+in\b/g;
-        let match;
-        while ((match = forTargets.exec(line)) !== null) {
-            add(match[1], this.pythonEnclosingGroup(line, match.index) ?? { start: match.index, end: line.length });
+        let groups = null;
+        const enclosingGroup = (index) => (groups ?? (groups = this.pythonBracketGroups(line)))(index);
+        let at = line.indexOf('for');
+        while (at !== -1) {
+            if (isWordChar(line[at - 1]) || (line[at + 3] !== ' ' && line[at + 3] !== '\t')) {
+                at = line.indexOf('for', at + 1);
+                continue;
+            }
+            const head = this.pythonForTarget(line, at + 3, next => !isWordChar(next));
+            if (head.target === null) {
+                at = line.indexOf('for', head.stop + 1);
+                continue;
+            }
+            add(head.target, enclosingGroup(at) ?? { start: at, end: line.length });
+            at = line.indexOf('for', head.resume);
         }
-        const lambdas = /\blambda\b([^:\n]*):/g;
-        while ((match = lambdas.exec(line)) !== null) {
-            const group = this.pythonEnclosingGroup(line, match.index);
-            add(match[1], { start: match.index, end: group ? group.end : line.length });
+        let newline = line.indexOf('\n');
+        at = line.indexOf('lambda');
+        while (at !== -1) {
+            const after = at + 6;
+            if (isWordChar(line[at - 1]) || isWordChar(line[after])) {
+                at = line.indexOf('lambda', at + 1);
+                continue;
+            }
+            const colon = line.indexOf(':', after);
+            if (colon === -1)
+                break;
+            if (newline !== -1 && newline < after)
+                newline = line.indexOf('\n', after);
+            if (newline !== -1 && newline < colon) {
+                at = line.indexOf('lambda', newline + 1);
+                continue;
+            }
+            const group = enclosingGroup(at);
+            add(line.slice(after, colon), { start: at, end: group ? group.end : line.length });
+            at = line.indexOf('lambda', colon + 1);
         }
         return bindings;
     }
@@ -1372,24 +1497,41 @@ class NodeSpecificValidators {
     static pythonHasUnboundReference(index, name, reference) {
         const { lineScope, scopes, lineLocal, referenceText } = index;
         const matcher = new RegExp(reference.source, reference.flags.includes('g') ? reference.flags : `${reference.flags}g`);
-        return referenceText.some((line, lineNumber) => {
+        const resolved = new Int8Array(scopes.length);
+        const isBound = (from) => {
+            const path = [];
             let bound = false;
-            for (let scope = lineScope[lineNumber]; scope !== -1; scope = scopes[scope].parent) {
+            for (let scope = from; scope !== -1; scope = scopes[scope].parent) {
+                if (resolved[scope] !== 0) {
+                    bound = resolved[scope] === 1;
+                    break;
+                }
+                path.push(scope);
                 if (scopes[scope].names.has(name)) {
                     bound = true;
                     break;
                 }
             }
-            if (bound)
+            for (const scope of path)
+                resolved[scope] = bound ? 1 : 2;
+            return bound;
+        };
+        return referenceText.some((line, lineNumber) => {
+            if (isBound(lineScope[lineNumber]))
                 return false;
             matcher.lastIndex = 0;
             let match;
+            let locals = null;
+            let next = 0;
+            let reach = -1;
             while ((match = matcher.exec(line)) !== null) {
                 if (match[0].length === 0)
                     matcher.lastIndex++;
                 const at = match.index;
-                const shadowed = lineLocal[lineNumber].some(local => local.name === name && at >= local.start && at <= local.end);
-                if (!shadowed)
+                locals ?? (locals = lineLocal[lineNumber].filter(local => local.name === name).sort((a, b) => a.start - b.start));
+                while (next < locals.length && locals[next].start <= at)
+                    reach = Math.max(reach, locals[next++].end);
+                if (reach < at)
                     return true;
             }
             return false;
@@ -1643,7 +1785,13 @@ class NodeSpecificValidators {
                 continue;
             const lineEnd = scan.indexOf('\n', closed);
             const rest = scan.slice(closed + 1, lineEnd === -1 ? scan.length : lineEnd);
-            if (rest.replace(/;+[ \t]*$/, '').trim() !== '')
+            let restEnd = rest.length;
+            while (restEnd > 0 && (rest[restEnd - 1] === ' ' || rest[restEnd - 1] === '\t'))
+                restEnd--;
+            let separatorsStart = restEnd;
+            while (separatorsStart > 0 && rest[separatorsStart - 1] === ';')
+                separatorsStart--;
+            if (rest.slice(0, separatorsStart).trim() !== '')
                 continue;
             if (!innerTest)
                 return true;
@@ -1657,16 +1805,17 @@ class NodeSpecificValidators {
         const lines = code.split('\n');
         const result = [];
         let blockIndent = null;
-        let header = null;
+        let headerDepth = null;
         for (const line of lines) {
             const indentMatch = line.match(/^[ \t]*/);
             const indent = indentMatch ? indentMatch[0].length : 0;
             const isBlank = line.trim() === '';
-            if (header !== null) {
-                header += `\n${line}`;
+            if (headerDepth !== null) {
                 result.push('');
-                if (this.pythonHeaderColonIndex(header) !== -1)
-                    header = null;
+                if (this.pythonHeaderColonIndex(line, headerDepth) !== -1)
+                    headerDepth = null;
+                else
+                    headerDepth += this.pythonBracketDelta(line);
                 continue;
             }
             if (blockIndent !== null) {
@@ -1678,7 +1827,7 @@ class NodeSpecificValidators {
             }
             if (/^[ \t]*(?:async[ \t]+)?(?:def|class)[ \t]+\w/.test(line)) {
                 blockIndent = indent;
-                header = this.pythonHeaderColonIndex(line) === -1 ? line : null;
+                headerDepth = this.pythonHeaderColonIndex(line) === -1 ? this.pythonBracketDelta(line) : null;
                 result.push('');
                 continue;
             }
@@ -1700,6 +1849,7 @@ class NodeSpecificValidators {
         const templateInterpolationDepths = [];
         let state = 'code';
         let inRegexClass = false;
+        const backLinks = this.javaScriptBackLinks(code);
         for (let i = 0; i < code.length; i++) {
             const char = code[i];
             const next = code[i + 1];
@@ -1799,7 +1949,7 @@ class NodeSpecificValidators {
                 continue;
             }
             if (char === '{') {
-                if (this.startsJavaScriptFunctionBody(code, i)) {
+                if (this.startsJavaScriptFunctionBody(code, i, backLinks)) {
                     functionBodyDepths.push(braceDepth + 1);
                 }
                 braceDepth++;
@@ -1909,41 +2059,63 @@ class NodeSpecificValidators {
         }
         return result;
     }
-    static startsJavaScriptFunctionBody(code, openBraceIndex) {
-        const prefix = code.slice(Math.max(0, openBraceIndex - 500), openBraceIndex);
-        if (/=>\s*$/.test(prefix))
+    static javaScriptBackLinks(code) {
+        let before = null;
+        let parens = null;
+        return {
+            codeBefore: index => {
+                if (before === null) {
+                    before = new Int32Array(code.length);
+                    const openers = new Int32Array(code.length);
+                    let last = -1;
+                    for (let k = 0; k < code.length; k++) {
+                        if (k >= 1 && code[k - 1] === '/' && code[k] === '*')
+                            last = k;
+                        openers[k] = last;
+                    }
+                    for (let k = 0; k < code.length; k++) {
+                        if (JS_SPACE.test(code[k])) {
+                            before[k] = k > 0 ? before[k - 1] : -1;
+                        }
+                        else if (code[k] === '/' && k > 0 && code[k - 1] === '*') {
+                            const opener = k >= 2 ? openers[k - 2] : -1;
+                            before[k] = opener >= 2 ? before[opener - 2] : -1;
+                        }
+                        else {
+                            before[k] = k;
+                        }
+                    }
+                }
+                return index < 0 ? -1 : before[index];
+            },
+            matchingOpenParen: index => {
+                if (parens === null) {
+                    parens = new Int32Array(code.length).fill(-1);
+                    const stack = [];
+                    for (let k = 0; k < code.length; k++) {
+                        if (code[k] === '(')
+                            stack.push(k);
+                        else if (code[k] === ')' && stack.length > 0)
+                            parens[k] = stack.pop();
+                    }
+                }
+                return parens[index];
+            },
+        };
+    }
+    static startsJavaScriptFunctionBody(code, openBraceIndex, links) {
+        const arrowFloor = Math.max(0, openBraceIndex - 500);
+        let arrowEnd = openBraceIndex - 1;
+        while (arrowEnd >= arrowFloor && JS_SPACE.test(code[arrowEnd]))
+            arrowEnd--;
+        if (arrowEnd - 1 >= arrowFloor && code[arrowEnd] === '>' && code[arrowEnd - 1] === '=')
             return true;
-        let i = openBraceIndex - 1;
-        while (i >= 0) {
-            if (/\s/.test(code[i])) {
-                i--;
-                continue;
-            }
-            if (code[i] === '/' && i > 0 && code[i - 1] === '*') {
-                i -= 2;
-                while (i >= 1 && !(code[i - 1] === '/' && code[i] === '*'))
-                    i--;
-                i -= 2;
-                continue;
-            }
-            break;
-        }
+        const i = links.codeBefore(openBraceIndex - 1);
         if (i < 0 || code[i] !== ')')
             return false;
         const scanFloor = Math.max(0, i - MAX_PARAM_SCAN);
-        let depth = 0;
-        let j = i;
-        for (; j >= scanFloor; j--) {
-            const c = code[j];
-            if (c === ')')
-                depth++;
-            else if (c === '(') {
-                depth--;
-                if (depth === 0)
-                    break;
-            }
-        }
-        if (depth !== 0)
+        const j = links.matchingOpenParen(i);
+        if (j === -1 || j < scanFloor)
             return false;
         const head = code.slice(Math.max(0, j - 60), j);
         if (/(?:^|[^\w$])(?:async\s+)?function\s*\*?(?:\s+[\w$]+)?\s*$/.test(head))
@@ -2156,17 +2328,30 @@ class NodeSpecificValidators {
         }
         const fsModuleUsagePatterns = [
             /require\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
-            /\bimport\b[^;\n]*\bfrom\s*['"](?:node:)?(?:fs|path|child_process)['"]/,
             /\bimport\s*\(\s*['"`](?:node:)?(?:fs|path|child_process)['"`]\s*\)/,
             /(?<![.\w$])(?:fs|child_process)\s*\.\s*\w/
         ];
-        if (fsModuleUsagePatterns.some(pattern => pattern.test(code))) {
+        if (fsModuleUsagePatterns.some(pattern => pattern.test(code)) || this.importsFromFsModule(code)) {
             warnings.push({
                 type: 'security',
                 message: 'File system and process access not available in Code nodes',
                 suggestion: 'Use other n8n nodes for file operations (e.g., Read/Write Files node)'
             });
         }
+    }
+    static importsFromFsModule(code) {
+        const token = /\bimport\b|[;\n]|\bfrom\s*['"](?:node:)?(?:fs|path|child_process)['"]/g;
+        let inImport = false;
+        let match;
+        while ((match = token.exec(code)) !== null) {
+            if (match[0] === ';' || match[0] === '\n')
+                inImport = false;
+            else if (match[0] === 'import')
+                inImport = true;
+            else if (inImport)
+                return true;
+        }
+        return false;
     }
     static validateSet(context) {
         const { config, errors, warnings } = context;

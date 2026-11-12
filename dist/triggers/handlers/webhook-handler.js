@@ -37,6 +37,7 @@ exports.WebhookHandler = void 0;
 const zod_1 = require("zod");
 const base_handler_1 = require("./base-handler");
 const trigger_detector_1 = require("../trigger-detector");
+const strip_trailing_slashes_1 = require("../../utils/strip-trailing-slashes");
 const webhookInputSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
     triggerType: zod_1.z.literal('webhook'),
@@ -67,13 +68,16 @@ class WebhookHandler extends base_handler_1.BaseTriggerHandler {
             }
             let webhookUrl;
             if (input.webhookPath) {
-                webhookUrl = `${baseUrl.replace(/\/+$/, '')}/webhook/${input.webhookPath}`;
+                webhookUrl = `${(0, strip_trailing_slashes_1.stripTrailingSlashes)(baseUrl)}/webhook/${input.webhookPath}`;
             }
             else if (triggerInfo?.webhookPath) {
                 webhookUrl = (0, trigger_detector_1.buildTriggerUrl)(baseUrl, triggerInfo, 'production');
             }
             else {
                 return this.errorResponse(input, 'No webhook path available. Provide webhookPath parameter or ensure workflow has a webhook trigger.', startTime);
+            }
+            if (!this.isUnderTriggerPrefix(webhookUrl, baseUrl, 'webhook')) {
+                return this.errorResponse(input, 'Invalid webhook path', startTime);
             }
             const httpMethod = input.httpMethod || triggerInfo?.httpMethod || 'POST';
             const { SSRFProtection } = await Promise.resolve().then(() => __importStar(require('../../utils/ssrf-protection')));

@@ -18,6 +18,7 @@ import {
 } from '../types';
 import { BaseTriggerHandler } from './base-handler';
 import { buildTriggerUrl } from '../trigger-detector';
+import { stripTrailingSlashes } from '../../utils/strip-trailing-slashes';
 
 /**
  * Zod schema for webhook input validation
@@ -65,7 +66,7 @@ export class WebhookHandler extends BaseTriggerHandler<WebhookTriggerInput> {
       let webhookUrl: string;
       if (input.webhookPath) {
         // User provided explicit path
-        webhookUrl = `${baseUrl.replace(/\/+$/, '')}/webhook/${input.webhookPath}`;
+        webhookUrl = `${stripTrailingSlashes(baseUrl)}/webhook/${input.webhookPath}`;
       } else if (triggerInfo?.webhookPath) {
         // Use detected path from workflow
         webhookUrl = buildTriggerUrl(baseUrl, triggerInfo, 'production');
@@ -75,6 +76,10 @@ export class WebhookHandler extends BaseTriggerHandler<WebhookTriggerInput> {
           'No webhook path available. Provide webhookPath parameter or ensure workflow has a webhook trigger.',
           startTime
         );
+      }
+
+      if (!this.isUnderTriggerPrefix(webhookUrl, baseUrl, 'webhook')) {
+        return this.errorResponse(input, 'Invalid webhook path', startTime);
       }
 
       // Determine HTTP method

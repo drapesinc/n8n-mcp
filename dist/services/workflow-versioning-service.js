@@ -66,6 +66,9 @@ class WorkflowVersioningService {
         let versionToRestore = null;
         if (versionId) {
             versionToRestore = this.nodeRepository.getWorkflowVersion(versionId, this.instanceId);
+            if (versionToRestore && versionToRestore.workflowId !== workflowId) {
+                versionToRestore = null;
+            }
         }
         else {
             versionToRestore = this.nodeRepository.getLatestWorkflowVersion(workflowId, this.instanceId);

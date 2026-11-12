@@ -237,6 +237,7 @@ describe('HTTP Server Session Management', () => {
   function createMockReqRes() {
     const headers: { [key: string]: string } = {};
     const res = {
+      locals: {} as Record<string, unknown>,
       status: vi.fn().mockReturnThis(),
       json: vi.fn().mockReturnThis(),
       send: vi.fn().mockReturnThis(),
@@ -467,15 +468,18 @@ describe('HTTP Server Session Management', () => {
       process.env.ENABLE_MULTI_TENANT = 'true';
       process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
       server = new SingleSessionHTTPServer();
+      const { v4 } = await import('uuid');
+      let uuidCounter = 0;
+      vi.mocked(v4).mockImplementation((() => `uuid-${++uuidCounter}`) as any);
 
       const initialize = async (instanceContext: any): Promise<string> => {
+        const before = new Set(Object.keys((server as any).sessionContexts));
         const { req, res } = createMockReqRes();
         req.method = 'POST';
         req.body = { jsonrpc: '2.0', method: 'initialize', params: {}, id: 1 };
         await server.handleRequest(req as any, res as any, instanceContext);
         await new Promise(resolve => setTimeout(resolve, 10));
-        const ids = Object.keys((server as any).sessionContexts);
-        // Eager cleanup evicts the previous session for the instance
+        const ids = Object.keys((server as any).sessionContexts).filter(id => !before.has(id));
         expect(ids).toHaveLength(1);
         return ids[0];
       };
@@ -515,6 +519,96 @@ describe('HTTP Server Session Management', () => {
       // The raw secrets never appear in the session id
       expect(rotatedId).not.toContain('rotated-key');
       expect(withTokenId).not.toContain('mcp-token');
+    });
+
+    describe('initialize session ownership (GHSA-q7jr-6fm4-vvhg)', () => {
+      beforeEach(async () => {
+        const { v4 } = await import('uuid');
+        let uuidCounter = 0;
+        vi.mocked(v4).mockImplementation((() => `uuid-${++uuidCounter}`) as any);
+        mockConsoleManager.wrapOperation.mockImplementation(async (fn: () => Promise<any>) => fn());
+        const { N8NDocumentationMCPServer } = await import('../../src/mcp/server');
+        (N8NDocumentationMCPServer as any).mockImplementation(() => ({
+          connect: vi.fn().mockResolvedValue(undefined)
+        }));
+        const { StreamableHTTPServerTransport } = await import(
+          '@modelcontextprotocol/sdk/server/streamableHttp.js'
+        );
+        (StreamableHTTPServerTransport as any).mockImplementation((options: any) => {
+          const mockTransport: any = {
+            handleRequest: vi.fn().mockImplementation(async (_req: any, res2: any, body?: any) => {
+              res2.status(200).json({ jsonrpc: '2.0', result: { success: true }, id: body?.id || 1 });
+            }),
+            close: vi.fn().mockResolvedValue(undefined),
+            sessionId: null,
+            onclose: null
+          };
+          if (options?.sessionIdGenerator) {
+            const generatedId = options.sessionIdGenerator();
+            mockTransport.sessionId = generatedId;
+            if (options.onsessioninitialized) {
+              setTimeout(() => options.onsessioninitialized(generatedId), 0);
+            }
+          }
+          return mockTransport;
+        });
+      });
+
+      const initialize = async (instanceContext?: any, sessionHeader?: string): Promise<string[]> => {
+        const { req, res } = createMockReqRes();
+        req.method = 'POST';
+        req.body = { jsonrpc: '2.0', method: 'initialize', params: {}, id: 1 };
+        if (sessionHeader) req.headers['mcp-session-id'] = sessionHeader;
+        await server.handleRequest(req as any, res as any, instanceContext);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        return Object.keys((server as any).sessionContexts);
+      };
+
+      it('evicts only sessions with the same full configuration', async () => {
+        process.env.ENABLE_MULTI_TENANT = 'true';
+        process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
+        server = new SingleSessionHTTPServer();
+        const owner = { instanceId: 'tenant-a', n8nApiKey: 'owner-key' };
+
+        const [ownerSession] = await initialize(owner);
+
+        // Same instance ID, different credentials: the owner's session survives
+        const afterOther = await initialize({ instanceId: 'tenant-a', n8nApiKey: 'other-key' });
+        expect(afterOther).toContain(ownerSession);
+        expect(afterOther).toHaveLength(2);
+
+        // Same full configuration: the previous session is replaced
+        const afterReconnect = await initialize({ ...owner });
+        expect(afterReconnect).not.toContain(ownerSession);
+        expect(afterReconnect).toHaveLength(2);
+      });
+
+      it('replaces a session on reconnect whether or not the MCP access token is sent', async () => {
+        process.env.ENABLE_MULTI_TENANT = 'true';
+        process.env.MULTI_TENANT_SESSION_STRATEGY = 'instance';
+        server = new SingleSessionHTTPServer();
+        const owner = { instanceId: 'tenant-a', n8nApiKey: 'owner-key' };
+
+        const [withToken] = await initialize({ ...owner, n8nMcpAccessToken: 'mcp-token' });
+        const afterReconnect = await initialize(owner);
+        expect(afterReconnect).toHaveLength(1);
+        expect(afterReconnect).not.toContain(withToken);
+      });
+
+      it('ignores a client-supplied session id on initialize', async () => {
+        delete process.env.ENABLE_MULTI_TENANT;
+        server = new SingleSessionHTTPServer();
+
+        const [existing] = await initialize();
+        const existingTransport = (server as any).transports[existing];
+
+        const ids = await initialize(undefined, existing);
+        expect(ids).toHaveLength(2);
+        expect((server as any).transports[existing]).toBe(existingTransport);
+
+        const chosen = await initialize(undefined, 'client-chosen-id');
+        expect(chosen).not.toContain('client-chosen-id');
+      });
     });
 
     it('should refresh a live instance-strategy session when full rotated credentials arrive (#1045)', async () => {
@@ -1790,6 +1884,96 @@ describe('HTTP Server Session Management', () => {
       await server.handleRequest(req as any, res as any);
 
       expect(res.status).toHaveBeenCalledWith(404);
+    });
+  });
+
+  describe('GET /mcp keepalive and unknown-session handling', () => {
+    it('GET /mcp refreshes lastAccess for an existing StreamableHTTP session', async () => {
+      server = new SingleSessionHTTPServer();
+      await server.start();
+
+      const handler = findHandler('get', '/mcp');
+      expect(handler).toBeTruthy();
+
+      const sessionId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+      // Import the mocked StreamableHTTPServerTransport so we can create an
+      // object that passes the instanceof check inside the GET handler.
+      const { StreamableHTTPServerTransport } = await import(
+        '@modelcontextprotocol/sdk/server/streamableHttp.js'
+      );
+      const transport = {
+        handleRequest: vi.fn().mockResolvedValue(undefined),
+        close: vi.fn().mockResolvedValue(undefined),
+        sessionId
+      };
+      // Make the plain object satisfy `instanceof StreamableHTTPServerTransport`
+      // so the handler enters the keepalive branch.
+      Object.setPrototypeOf(transport, (StreamableHTTPServerTransport as any).prototype);
+
+      const oldDate = new Date(Date.now() - 60_000);
+      (server as any).transports[sessionId] = transport;
+      (server as any).sessionMetadata[sessionId] = {
+        lastAccess: oldDate,
+        createdAt: new Date(Date.now() - 120_000)
+      };
+
+      const { req, res } = createMockReqRes();
+      req.headers = {
+        authorization: `Bearer ${TEST_AUTH_TOKEN}`,
+        'mcp-session-id': sessionId
+      };
+
+      await handler(req, res);
+
+      expect(transport.handleRequest).toHaveBeenCalled();
+      // lastAccess must be newer than before the GET — the keepalive fired.
+      expect((server as any).sessionMetadata[sessionId].lastAccess.getTime()).toBeGreaterThan(
+        oldDate.getTime()
+      );
+    });
+
+    it('GET /mcp returns 404 for a stale session ID from a Streamable HTTP client', async () => {
+      server = new SingleSessionHTTPServer();
+      await server.start();
+
+      const handler = findHandler('get', '/mcp');
+      expect(handler).toBeTruthy();
+
+      const { req, res } = createMockReqRes();
+      req.headers = {
+        authorization: `Bearer ${TEST_AUTH_TOKEN}`,
+        // The SDK client opens its GET stream with this Accept header.
+        accept: 'text/event-stream',
+        'mcp-session-id': 'stale-session-that-does-not-exist'
+      };
+
+      await handler(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: expect.objectContaining({ message: 'Session not found or expired' })
+        })
+      );
+      expect(res.locals.mcpSessionNotFound).toBe(true);
+    });
+
+    it('GET /mcp without a session ID still redirects SSE clients to /sse', async () => {
+      server = new SingleSessionHTTPServer();
+      await server.start();
+
+      const handler = findHandler('get', '/mcp');
+      const { req, res } = createMockReqRes();
+      req.headers = {
+        authorization: `Bearer ${TEST_AUTH_TOKEN}`,
+        accept: 'text/event-stream'
+      };
+
+      await handler(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.locals.mcpSessionNotFound).toBeUndefined();
     });
   });
 });

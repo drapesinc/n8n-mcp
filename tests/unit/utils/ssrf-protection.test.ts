@@ -277,6 +277,66 @@ describe('SSRFProtection', () => {
       expect(result.reason).toBe('IPv6 private/mapped address not allowed');
     });
 
+    const ipv6MetadataLiterals = [
+      'http://[fd00:ec2::254]/latest/meta-data/',
+      'http://[fd00:0ec2:0:0:0:0:0:0254]/',
+      'http://[fd20:ce::254]/computeMetadata/v1/',
+      'http://[fe80::a9fe:a9fe]/',
+      'http://[::ffff:169.254.169.254]/',
+      'http://[0:0:0:0:0:ffff:a9fe:a9fe]/',
+      'http://[::169.254.169.254]/',
+      'http://[::ffff:169.254.170.2]/',
+      'http://[::ffff:100.100.100.200]/',
+      'http://[::ffff:0:a9fe:a9fe]/',
+      'http://[fd00:a9fe:a9fe::1]/',
+    ];
+
+    it.each(ipv6MetadataLiterals)('blocks IPv6 metadata literal in permissive sync mode: %s', (url) => {
+      const result = SSRFProtection.validateUrlSync(url);
+      expect(result.valid).toBe(false);
+      expect(result.reason).toBe('Cloud metadata endpoint blocked');
+    });
+
+    it.each(ipv6MetadataLiterals)('blocks IPv6 metadata literal in permissive async mode: %s', async (url) => {
+      const result = await SSRFProtection.validateWebhookUrl(url);
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('metadata');
+    });
+
+    it.each([
+      'fd00:ec2::254',
+      'fd20:ce::254',
+      'fe80::a9fe:a9fe',
+      '::ffff:a9fe:a9fe',
+      '::a9fe:a9fe',
+      'FD00:EC2::254',
+      'fd00:0ec2:0:0:0:0:0:0254',
+      '::169.254.169.254',
+      '::ffff:169.254.169.254',
+      '::ffff:0:a9fe:a9fe',
+      'fd00:a9fe:a9fe::1',
+    ])('blocks IPv6 metadata address via DNS in permissive async mode: %s', async (address) => {
+      vi.mocked(dns.lookup).mockResolvedValue({ address, family: 6 } as any);
+      const result = await SSRFProtection.validateWebhookUrl('http://evil-domain.com/webhook');
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain('metadata');
+    });
+
+    it('blocks an IPv6 DNS answer with a zone ID in permissive async mode', async () => {
+      vi.mocked(dns.lookup).mockResolvedValue({ address: 'fe80::a9fe:a9fe%eth0', family: 6 } as any);
+      const result = await SSRFProtection.validateWebhookUrl('http://evil-domain.com/webhook');
+      expect(result.valid).toBe(false);
+    });
+
+    it.each([
+      'http://[::ffff:10.0.0.1]/',
+      'http://[fd00:ec2::1]/',
+      'http://[fd20:ce::1]/',
+    ])('still allows non-metadata private IPv6 in permissive mode: %s', async (url) => {
+      expect(SSRFProtection.validateUrlSync(url).valid).toBe(true);
+      expect((await SSRFProtection.validateWebhookUrl(url)).valid).toBe(true);
+    });
+
     it('should allow public URLs', async () => {
       const result = await SSRFProtection.validateWebhookUrl('https://api.example.com/webhook');
       expect(result.valid).toBe(true);
@@ -791,7 +851,9 @@ describe('SSRFProtection', () => {
           for (const url of payloads) {
             const result = SSRFProtection.validateUrlSync(url);
             expect(result.valid, `url=${url} mode=${mode}`).toBe(false);
-            expect(result.reason).toBe('IPv6 private/mapped address not allowed');
+            expect(result.reason).toBe(url.includes('169.254.169.254')
+              ? 'Cloud metadata endpoint blocked'
+              : 'IPv6 private/mapped address not allowed');
           }
         }
       });
@@ -837,7 +899,9 @@ describe('SSRFProtection', () => {
         for (const url of payloads) {
           const result = SSRFProtection.validateUrlSync(url);
           expect(result.valid, `url=${url}`).toBe(false);
-          expect(result.reason).toBe('IPv6 private/mapped address not allowed');
+          expect(result.reason).toBe(url.includes('169.254.169.254')
+            ? 'Cloud metadata endpoint blocked'
+            : 'IPv6 private/mapped address not allowed');
         }
       });
 
@@ -1067,6 +1131,72 @@ describe('SSRFProtection', () => {
         const result = SSRFProtection.validateUrlSync(`http://${address}`);
         expect(result.valid, `address=${address}`).toBe(true);
       });
+    });
+  });
+
+  describe('hostname normalization (GHSA-qm7x-j9xp-x3gv)', () => {
+    beforeEach(() => {
+      delete process.env.WEBHOOK_SECURITY_MODE;
+    });
+
+    it.each([
+      'http://metadata.google.internal./computeMetadata/v1/',
+      'http://metadata./',
+      'http://METADATA.GOOGLE.INTERNAL../',
+    ])('rejects metadata hostname %s in every mode', async (url) => {
+      for (const mode of ['strict', 'moderate', 'permissive']) {
+        process.env.WEBHOOK_SECURITY_MODE = mode;
+        expect(SSRFProtection.validateUrlSync(url)).toEqual({
+          valid: false,
+          reason: 'Cloud metadata endpoint blocked',
+        });
+        const result = await SSRFProtection.validateWebhookUrl(url);
+        expect(result.valid).toBe(false);
+        expect(result.reason).toBe('Cloud metadata endpoint blocked');
+      }
+    });
+
+    it.each([
+      'http://localhost.:5678/',
+      'http://localhost.localdomain.:5678/',
+      'http://admin.localhost:5678/',
+      'http://a.b.localhost.:5678/',
+    ])('treats %s as localhost', async (url) => {
+      process.env.WEBHOOK_SECURITY_MODE = 'strict';
+      expect(SSRFProtection.validateUrlSync(url).valid).toBe(false);
+      // DNS mock answers a public address, so only the hostname check can refuse it
+      const strict = await SSRFProtection.validateWebhookUrl(url);
+      expect(strict.valid).toBe(false);
+      expect(strict.reason).toBe('Localhost access is blocked in strict mode');
+
+      process.env.WEBHOOK_SECURITY_MODE = 'moderate';
+      expect(SSRFProtection.validateUrlSync(url).valid).toBe(true);
+      expect((await SSRFProtection.validateWebhookUrl(url)).valid).toBe(true);
+    });
+
+    it('checks the resolved address of a *.localhost name in moderate mode', async () => {
+      process.env.WEBHOOK_SECURITY_MODE = 'moderate';
+      vi.mocked(dns.lookup).mockResolvedValueOnce([{ address: '10.0.0.5', family: 4 }] as any);
+      const privateAnswer = await SSRFProtection.validateWebhookUrl('http://app.localhost/');
+      expect(privateAnswer.valid).toBe(false);
+      expect(privateAnswer.reason).toContain('Private IP');
+
+      vi.mocked(dns.lookup).mockResolvedValueOnce([{ address: '127.0.0.1', family: 4 }] as any);
+      expect((await SSRFProtection.validateWebhookUrl('http://app.localhost/')).valid).toBe(true);
+    });
+
+    it('does not treat names that only contain "localhost" as localhost', async () => {
+      for (const url of ['http://localhost.example.com/', 'http://mylocalhost/']) {
+        expect(SSRFProtection.validateUrlSync(url).valid).toBe(true);
+        expect((await SSRFProtection.validateWebhookUrl(url)).valid).toBe(true);
+      }
+    });
+
+    it('accepts a public hostname with a trailing dot', async () => {
+      expect(SSRFProtection.validateUrlSync('https://n8n.example.com./').valid).toBe(true);
+      const result = await SSRFProtection.validateWebhookUrl('https://n8n.example.com./');
+      expect(result.valid).toBe(true);
+      expect(dns.lookup).toHaveBeenCalledWith('n8n.example.com', { all: true });
     });
   });
 

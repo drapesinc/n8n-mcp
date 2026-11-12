@@ -3,6 +3,7 @@ import type { AdditionalTool } from '../types/additional-tools';
 import { EarlyErrorLogger } from '../telemetry/early-error-logger';
 interface MCPServerOptions {
     additionalTools?: AdditionalTool[];
+    requireRequestContext?: boolean;
 }
 export declare class N8NDocumentationMCPServer {
     private server;
@@ -13,7 +14,8 @@ export declare class N8NDocumentationMCPServer {
     private initialized;
     private cache;
     private clientInfo;
-    private instanceContext?;
+    private sessionInstanceContext?;
+    private requireRequestContext;
     private previousTool;
     private previousToolTimestamp;
     private earlyLogger;
@@ -25,6 +27,8 @@ export declare class N8NDocumentationMCPServer {
     private isShutdown;
     private additionalToolsByName;
     constructor(instanceContext?: InstanceContext, earlyLogger?: EarlyErrorLogger, options?: MCPServerOptions);
+    private get instanceContext();
+    private set instanceContext(value);
     private registerAdditionalTools;
     private getEnabledAdditionalTools;
     private findToolSchema;
@@ -50,8 +54,11 @@ export declare class N8NDocumentationMCPServer {
     private getNodeInfo;
     private searchNodes;
     private searchNodesFTS;
+    private resolveSearchIntent;
+    private applySearchIntent;
     private searchNodesFuzzy;
     private calculateFuzzyScore;
+    private getFuzzyQueryLengthLimit;
     private getEditDistance;
     private searchNodesLIKE;
     private calculateRelevance;
@@ -78,12 +85,13 @@ export declare class N8NDocumentationMCPServer {
     private enrichPropertiesWithTypeInfo;
     private searchNodeProperties;
     private getPropertyValue;
-    private listTasks;
     private resolveConfigVersion;
     private validateNodeConfig;
     private getPropertyDependencies;
     private getOutputDescriptions;
     private getCommonAIToolUseCases;
+    private isDeprecatedSearchRow;
+    private buildDeprecationInfo;
     private buildToolVariantGuidance;
     private validateNodeMinimal;
     private getToolsDocumentation;

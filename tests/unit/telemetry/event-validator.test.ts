@@ -117,3 +117,58 @@ describe('TelemetryEventValidator.validateWorkflow', () => {
     expect(v.validateWorkflow(oversized)).toBeNull();
   });
 });
+
+describe('TelemetryEventValidator.validateEvent string sanitization', () => {
+  const message = (text: string) => {
+    const v = new TelemetryEventValidator();
+    const event = v.validateEvent({
+      user_id: 'u',
+      event: 'validation_details',
+      properties: { nodeType: 'x', errorType: 'e', errorCategory: 'c', details: { message: text } },
+    });
+    return event?.properties.details.message as string;
+  };
+
+  it('handles long dotted text', () => {
+    const start = performance.now();
+    message('b.'.repeat(40_000));
+    expect(performance.now() - start).toBeLessThan(2000);
+  });
+
+  it('removes an email whose local part is longer than 64 characters', () => {
+    expect(message(`contact ${'a.'.repeat(50)}b@example.com now`)).toBe('contact [EMAIL] now');
+    expect(message('contact jane.doe@example.com now')).toBe('contact [EMAIL] now');
+  });
+
+  it('caps string length at a whitespace boundary', () => {
+    const out = message('word '.repeat(3_000));
+    expect(out.length).toBeLessThanOrEqual(10_000 + ' [TRUNCATED]'.length);
+    expect(out.endsWith('word [TRUNCATED]')).toBe(true);
+  });
+
+  it('sanitizes string elements of arrays like string values', () => {
+    const v = new TelemetryEventValidator();
+    const event = v.validateEvent({
+      user_id: 'u',
+      event: 'some_event',
+      properties: { items: ['word '.repeat(4_000), 'mail jane.doe@example.com', 3] },
+    });
+    const items = event?.properties.items as any[];
+    expect(items[0].endsWith('word [TRUNCATED]')).toBe(true);
+    expect(items[1]).toBe('mail [EMAIL]');
+    expect(items[2]).toBe(3);
+  });
+
+  it('drops a nested __proto__ key instead of replacing the copy\'s prototype', () => {
+    const v = new TelemetryEventValidator();
+    const event = v.validateEvent({
+      user_id: 'u',
+      event: 'some_event',
+      properties: JSON.parse('{"nested":{"__proto__":{"injected":"x"},"ok":1}}'),
+    });
+    const nested = event?.properties.nested as any;
+    expect(Object.getPrototypeOf(nested)).toBe(Object.prototype);
+    expect(nested.injected).toBeUndefined();
+    expect(nested.ok).toBe(1);
+  });
+});

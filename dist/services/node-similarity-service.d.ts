@@ -37,6 +37,7 @@ export declare class NodeSimilarityService {
     private isCommonNodeWithoutPrefix;
     findSimilarNodes(invalidType: string, limit?: number): Promise<NodeSuggestion[]>;
     private checkCommonMistakes;
+    private prepareQuery;
     private calculateSimilarityScore;
     private createSuggestion;
     private normalizeNodeType;

@@ -1742,6 +1742,21 @@ describe('handlers-n8n-manager', () => {
   });
 
   describe('handleValidateWorkflow', () => {
+    it('keeps the issue code so callers can recognise DEPRECATED_NODE', async () => {
+      mockApiClient.getWorkflow.mockResolvedValue(createTestWorkflow());
+      mockValidator.validateWorkflow.mockResolvedValue({
+        valid: true,
+        errors: [],
+        warnings: [{ type: 'warning', nodeName: 'node1', code: 'DEPRECATED_NODE', message: 'deprecated' }],
+        suggestions: [],
+        statistics: { totalNodes: 1, enabledNodes: 1, triggerNodes: 1, validConnections: 0, invalidConnections: 0, expressionsValidated: 0 },
+      });
+
+      const result = await handlers.handleValidateWorkflow({ id: 'test-workflow-id' }, {} as any);
+
+      expect((result.data as any).warnings[0].code).toBe('DEPRECATED_NODE');
+    });
+
     it('should validate workflow from n8n instance', async () => {
       const testWorkflow = createTestWorkflow();
       const mockNodeRepository = {} as any; // Mock repository
@@ -1838,6 +1853,49 @@ describe('handlers-n8n-manager', () => {
       expect((result.data as any).n8nVersionNote).toMatch(/1\.119\.0/);
     });
 
+    it('reports an unknown version state and makes no registry request when the check is disabled', async () => {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+      process.env.N8N_MCP_VERSION_CHECK_DISABLED = 'true';
+      try {
+        mockApiClient.healthCheck.mockResolvedValue({ status: 'ok' });
+
+        const result = await handlers.handleHealthCheck();
+        const versionCheck = (result.data as any).versionCheck;
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(versionCheck.upToDate).toBeNull();
+        expect(versionCheck.checkStatus).toBe('disabled');
+        expect((result.data as any).updateWarning).toBeUndefined();
+        expect(telemetryMocks.trackEvent).toHaveBeenCalledWith('health_check_completed', expect.objectContaining({
+          upToDate: null,
+          versionCheckStatus: 'disabled',
+        }));
+      } finally {
+        delete process.env.N8N_MCP_VERSION_CHECK_DISABLED;
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('reports an unknown version state, not up to date, when the registry is unreachable', async () => {
+      const { clearVersionCheckCache } = await import('@/utils/npm-version-checker');
+      clearVersionCheckCache();
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+      try {
+        mockApiClient.healthCheck.mockResolvedValue({ status: 'ok' });
+
+        const result = await handlers.handleHealthCheck();
+        const versionCheck = (result.data as any).versionCheck;
+
+        expect(versionCheck.upToDate).toBeNull();
+        expect(versionCheck.checkStatus).toBe('failed');
+        expect(versionCheck.latest).toBeNull();
+      } finally {
+        clearVersionCheckCache();
+        vi.unstubAllGlobals();
+      }
+    });
+
     it('should not annotate a version the instance did report', async () => {
       mockApiClient.healthCheck.mockResolvedValue({ status: 'ok', n8nVersion: '1.100.0' });
 
@@ -1871,6 +1929,73 @@ describe('handlers-n8n-manager', () => {
   });
 
   describe('handleDiagnostic', () => {
+    describe('HTTP mode auth and port reporting', () => {
+      const keys = ['MCP_MODE', 'AUTH_TOKEN', 'AUTH_TOKEN_FILE', 'MCP_AUTH_TOKEN', 'PORT', 'MCP_PORT'] as const;
+      let saved: Partial<Record<(typeof keys)[number], string | undefined>>;
+
+      beforeEach(() => {
+        saved = Object.fromEntries(keys.map(k => [k, process.env[k]]));
+        keys.forEach(k => delete process.env[k]);
+        process.env.MCP_MODE = 'http';
+        process.env.N8N_MCP_VERSION_CHECK_DISABLED = 'true';
+        mockApiClient.healthCheck.mockResolvedValue({ status: 'ok' });
+      });
+
+      afterEach(() => {
+        keys.forEach(k => {
+          const value = saved[k];
+          if (value === undefined) delete process.env[k];
+          else (process.env as Record<string, string>)[k] = value;
+        });
+        delete process.env.N8N_MCP_VERSION_CHECK_DISABLED;
+      });
+
+      async function diagnoseHttpMode(): Promise<any> {
+        const result = await handlers.handleDiagnostic({ params: { arguments: {} } });
+        return (result.data as any).modeSpecificDebug;
+      }
+
+      it('counts AUTH_TOKEN_FILE as a configured token', async () => {
+        process.env.AUTH_TOKEN_FILE = '/run/secrets/mcp_token';
+        expect((await diagnoseHttpMode()).authTokenConfigured).toBe(true);
+      });
+
+      it('does not count MCP_AUTH_TOKEN, which the server never reads', async () => {
+        process.env.MCP_AUTH_TOKEN = 'client-side-token-only';
+        expect((await diagnoseHttpMode()).authTokenConfigured).toBe(false);
+      });
+
+      it('reports the port from PORT and ignores MCP_PORT', async () => {
+        process.env.PORT = '3456';
+        process.env.MCP_PORT = '9999';
+        expect((await diagnoseHttpMode()).port).toBe('3456');
+      });
+    });
+
+    it('reports an unknown version state in versionInfo when the check is disabled', async () => {
+      const fetchSpy = vi.fn();
+      vi.stubGlobal('fetch', fetchSpy);
+      process.env.N8N_MCP_VERSION_CHECK_DISABLED = '1';
+      try {
+        mockApiClient.healthCheck.mockResolvedValue({ status: 'ok' });
+
+        const result = await handlers.handleDiagnostic({ params: { arguments: {} } });
+        const versionInfo = (result.data as any).versionInfo;
+
+        expect(fetchSpy).not.toHaveBeenCalled();
+        expect(versionInfo.upToDate).toBeNull();
+        expect(versionInfo.checkStatus).toBe('disabled');
+        expect((result.data as any).updateWarning).toBeUndefined();
+        expect(telemetryMocks.trackEvent).toHaveBeenCalledWith('diagnostic_completed', expect.objectContaining({
+          upToDate: null,
+          versionCheckStatus: 'disabled',
+        }));
+      } finally {
+        delete process.env.N8N_MCP_VERSION_CHECK_DISABLED;
+        vi.unstubAllGlobals();
+      }
+    });
+
     it('should provide diagnostic information', async () => {
       const healthData = {
         status: 'ok',

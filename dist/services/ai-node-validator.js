@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AI_CONNECTION_TYPES = void 0;
 exports.buildReverseConnectionMap = buildReverseConnectionMap;
 exports.getAIConnections = getAIConnections;
+exports.createAIValidationLookups = createAIValidationLookups;
 exports.validateAIAgent = validateAIAgent;
 exports.validateChatTrigger = validateChatTrigger;
 exports.validateBasicLLMChain = validateBasicLLMChain;
@@ -62,11 +63,62 @@ function getAIConnections(nodeName, reverseConnections, connectionType) {
     }
     return incoming.filter(c => exports.AI_CONNECTION_TYPES.includes(c.type));
 }
-function validateAIAgent(node, reverseConnections, workflow) {
+function countIncomingByType(incoming) {
+    const counts = new Map();
+    for (const c of incoming) {
+        counts.set(c.type, (counts.get(c.type) ?? 0) + 1);
+    }
+    return counts;
+}
+function createAIValidationLookups(workflow, reverseConnections) {
+    let nodesByName;
+    const incomingCounts = new Map();
+    const mainOutputs = new Map();
+    const streamingTargets = new Map();
+    const lookups = {
+        nodeByName(name) {
+            if (!nodesByName) {
+                nodesByName = new Map();
+                for (const n of workflow.nodes) {
+                    if (!nodesByName.has(n.name))
+                        nodesByName.set(n.name, n);
+                }
+            }
+            return nodesByName.get(name);
+        },
+        incomingCounts(nodeName) {
+            let counts = incomingCounts.get(nodeName);
+            if (!counts) {
+                counts = countIncomingByType(reverseConnections.get(nodeName) || []);
+                incomingCounts.set(nodeName, counts);
+            }
+            return counts;
+        },
+        hasMainOutput(nodeName) {
+            let has = mainOutputs.get(nodeName);
+            if (has === undefined) {
+                const main = workflow.connections[nodeName]?.main;
+                has = Boolean(main && main.flat().some((c) => c));
+                mainOutputs.set(nodeName, has);
+            }
+            return has;
+        },
+        isStreamingTarget(node) {
+            let streaming = streamingTargets.get(node.name);
+            if (streaming === undefined) {
+                streaming = checkIfStreamingTarget(node, reverseConnections, lookups);
+                streamingTargets.set(node.name, streaming);
+            }
+            return streaming;
+        }
+    };
+    return lookups;
+}
+function validateAIAgent(node, reverseConnections, workflow, lookups = createAIValidationLookups(workflow, reverseConnections)) {
     const issues = [];
-    const incoming = reverseConnections.get(node.name) || [];
-    const languageModelConnections = incoming.filter(c => c.type === 'ai_languageModel');
-    if (languageModelConnections.length === 0) {
+    const incomingCounts = lookups.incomingCounts(node.name);
+    const languageModelCount = incomingCounts.get('ai_languageModel') ?? 0;
+    if (languageModelCount === 0) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
@@ -75,16 +127,16 @@ function validateAIAgent(node, reverseConnections, workflow) {
             code: 'MISSING_LANGUAGE_MODEL'
         });
     }
-    else if (languageModelConnections.length > 2) {
+    else if (languageModelCount > 2) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `AI Agent "${node.name}" has ${languageModelConnections.length} ai_languageModel connections. Maximum is 2 (for fallback model support).`,
+            message: `AI Agent "${node.name}" has ${languageModelCount} ai_languageModel connections. Maximum is 2 (for fallback model support).`,
             code: 'TOO_MANY_LANGUAGE_MODELS'
         });
     }
-    else if (languageModelConnections.length === 2) {
+    else if (languageModelCount === 2) {
         if (!node.parameters.needsFallback) {
             issues.push({
                 severity: 'warning',
@@ -95,7 +147,7 @@ function validateAIAgent(node, reverseConnections, workflow) {
             });
         }
     }
-    else if (languageModelConnections.length === 1 && node.parameters.needsFallback === true) {
+    else if (languageModelCount === 1 && node.parameters.needsFallback === true) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
@@ -104,9 +156,9 @@ function validateAIAgent(node, reverseConnections, workflow) {
             code: 'FALLBACK_MISSING_SECOND_MODEL'
         });
     }
-    const outputParserConnections = incoming.filter(c => c.type === 'ai_outputParser');
+    const outputParserCount = incomingCounts.get('ai_outputParser') ?? 0;
     if (node.parameters.hasOutputParser === true) {
-        if (outputParserConnections.length === 0) {
+        if (outputParserCount === 0) {
             issues.push({
                 severity: 'warning',
                 nodeId: node.id,
@@ -116,7 +168,7 @@ function validateAIAgent(node, reverseConnections, workflow) {
             });
         }
     }
-    else if (outputParserConnections.length > 0) {
+    else if (outputParserCount > 0) {
         issues.push({
             severity: 'warning',
             nodeId: node.id,
@@ -124,12 +176,12 @@ function validateAIAgent(node, reverseConnections, workflow) {
             message: `AI Agent "${node.name}" has an output parser connected but hasOutputParser is not true. Set hasOutputParser=true to enable output parsing.`
         });
     }
-    if (outputParserConnections.length > 1) {
+    if (outputParserCount > 1) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `AI Agent "${node.name}" has ${outputParserConnections.length} output parsers. Only 1 is allowed.`,
+            message: `AI Agent "${node.name}" has ${outputParserCount} output parsers. Only 1 is allowed.`,
             code: 'MULTIPLE_OUTPUT_PARSERS'
         });
     }
@@ -163,11 +215,10 @@ function validateAIAgent(node, reverseConnections, workflow) {
             message: `AI Agent "${node.name}" systemMessage is very short (minimum ${MIN_SYSTEM_MESSAGE_LENGTH} characters recommended). Provide more detail about the agent's role and capabilities.`
         });
     }
-    const isStreamingTarget = checkIfStreamingTarget(node, workflow, reverseConnections);
+    const isStreamingTarget = lookups.isStreamingTarget(node);
     const hasOwnStreamingEnabled = node.parameters?.options?.streamResponse === true;
     if (isStreamingTarget || hasOwnStreamingEnabled) {
-        const agentMainOutput = workflow.connections[node.name]?.main;
-        if (agentMainOutput && agentMainOutput.flat().some((c) => c)) {
+        if (lookups.hasMainOutput(node.name)) {
             const streamSource = isStreamingTarget
                 ? 'connected from Chat Trigger with responseMode="streaming"'
                 : 'has streamResponse=true in options';
@@ -180,18 +231,18 @@ function validateAIAgent(node, reverseConnections, workflow) {
             });
         }
     }
-    const memoryConnections = incoming.filter(c => c.type === 'ai_memory');
-    if (memoryConnections.length > 1) {
+    const memoryCount = incomingCounts.get('ai_memory') ?? 0;
+    if (memoryCount > 1) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `AI Agent "${node.name}" has ${memoryConnections.length} ai_memory connections. Only 1 memory is allowed.`,
+            message: `AI Agent "${node.name}" has ${memoryCount} ai_memory connections. Only 1 memory is allowed.`,
             code: 'MULTIPLE_MEMORY_CONNECTIONS'
         });
     }
-    const toolConnections = incoming.filter(c => c.type === 'ai_tool');
-    if (toolConnections.length === 0) {
+    const toolCount = incomingCounts.get('ai_tool') ?? 0;
+    if (toolCount === 0) {
         issues.push({
             severity: 'info',
             nodeId: node.id,
@@ -229,11 +280,11 @@ function validateAIAgent(node, reverseConnections, workflow) {
     }
     return issues;
 }
-function checkIfStreamingTarget(node, workflow, reverseConnections) {
+function checkIfStreamingTarget(node, reverseConnections, lookups) {
     const incoming = reverseConnections.get(node.name) || [];
     const mainConnections = incoming.filter(c => c.type === 'main');
     for (const conn of mainConnections) {
-        const sourceNode = workflow.nodes.find(n => n.name === conn.sourceName);
+        const sourceNode = lookups.nodeByName(conn.sourceName);
         if (!sourceNode)
             continue;
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(sourceNode.type);
@@ -246,7 +297,7 @@ function checkIfStreamingTarget(node, workflow, reverseConnections) {
     }
     return false;
 }
-function validateChatTrigger(node, workflow, reverseConnections) {
+function validateChatTrigger(node, workflow, reverseConnections, lookups = createAIValidationLookups(workflow, reverseConnections)) {
     const issues = [];
     const responseMode = node.parameters?.options?.responseMode || 'lastNode';
     const outgoingMain = workflow.connections[node.name]?.main;
@@ -264,7 +315,7 @@ function validateChatTrigger(node, workflow, reverseConnections) {
     if (!firstConnection) {
         return issues;
     }
-    const targetNode = workflow.nodes.find(n => n.name === firstConnection.node);
+    const targetNode = lookups.nodeByName(firstConnection.node);
     if (!targetNode) {
         issues.push({
             severity: 'error',
@@ -287,8 +338,7 @@ function validateChatTrigger(node, workflow, reverseConnections) {
             });
         }
         else {
-            const agentMainOutput = workflow.connections[targetNode.name]?.main;
-            if (agentMainOutput && agentMainOutput.flat().some((c) => c)) {
+            if (lookups.hasMainOutput(targetNode.name)) {
                 issues.push({
                     severity: 'error',
                     nodeId: targetNode.id,
@@ -311,11 +361,13 @@ function validateChatTrigger(node, workflow, reverseConnections) {
     }
     return issues;
 }
-function validateBasicLLMChain(node, reverseConnections) {
+function validateBasicLLMChain(node, reverseConnections, lookups) {
     const issues = [];
-    const incoming = reverseConnections.get(node.name) || [];
-    const languageModelConnections = incoming.filter(c => c.type === 'ai_languageModel');
-    if (languageModelConnections.length === 0) {
+    const incomingCounts = lookups
+        ? lookups.incomingCounts(node.name)
+        : countIncomingByType(reverseConnections.get(node.name) || []);
+    const languageModelCount = incomingCounts.get('ai_languageModel') ?? 0;
+    if (languageModelCount === 0) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
@@ -324,16 +376,16 @@ function validateBasicLLMChain(node, reverseConnections) {
             code: 'MISSING_LANGUAGE_MODEL'
         });
     }
-    else if (languageModelConnections.length > 2) {
+    else if (languageModelCount > 2) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `Basic LLM Chain "${node.name}" has ${languageModelConnections.length} ai_languageModel connections. Maximum is 2 (for fallback model support).`,
+            message: `Basic LLM Chain "${node.name}" has ${languageModelCount} ai_languageModel connections. Maximum is 2 (for fallback model support).`,
             code: 'MULTIPLE_LANGUAGE_MODELS'
         });
     }
-    else if (languageModelConnections.length === 2 && !node.parameters.needsFallback) {
+    else if (languageModelCount === 2 && !node.parameters.needsFallback) {
         issues.push({
             severity: 'warning',
             nodeId: node.id,
@@ -342,18 +394,18 @@ function validateBasicLLMChain(node, reverseConnections) {
             code: 'MULTIPLE_LANGUAGE_MODELS_NO_FALLBACK'
         });
     }
-    const memoryConnections = incoming.filter(c => c.type === 'ai_memory');
-    if (memoryConnections.length > 1) {
+    const memoryCount = incomingCounts.get('ai_memory') ?? 0;
+    if (memoryCount > 1) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
             nodeName: node.name,
-            message: `Basic LLM Chain "${node.name}" has ${memoryConnections.length} ai_memory connections. Only 1 memory is allowed.`,
+            message: `Basic LLM Chain "${node.name}" has ${memoryCount} ai_memory connections. Only 1 memory is allowed.`,
             code: 'MULTIPLE_MEMORY_CONNECTIONS'
         });
     }
-    const toolConnections = incoming.filter(c => c.type === 'ai_tool');
-    if (toolConnections.length > 0) {
+    const toolCount = incomingCounts.get('ai_tool') ?? 0;
+    if (toolCount > 0) {
         issues.push({
             severity: 'error',
             nodeId: node.id,
@@ -378,20 +430,21 @@ function validateBasicLLMChain(node, reverseConnections) {
 function validateAISpecificNodes(workflow) {
     const issues = [];
     const reverseConnectionMap = buildReverseConnectionMap(workflow);
+    const lookups = createAIValidationLookups(workflow, reverseConnectionMap);
     for (const node of workflow.nodes) {
         if (node.disabled)
             continue;
         const normalizedType = node_type_normalizer_1.NodeTypeNormalizer.normalizeToFullForm(node.type);
         if (normalizedType === 'nodes-langchain.agent') {
-            const nodeIssues = validateAIAgent(node, reverseConnectionMap, workflow);
+            const nodeIssues = validateAIAgent(node, reverseConnectionMap, workflow, lookups);
             issues.push(...nodeIssues);
         }
         if (normalizedType === 'nodes-langchain.chatTrigger') {
-            const nodeIssues = validateChatTrigger(node, workflow, reverseConnectionMap);
+            const nodeIssues = validateChatTrigger(node, workflow, reverseConnectionMap, lookups);
             issues.push(...nodeIssues);
         }
         if (normalizedType === 'nodes-langchain.chainLlm') {
-            const nodeIssues = validateBasicLLMChain(node, reverseConnectionMap);
+            const nodeIssues = validateBasicLLMChain(node, reverseConnectionMap, lookups);
             issues.push(...nodeIssues);
         }
         if ((0, ai_tool_validators_1.isAIToolSubNode)(normalizedType)) {
