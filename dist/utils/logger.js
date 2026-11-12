@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.logger = exports.Logger = exports.LogLevel = void 0;
+exports.stripLineBreaks = stripLineBreaks;
 var LogLevel;
 (function (LogLevel) {
     LogLevel[LogLevel["ERROR"] = 0] = "ERROR";
@@ -8,6 +9,9 @@ var LogLevel;
     LogLevel[LogLevel["INFO"] = 2] = "INFO";
     LogLevel[LogLevel["DEBUG"] = 3] = "DEBUG";
 })(LogLevel || (exports.LogLevel = LogLevel = {}));
+function stripLineBreaks(value) {
+    return value.replace(/[\r\n\u2028\u2029]/g, ' ');
+}
 class Logger {
     constructor(config) {
         this.useFileLogging = false;
@@ -38,7 +42,7 @@ class Logger {
             parts.push(`[${this.config.prefix}]`);
         }
         parts.push(`[${level}]`);
-        parts.push(message);
+        parts.push(stripLineBreaks(String(message)));
         return parts.join(' ');
     }
     log(level, levelName, message, ...args) {
@@ -50,18 +54,19 @@ class Logger {
         }
         if (level <= this.config.level || allowErrorLogs) {
             const formattedMessage = this.formatMessage(levelName, message);
+            const safeArgs = args.map((arg) => (typeof arg === 'string' ? stripLineBreaks(arg) : arg));
             if (this.isHttp && process.env.MCP_REQUEST_ACTIVE === 'true' && !allowErrorLogs) {
                 return;
             }
             switch (level) {
                 case LogLevel.ERROR:
-                    console.error(formattedMessage, ...args);
+                    console.error('%s', formattedMessage, ...safeArgs);
                     break;
                 case LogLevel.WARN:
-                    console.warn(formattedMessage, ...args);
+                    console.warn('%s', formattedMessage, ...safeArgs);
                     break;
                 default:
-                    console.log(formattedMessage, ...args);
+                    console.log('%s', formattedMessage, ...safeArgs);
             }
         }
     }

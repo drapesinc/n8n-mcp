@@ -233,6 +233,8 @@ class WorkflowSanitizer {
         const sibling = [obj.name, obj.field].find((v) => typeof v === 'string');
         const resourceLocatorMode = obj.__rl === true && typeof obj.mode === 'string' ? obj.mode : undefined;
         for (const [key, value] of Object.entries(obj)) {
+            if (key === '__proto__')
+                continue;
             let kind = this.classifyKey(key);
             if (kind === 'none' && key === 'value') {
                 if (resourceLocatorMode === 'url') {
@@ -558,10 +560,14 @@ class WorkflowSanitizer {
         }
         const sanitized = {};
         for (const [sourceName, nodeConnections] of Object.entries(connections)) {
+            if (sourceName === '__proto__')
+                continue;
             const nodeId = this.sanitizeNodeName(sourceName);
             if (typeof nodeConnections === 'object' && nodeConnections !== null && !Array.isArray(nodeConnections)) {
                 sanitized[nodeId] = {};
                 for (const [connType, connArray] of Object.entries(nodeConnections)) {
+                    if (connType === '__proto__')
+                        continue;
                     if (Array.isArray(connArray)) {
                         sanitized[nodeId][connType] = connArray.map((conns) => {
                             if (Array.isArray(conns)) {
@@ -592,7 +598,8 @@ class WorkflowSanitizer {
         return sanitized.workflowHash;
     }
     static sanitizeWorkflowRaw(workflow) {
-        return this.sanitizeWorkflowRawInPlace(JSON.parse(JSON.stringify(workflow)), 0);
+        const copy = JSON.parse(JSON.stringify(workflow), (key, value) => (key === '__proto__' ? undefined : value));
+        return this.sanitizeWorkflowRawInPlace(copy, 0);
     }
     static sanitizeWorkflowRawInPlace(sanitized, depth) {
         this.sanitizeGraph(sanitized);
@@ -648,22 +655,22 @@ WorkflowSanitizer.SENSITIVE_PATTERNS = [
     { pattern: /Bearer\s+(?![{$[])[^\s'"`,;{}\]]+/gi, placeholder: 'Bearer [REDACTED]' },
     { pattern: /\bBasic\s+(?=[A-Za-z0-9+/]*\d)[A-Za-z0-9+/]{12,}={0,2}/g, placeholder: 'Basic [REDACTED]' },
     { pattern: /[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, placeholder: (token) => WorkflowSanitizer.redactJwts(token), requires: 'eyJ' },
-    { pattern: /\bsb_(?:secret|publishable)_[A-Za-z0-9_-]{20,}\b/g, placeholder: '[REDACTED_SUPABASE_KEY]' },
-    { pattern: /\bsk-proj-[A-Za-z0-9_-]{40,}\b/g, placeholder: '[REDACTED_LLM_API_KEY]' },
-    { pattern: /\bsk-or-(?:v1-)?[A-Za-z0-9-]{40,}\b/g, placeholder: '[REDACTED_LLM_API_KEY]' },
+    { pattern: /\bsb_(?:secret|publishable)_[A-Za-z0-9_-]{20,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_SUPABASE_KEY]' },
+    { pattern: /\bsk-proj-[A-Za-z0-9_-]{40,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_LLM_API_KEY]' },
+    { pattern: /\bsk-or-(?:v1-)?[A-Za-z0-9-]{40,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_LLM_API_KEY]' },
     { pattern: /\b(?:sk|rk)_(?:test|live)_[A-Za-z0-9]{24,}\b/g, placeholder: '[REDACTED_STRIPE_KEY]' },
     { pattern: /\bgithub_pat_[A-Za-z0-9_]{50,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
     { pattern: /\bghp_[A-Za-z0-9]{36,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bglpat-[A-Za-z0-9_-]{20,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bglpat-[A-Za-z0-9_-]{20,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
     { pattern: /\bhf_[A-Za-z0-9]{30,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
     { pattern: /\bntn_[A-Za-z0-9]{40,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bpit-[a-f0-9-]{36}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bxox[bpaors]-[A-Za-z0-9-]{10,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bpit-[a-f0-9-]{36}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bxox[bpaors]-[A-Za-z0-9-]{10,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
     { pattern: /\bAKIA[A-Z0-9]{16}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bGOCSPX-[A-Za-z0-9_-]{20,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
-    { pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g, placeholder: '[REDACTED_LLM_API_KEY]' },
+    { pattern: /\bAIza[A-Za-z0-9_-]{35}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bGOCSPX-[A-Za-z0-9_-]{20,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_API_TOKEN]' },
+    { pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}(?:\b|(?<=-))/g, placeholder: '[REDACTED_LLM_API_KEY]' },
     { pattern: /\bshpat_[a-f0-9]{32}\b/g, placeholder: '[REDACTED_API_TOKEN]' },
     { pattern: /\bsk-[A-Za-z0-9]{16,}\b/g, placeholder: '[REDACTED_LLM_API_KEY]' },
 ];
@@ -671,7 +678,7 @@ WorkflowSanitizer.PII_PATTERNS = [
     { pattern: /(?<![\w-])(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![\w-])/g, placeholder: '[REDACTED_PHONE]' },
 ];
 WorkflowSanitizer.OPAQUE_TOKEN_PATTERNS = [
-    /\b(?!REDACTED)(?=(?:[A-Za-z_-]{0,64}\d){3})(?=[^A-Z]{0,64}[A-Z])(?=[^a-z]{0,64}[a-z])[A-Za-z0-9_-]{32,}\b/g,
+    /\b(?!REDACTED)(?=(?:[A-Za-z_-]{0,64}\d){3})(?=[^A-Z]{0,64}[A-Z])(?=[^a-z]{0,64}[a-z])[A-Za-z0-9_-]{32,}(?:\b|(?<=-))/g,
     /\b(?!REDACTED)(?=[A-Za-z]{0,64}\d)[A-Za-z0-9]{32,}\b/g,
 ];
 WorkflowSanitizer.UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;

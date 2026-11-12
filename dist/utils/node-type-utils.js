@@ -78,6 +78,11 @@ function getNodeTypeVariations(type) {
     }
     return [...new Set(variations)];
 }
+const LEGACY_UNSUFFIXED_TRIGGERS = new Set([
+    'nodes-base.start',
+    'nodes-base.cron',
+    'nodes-base.interval',
+]);
 function isTriggerNode(nodeType) {
     const normalized = normalizeNodeType(nodeType);
     const lowerType = normalized.toLowerCase();
@@ -90,7 +95,7 @@ function isTriggerNode(nodeType) {
     if (lowerType.includes('emailread') || lowerType.includes('emailreadimap')) {
         return true;
     }
-    return normalized === 'nodes-base.start';
+    return LEGACY_UNSUFFIXED_TRIGGERS.has(normalized);
 }
 function isActivatableTrigger(nodeType) {
     return isTriggerNode(nodeType);
@@ -104,7 +109,7 @@ function getTriggerTypeDescription(nodeType) {
     if (lowerType.includes('webhook')) {
         return 'Webhook Trigger (HTTP requests)';
     }
-    if (lowerType.includes('schedule') || lowerType.includes('cron')) {
+    if (lowerType.includes('schedule') || lowerType.includes('cron') || normalized === 'nodes-base.interval') {
         return 'Schedule Trigger (time-based)';
     }
     if (lowerType.includes('manual') || normalized === 'nodes-base.start') {

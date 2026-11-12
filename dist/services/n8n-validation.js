@@ -82,6 +82,7 @@ exports.workflowSettingsSchema = zod_1.z.object({
     timeSavedMode: zod_1.z.enum(['fixed', 'dynamic']).optional(),
     timeSavedPerExecution: zod_1.z.number().optional(),
     redactionPolicy: zod_1.z.enum(['none', 'non-manual', 'manual-only', 'all']).optional(),
+    redactCallerExecutions: zod_1.z.boolean().optional(),
     availableInMCP: zod_1.z.boolean().optional(),
     customTelemetryTags: zod_1.z
         .array(zod_1.z.object({ key: zod_1.z.string(), value: zod_1.z.string() }))

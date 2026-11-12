@@ -30,6 +30,7 @@ export declare class SingleSessionHTTPServer {
     private handleUnimplementedMethod;
     private sanitizeErrorForClient;
     private updateSessionAccess;
+    private sendSessionNotFound;
     private authenticateRequest;
     private instanceConfigDigest;
     private switchSessionContext;

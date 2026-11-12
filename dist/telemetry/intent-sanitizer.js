@@ -8,7 +8,7 @@ const PII_PATTERNS = {
     ip: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g,
     phone: /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
     creditCard: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g,
-    apiKey: /\b[A-Za-z0-9_-]{32,}\b/g,
+    apiKey: /\b[A-Za-z0-9_-]{32,}(?:\b|(?<=-))/g,
     uuid: /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
     filePath: /(?:\/[\w.-]+)+\/?|(?:[A-Z]:\\(?:[\w.-]+\\)*[\w.-]+)/g,
     secret: /\b(?:password|passwd|pwd|secret|token|key)[:=\s]+[^\s]+/gi,

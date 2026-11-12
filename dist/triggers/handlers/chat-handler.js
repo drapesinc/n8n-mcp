@@ -43,6 +43,7 @@ const crypto_1 = require("crypto");
 const base_handler_1 = require("./base-handler");
 const n8n_api_client_1 = require("../../services/n8n-api-client");
 const trigger_detector_1 = require("../trigger-detector");
+const strip_trailing_slashes_1 = require("../../utils/strip-trailing-slashes");
 const chatInputSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
     triggerType: zod_1.z.literal('chat'),
@@ -78,7 +79,7 @@ class ChatHandler extends base_handler_1.BaseTriggerHandler {
                 chatUrl = (0, trigger_detector_1.buildTriggerUrl)(baseUrl, triggerInfo, 'production');
             }
             else {
-                chatUrl = `${baseUrl.replace(/\/+$/, '')}/webhook/${input.workflowId}`;
+                chatUrl = `${(0, strip_trailing_slashes_1.stripTrailingSlashes)(baseUrl)}/webhook/${input.workflowId}`;
             }
             if (!this.isUnderTriggerPrefix(chatUrl, baseUrl, 'webhook')) {
                 return this.errorResponse(input, 'Invalid webhook path', startTime);

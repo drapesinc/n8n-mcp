@@ -257,6 +257,15 @@ class SingleSessionHTTPServer {
             this.sessionMetadata[sessionId].lastAccess = new Date();
         }
     }
+    sendSessionNotFound(res, id = null) {
+        if (res.locals)
+            res.locals.mcpSessionNotFound = true;
+        res.status(404).json({
+            jsonrpc: '2.0',
+            error: { code: -32000, message: 'Session not found or expired' },
+            id,
+        });
+    }
     authenticateRequest(req, res) {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -594,11 +603,7 @@ class SingleSessionHTTPServer {
                             return;
                         }
                         logger_1.logger.warn('handleRequest: Session removed between check and use (TOCTOU)', { sessionId });
-                        res.status(404).json({
-                            jsonrpc: '2.0',
-                            error: { code: -32000, message: 'Session not found or expired' },
-                            id: req.body?.id ?? null,
-                        });
+                        this.sendSessionNotFound(res, req.body?.id ?? null);
                         return;
                     }
                     const isMultiTenantEnabled = process.env.ENABLE_MULTI_TENANT === 'true';
@@ -640,16 +645,14 @@ class SingleSessionHTTPServer {
                         sessionExists: sessionId ? !!this.transports[sessionId] : false
                     };
                     logger_1.logger.warn('handleRequest: Invalid request - no session ID and not initialize', errorDetails);
-                    let errorMessage = 'Bad Request: No valid session ID provided and not an initialize request';
-                    let statusCode = 400;
-                    if (sessionId && !this.isValidSessionId(sessionId)) {
-                        errorMessage = 'Bad Request: Invalid session ID format';
+                    if (sessionId && this.isValidSessionId(sessionId) && !this.transports[sessionId]) {
+                        this.sendSessionNotFound(res, req.body?.id ?? null);
+                        return;
                     }
-                    else if (sessionId && !this.transports[sessionId]) {
-                        errorMessage = 'Session not found or expired';
-                        statusCode = 404;
-                    }
-                    res.status(statusCode).json({
+                    const errorMessage = sessionId
+                        ? 'Bad Request: Invalid session ID format'
+                        : 'Bad Request: No valid session ID provided and not an initialize request';
+                    res.status(400).json({
                         jsonrpc: '2.0',
                         error: {
                             code: -32000,
@@ -787,7 +790,9 @@ class SingleSessionHTTPServer {
             standardHeaders: true,
             legacyHeaders: false,
             skipSuccessfulRequests: true,
-            requestWasSuccessful: (_req, res) => res.statusCode < 400 || res.locals?.mcpMethodNotFound === true,
+            requestWasSuccessful: (_req, res) => res.statusCode < 400 ||
+                res.locals?.mcpMethodNotFound === true ||
+                res.locals?.mcpSessionNotFound === true,
             handler: (req, res) => {
                 logger_1.logger.warn('Rate limit exceeded', {
                     ip: req.ip,
@@ -846,7 +851,8 @@ class SingleSessionHTTPServer {
                 return;
             const sessionId = req.headers['mcp-session-id'];
             const existingTransport = sessionId ? this.transports[sessionId] : undefined;
-            if (existingTransport && existingTransport instanceof streamableHttp_js_1.StreamableHTTPServerTransport) {
+            if (sessionId && existingTransport instanceof streamableHttp_js_1.StreamableHTTPServerTransport) {
+                this.updateSessionAccess(sessionId);
                 try {
                     await existingTransport.handleRequest(req, res, undefined);
                     return;
@@ -854,6 +860,10 @@ class SingleSessionHTTPServer {
                 catch (error) {
                     logger_1.logger.error('StreamableHTTP GET request failed:', error);
                 }
+            }
+            if (sessionId && !existingTransport) {
+                this.sendSessionNotFound(res);
+                return;
             }
             const accept = req.headers.accept;
             if (accept && accept.includes('text/event-stream')) {

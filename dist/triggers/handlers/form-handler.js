@@ -42,6 +42,7 @@ const axios_1 = __importDefault(require("axios"));
 const form_data_1 = __importDefault(require("form-data"));
 const base_handler_1 = require("./base-handler");
 const n8n_api_client_1 = require("../../services/n8n-api-client");
+const strip_trailing_slashes_1 = require("../../utils/strip-trailing-slashes");
 const formInputSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
     triggerType: zod_1.z.literal('form'),
@@ -185,7 +186,7 @@ class FormHandler extends base_handler_1.BaseTriggerHandler {
                 });
             }
             const formPath = triggerInfo?.webhookPath || triggerInfo?.node?.parameters?.path || input.workflowId;
-            const formUrl = `${baseUrl.replace(/\/+$/, '')}/form/${formPath}`;
+            const formUrl = `${(0, strip_trailing_slashes_1.stripTrailingSlashes)(baseUrl)}/form/${formPath}`;
             if (!this.isUnderTriggerPrefix(formUrl, baseUrl, 'form')) {
                 return this.errorResponse(input, 'Invalid form path', startTime, {
                     details: {

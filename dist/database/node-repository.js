@@ -450,7 +450,7 @@ class NodeRepository {
             }
         }
         catch (error) {
-            console.error('Error getting default operation for', nodeType, error);
+            console.error('Error getting default operation for', (0, logger_1.stripLineBreaks)(String(nodeType)), error);
             return undefined;
         }
         return undefined;

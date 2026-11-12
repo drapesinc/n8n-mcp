@@ -7,6 +7,7 @@ exports.getInstanceScopeId = getInstanceScopeId;
 const crypto_1 = require("crypto");
 const ssrf_protection_1 = require("../utils/ssrf-protection");
 const n8n_api_1 = require("../config/n8n-api");
+const strip_trailing_slashes_1 = require("../utils/strip-trailing-slashes");
 const INSTANCE_CONTEXT_KEYS = [
     'n8nApiUrl',
     'n8nApiKey',
@@ -181,7 +182,7 @@ function validateInstanceContext(context) {
 }
 function getInstanceScopeId(context) {
     if (context?.n8nApiUrl && context?.n8nApiKey) {
-        const url = context.n8nApiUrl.trim().replace(/\/+$/, '').toLowerCase();
+        const url = (0, strip_trailing_slashes_1.stripTrailingSlashes)(context.n8nApiUrl.trim()).toLowerCase();
         return (0, crypto_1.createHash)('sha256')
             .update(`n8n-mcp-wv:${url}:${context.n8nApiKey}`)
             .digest('hex')

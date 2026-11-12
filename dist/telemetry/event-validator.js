@@ -188,7 +188,7 @@ function sanitizeNestedObject(obj, maxDepth) {
             sanitized['...'] = 'truncated';
             break;
         }
-        if (isSensitiveKey(key)) {
+        if (key === '__proto__' || isSensitiveKey(key)) {
             continue;
         }
         if (typeof value === 'string') {

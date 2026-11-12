@@ -105,7 +105,17 @@ class SSRFProtection {
         if (hostname.startsWith('[') && hostname.endsWith(']')) {
             hostname = hostname.slice(1, -1);
         }
-        return hostname.replace(/\.+$/, '');
+        const stripped = hostname.replace(/\.+$/, '');
+        if (stripped === hostname || stripped === '' || (0, net_1.isIPv6)(stripped)) {
+            return stripped;
+        }
+        try {
+            const reparsed = new url_1.URL(`http://${stripped}/`).hostname;
+            return (0, net_1.isIPv4)(reparsed) ? reparsed : stripped;
+        }
+        catch {
+            return stripped;
+        }
     }
     static isPrivateOrMappedIpv6(hostname) {
         if (!(0, net_1.isIPv6)(hostname))
