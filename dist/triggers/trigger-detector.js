@@ -5,6 +5,7 @@ exports.classifyTriggerNode = classifyTriggerNode;
 exports.buildTriggerUrl = buildTriggerUrl;
 exports.describeTrigger = describeTrigger;
 const node_type_utils_1 = require("../utils/node-type-utils");
+const strip_trailing_slashes_1 = require("../utils/strip-trailing-slashes");
 const WEBHOOK_PATTERNS = [
     'webhook',
     'webhooktrigger',
@@ -176,7 +177,7 @@ function extractFormFields(params) {
     return fields;
 }
 function buildTriggerUrl(baseUrl, trigger, mode = 'production') {
-    const cleanBaseUrl = baseUrl.replace(/\/+$/, '');
+    const cleanBaseUrl = (0, strip_trailing_slashes_1.stripTrailingSlashes)(baseUrl);
     switch (trigger.type) {
         case 'webhook': {
             const prefix = mode === 'test' ? 'webhook-test' : 'webhook';

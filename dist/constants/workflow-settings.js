@@ -20,7 +20,8 @@ exports.WORKFLOW_SETTINGS_PROPERTIES = {
     binaryMode: { since: v(2, 33, 0), derived: true },
     timeSavedMode: { since: v(2, 33, 0) },
     credentialResolverId: { since: v(2, 33, 0), derived: true },
-    engineType: { since: v(2, 36, 0), derived: true, entityOnly: true },
+    engineType: { since: v(2, 36, 0), derived: true },
+    redactCallerExecutions: { since: v(2, 46, 0) },
 };
 exports.SETTINGS_PASS_THROUGH_FLOOR = v(2, 24, 0);
 exports.DERIVED_SETTINGS_PROPERTIES = new Set(Object.entries(exports.WORKFLOW_SETTINGS_PROPERTIES)

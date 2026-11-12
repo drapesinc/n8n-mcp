@@ -37,6 +37,7 @@ exports.WebhookHandler = void 0;
 const zod_1 = require("zod");
 const base_handler_1 = require("./base-handler");
 const trigger_detector_1 = require("../trigger-detector");
+const strip_trailing_slashes_1 = require("../../utils/strip-trailing-slashes");
 const webhookInputSchema = zod_1.z.object({
     workflowId: zod_1.z.string(),
     triggerType: zod_1.z.literal('webhook'),
@@ -67,7 +68,7 @@ class WebhookHandler extends base_handler_1.BaseTriggerHandler {
             }
             let webhookUrl;
             if (input.webhookPath) {
-                webhookUrl = `${baseUrl.replace(/\/+$/, '')}/webhook/${input.webhookPath}`;
+                webhookUrl = `${(0, strip_trailing_slashes_1.stripTrailingSlashes)(baseUrl)}/webhook/${input.webhookPath}`;
             }
             else if (triggerInfo?.webhookPath) {
                 webhookUrl = (0, trigger_detector_1.buildTriggerUrl)(baseUrl, triggerInfo, 'production');

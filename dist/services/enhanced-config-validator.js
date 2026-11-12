@@ -237,8 +237,8 @@ class EnhancedConfigValidator extends config_validator_1.ConfigValidator {
         }
         const hostMatches = (suffix) => host === suffix || host.endsWith('.' + suffix);
         const isApiEndpoint = /^https?:\/\/api\./i.test(url) ||
-            /\/api[\/\?]|\/api$/i.test(url) ||
-            /\/rest[\/\?]|\/rest$/i.test(url) ||
+            /\/api(?:[\/?]|$)/i.test(url) ||
+            /\/rest(?:[\/?]|$)/i.test(url) ||
             hostMatches('supabase.co') ||
             host.includes('firebase') ||
             hostMatches('googleapis.com') ||
