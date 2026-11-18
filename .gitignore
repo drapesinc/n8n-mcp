@@ -155,3 +155,6 @@ ui-apps/.lab-smoke.json
 ui-apps/coverage/
 ui-apps/test-results/
 ui-apps/playwright-report/
+
+# SQLite file some tests create when ":memory:" is taken as a path
+/:memory:
