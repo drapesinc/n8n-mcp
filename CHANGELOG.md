@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.103.2] - 2026-11-18
+
+### Fixed
+
+- **`n8n_manage_variables` delete of an unknown id reports `NOT_FOUND`.** n8n answers it with 403 "You are not allowed to delete this variable", and the tool added its license and key-scope hint, which sent callers to check settings that were fine. On a 403 from delete the tool now looks the id up and returns `NOT_FOUND` when no variable visible to the API key has it. A 403 for an existing variable, or a lookup that fails or stops at the page cap, keeps the original error and hint.
+- **`n8n_manage_variables` input errors name the field and the rule.** The error was the bare "Invalid input", with the reason only in `details`, which some MCP clients do not show. It now reads, for example, "Invalid input - key: key may contain only letters, digits and underscores, and must not start with a digit". `details` is unchanged.
+
+## [2.103.1] - 2026-11-17
+
+### Changed
+
+- **Bundled skills pack synced to n8n-skills v1.38.0** (from v1.34.0). The pack now documents `n8n_manage_variables`: the tools-expert skill gains a Variables section and a WORKFLOW_GUIDE entry covering the five actions, global and project scopes, `clearValue`, the license requirement, `DISABLE_ENTERPRISE_TOOLS` and the `INCOMPLETE_SEARCH` error; the router and workflow-patterns skills point to it; and the expression-syntax skill gains a `$vars` section. The pack and the `n8n_manage_variables` tool documentation now state that a project variable is visible only to workflows in that project. The sync also brings in the n8n-skills releases since v1.34.0: the per-call `instance` argument in the multi-instance skill (v1.36.0) and native-first node selection across the pack (v1.37.0), which adds `n8n-node-configuration/NATIVE_NODES.md` and `n8n-self-hosting/TASK_RUNNERS.md` and the Python Code skill rewritten for native Python on n8n 2.x (the Pyodide runtime it described was removed in n8n 2.0; `DATA_ACCESS.md`, `ERROR_PATTERNS.md` and `STANDARD_LIBRARY.md` are gone).
+
+## [2.103.0] - 2026-11-17
+
+### Added
+
+- **`n8n_manage_variables` tool.** Manages n8n instance variables, the values workflows read as `{{ $vars.KEY }}`. Actions: `list`, `get`, `create`, `update`, `delete`, for global or project-scoped variables. n8n has no route that reads one variable and its create and update routes return no body, so `get` filters the list, `create` reads the list once more to return the new ID, and `update` fills an omitted key or value from the current variable (n8n's update replaces the whole variable). An empty `value` on update counts as omitted, because some MCP clients send empty strings for unset fields; `clearValue: true` empties a value. Variables need an n8n license that includes them; on other instances every action returns 403 with a hint. `create`, `update` and `delete` can be disabled with `DISABLED_TOOL_OPERATIONS`. `get`, the post-create lookup and partial updates stop paging once they find a variable named by ID, or by key within one scope; a key search across all scopes that reaches the 10,000-variable cap fails with `INCOMPLETE_SEARCH` instead of picking one match.
+- **`DISABLE_ENTERPRISE_TOOLS` environment variable.** Set it to `true` to remove the tools whose every action needs a paid n8n license feature, for deployments whose instances run the free Community edition. It currently covers `n8n_manage_variables` and combines with `DISABLED_TOOLS`.
+
+### Fixed
+
+- **Variable methods in the n8n API client.** `updateVariable` sent `PATCH`, which n8n does not route; it now sends `PUT` with the required key and value. `getVariables`, which returned an empty list on any error (including a missing license), is replaced by `listVariables`, which passes the pagination and filter parameters through and reports errors. A list body that is not `{data: []}` or an array (for example an HTML page from a proxy) now fails instead of reading as an empty list. Neither method was used by any tool before this release.
+- **Debug request logs no longer include variable values.** Request bodies sent to `/variables` are redacted, as bodies sent to `/credentials` already were.
+
 ## [2.102.0] - 2026-11-09
 
 ### Changed
