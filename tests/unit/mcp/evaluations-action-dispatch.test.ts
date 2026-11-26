@@ -62,7 +62,7 @@ describe('n8n_evaluations action dispatch', () => {
     expect(handlerMocks.handleTriggerTestRun).toHaveBeenCalledTimes(1);
     expect(handlerMocks.handleTriggerTestRun).toHaveBeenCalledWith(
       expect.objectContaining({ workflowId: 'wf1' }),
-      undefined
+      expect.anything() // the context resolved from the workspace config
     );
     expect(handlerMocks.handleCancelTestRun).not.toHaveBeenCalled();
     expect(handlerMocks.handleListTestRuns).not.toHaveBeenCalled();
@@ -81,7 +81,7 @@ describe('n8n_evaluations action dispatch', () => {
     expect(handlerMocks.handleCancelTestRun).toHaveBeenCalledTimes(1);
     expect(handlerMocks.handleCancelTestRun).toHaveBeenCalledWith(
       expect.objectContaining({ workflowId: 'wf1', runId: 'run1' }),
-      undefined
+      expect.anything() // the context resolved from the workspace config
     );
     expect(handlerMocks.handleTriggerTestRun).not.toHaveBeenCalled();
     expect(result.data.action).toBe('cancel');

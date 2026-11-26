@@ -102,7 +102,7 @@ describe('agent call defaults and aliases (#1051)', () => {
       expect(handlerMocks.handleGetExecution).not.toHaveBeenCalled();
       expect(handlerMocks.handleListExecutions).toHaveBeenCalledWith(
         expect.objectContaining({ workflowId: 'wf1' }),
-        undefined
+        expect.anything() // the context resolved from the workspace config
       );
       expect(result.success).toBe(true);
       expect(result.data.handler).toBe('list');

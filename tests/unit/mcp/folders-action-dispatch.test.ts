@@ -86,7 +86,7 @@ describe('n8n_manage_folders action dispatch', () => {
 
     expect(handlerMocks.handleMoveFolder).toHaveBeenCalledWith(
       expect.objectContaining({ folderId: 'f1', parentFolderId: null }),
-      undefined
+      expect.anything() // the context resolved from the workspace config
     );
   });
 
@@ -143,7 +143,7 @@ describe('n8n_manage_variables action dispatch', () => {
     await server.testExecuteTool('n8n_manage_variables', { action: 'update', id: 'v1', projectId: null });
     expect(handlerMocks.handleUpdateVariable).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'v1', projectId: null }),
-      undefined
+      expect.anything() // the context resolved from the workspace config
     );
   });
 
