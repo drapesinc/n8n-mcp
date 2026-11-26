@@ -1723,7 +1723,7 @@ export class N8NDocumentationMCPServer {
     if (isOperationDisabled('n8n_executions', 'list')) {
       throw new Error('id is required for action=get');
     }
-    const result = await n8nHandlers.handleListExecutions(args, this.instanceContext);
+    const result = await n8nHandlers.handleListExecutions(args, this.resolveContextFromArgs(args));
     if (!result.success) return result;
     const scope = hasText(args.workflowId) ? `executions of workflow ${args.workflowId}` : 'recent executions';
     return {
@@ -1994,24 +1994,24 @@ export class N8NDocumentationMCPServer {
         const evalAction = args.action;
         switch (evalAction) {
           case 'list_runs':
-            return n8nHandlers.handleListTestRuns(args, this.instanceContext);
+            return n8nHandlers.handleListTestRuns(args, this.resolveContextFromArgs(args));
           case 'get_run':
             if (!args.runId) {
               throw new Error('runId is required for action=get_run');
             }
-            return n8nHandlers.handleGetTestRun(args, this.instanceContext);
+            return n8nHandlers.handleGetTestRun(args, this.resolveContextFromArgs(args));
           case 'list_cases':
             if (!args.runId) {
               throw new Error('runId is required for action=list_cases');
             }
-            return n8nHandlers.handleListTestCases(args, this.instanceContext);
+            return n8nHandlers.handleListTestCases(args, this.resolveContextFromArgs(args));
           case 'run':
-            return n8nHandlers.handleTriggerTestRun(args, this.instanceContext);
+            return n8nHandlers.handleTriggerTestRun(args, this.resolveContextFromArgs(args));
           case 'cancel':
             if (!args.runId) {
               throw new Error('runId is required for action=cancel');
             }
-            return n8nHandlers.handleCancelTestRun(args, this.instanceContext);
+            return n8nHandlers.handleCancelTestRun(args, this.resolveContextFromArgs(args));
           default:
             throw new Error(`Unknown action: ${evalAction}. Valid actions: list_runs, get_run, list_cases, run, cancel`);
         }
@@ -2038,21 +2038,21 @@ export class N8NDocumentationMCPServer {
         const dtAction = args.action;
         // Each handler validates its own inputs via Zod schemas
         switch (dtAction) {
-          case 'createTable':  return n8nHandlers.handleCreateTable(args, this.instanceContext);
-          case 'listTables':   return n8nHandlers.handleListTables(args, this.instanceContext);
-          case 'getTable':     return n8nHandlers.handleGetTable(args, this.instanceContext);
-          case 'updateTable':  return n8nHandlers.handleUpdateTable(args, this.instanceContext);
-          case 'deleteTable':  return n8nHandlers.handleDeleteTable(args, this.instanceContext);
-          case 'getRows':      return n8nHandlers.handleGetRows(args, this.instanceContext);
-          case 'insertRows':   return n8nHandlers.handleInsertRows(args, this.instanceContext);
-          case 'updateRows':   return n8nHandlers.handleUpdateRows(args, this.instanceContext);
-          case 'upsertRows':   return n8nHandlers.handleUpsertRows(args, this.instanceContext);
-          case 'deleteRows':   return n8nHandlers.handleDeleteRows(args, this.instanceContext);
+          case 'createTable':  return n8nHandlers.handleCreateTable(args, this.resolveContextFromArgs(args));
+          case 'listTables':   return n8nHandlers.handleListTables(args, this.resolveContextFromArgs(args));
+          case 'getTable':     return n8nHandlers.handleGetTable(args, this.resolveContextFromArgs(args));
+          case 'updateTable':  return n8nHandlers.handleUpdateTable(args, this.resolveContextFromArgs(args));
+          case 'deleteTable':  return n8nHandlers.handleDeleteTable(args, this.resolveContextFromArgs(args));
+          case 'getRows':      return n8nHandlers.handleGetRows(args, this.resolveContextFromArgs(args));
+          case 'insertRows':   return n8nHandlers.handleInsertRows(args, this.resolveContextFromArgs(args));
+          case 'updateRows':   return n8nHandlers.handleUpdateRows(args, this.resolveContextFromArgs(args));
+          case 'upsertRows':   return n8nHandlers.handleUpsertRows(args, this.resolveContextFromArgs(args));
+          case 'deleteRows':   return n8nHandlers.handleDeleteRows(args, this.resolveContextFromArgs(args));
           // Column actions need n8n's own MCP server - the Public API cannot
           // change a table's schema after creation.
-          case 'addColumn':    return n8nHandlers.handleAddColumn(args, this.instanceContext);
-          case 'deleteColumn': return n8nHandlers.handleDeleteColumn(args, this.instanceContext);
-          case 'renameColumn': return n8nHandlers.handleRenameColumn(args, this.instanceContext);
+          case 'addColumn':    return n8nHandlers.handleAddColumn(args, this.resolveContextFromArgs(args));
+          case 'deleteColumn': return n8nHandlers.handleDeleteColumn(args, this.resolveContextFromArgs(args));
+          case 'renameColumn': return n8nHandlers.handleRenameColumn(args, this.resolveContextFromArgs(args));
           default:
             throw new Error(`Unknown action: ${dtAction}. Valid actions: createTable, listTables, getTable, updateTable, deleteTable, getRows, insertRows, updateRows, upsertRows, deleteRows, addColumn, deleteColumn, renameColumn`);
         }
@@ -2063,12 +2063,12 @@ export class N8NDocumentationMCPServer {
         const folderAction = args.action;
         // Each handler validates its own inputs via Zod schemas
         switch (folderAction) {
-          case 'create': return n8nHandlers.handleCreateFolder(args, this.instanceContext);
-          case 'list':   return n8nHandlers.handleListFolders(args, this.instanceContext);
-          case 'get':    return n8nHandlers.handleGetFolder(args, this.instanceContext);
-          case 'rename': return n8nHandlers.handleRenameFolder(args, this.instanceContext);
-          case 'move':   return n8nHandlers.handleMoveFolder(args, this.instanceContext);
-          case 'delete': return n8nHandlers.handleDeleteFolder(args, this.instanceContext);
+          case 'create': return n8nHandlers.handleCreateFolder(args, this.resolveContextFromArgs(args));
+          case 'list':   return n8nHandlers.handleListFolders(args, this.resolveContextFromArgs(args));
+          case 'get':    return n8nHandlers.handleGetFolder(args, this.resolveContextFromArgs(args));
+          case 'rename': return n8nHandlers.handleRenameFolder(args, this.resolveContextFromArgs(args));
+          case 'move':   return n8nHandlers.handleMoveFolder(args, this.resolveContextFromArgs(args));
+          case 'delete': return n8nHandlers.handleDeleteFolder(args, this.resolveContextFromArgs(args));
           default:
             throw new Error(`Unknown action: ${folderAction}. Valid actions: create, list, get, rename, move, delete`);
         }
@@ -2079,11 +2079,11 @@ export class N8NDocumentationMCPServer {
         const variableAction = args.action;
         // Each handler validates its own inputs via Zod schemas
         switch (variableAction) {
-          case 'list':   return n8nHandlers.handleListVariables(args, this.instanceContext);
-          case 'get':    return n8nHandlers.handleGetVariable(args, this.instanceContext);
-          case 'create': return n8nHandlers.handleCreateVariable(args, this.instanceContext);
-          case 'update': return n8nHandlers.handleUpdateVariable(args, this.instanceContext);
-          case 'delete': return n8nHandlers.handleDeleteVariable(args, this.instanceContext);
+          case 'list':   return n8nHandlers.handleListVariables(args, this.resolveContextFromArgs(args));
+          case 'get':    return n8nHandlers.handleGetVariable(args, this.resolveContextFromArgs(args));
+          case 'create': return n8nHandlers.handleCreateVariable(args, this.resolveContextFromArgs(args));
+          case 'update': return n8nHandlers.handleUpdateVariable(args, this.resolveContextFromArgs(args));
+          case 'delete': return n8nHandlers.handleDeleteVariable(args, this.resolveContextFromArgs(args));
           default:
             throw new Error(`Unknown action: ${variableAction}. Valid actions: list, get, create, update, delete`);
         }
@@ -2091,25 +2091,25 @@ export class N8NDocumentationMCPServer {
 
       case 'n8n_manage_agents':
         this.validateToolParams(name, args, ['action']);
-        return handleManageAgents(args, this.instanceContext);
+        return handleManageAgents(args, this.resolveContextFromArgs(args));
 
       case 'n8n_explore_node_resources':
-        return handleExploreNodeResources(args, this.instanceContext);
+        return handleExploreNodeResources(args, this.resolveContextFromArgs(args));
 
       case 'n8n_list_catalog':
         this.validateToolParams(name, args, ['kind']);
-        return handleListCatalog(args, this.instanceContext);
+        return handleListCatalog(args, this.resolveContextFromArgs(args));
 
       case 'n8n_manage_credentials': {
         this.validateToolParams(name, args, ['action']);
         const credAction = args.action;
         switch (credAction) {
-          case 'list':      return n8nHandlers.handleListCredentials(args, this.instanceContext);
-          case 'get':       return n8nHandlers.handleGetCredential(args, this.instanceContext);
-          case 'create':    return n8nHandlers.handleCreateCredential(args, this.instanceContext);
-          case 'update':    return n8nHandlers.handleUpdateCredential(args, this.instanceContext);
-          case 'delete':    return n8nHandlers.handleDeleteCredential(args, this.instanceContext);
-          case 'getSchema': return n8nHandlers.handleGetCredentialSchema(args, this.instanceContext);
+          case 'list':      return n8nHandlers.handleListCredentials(args, this.resolveContextFromArgs(args));
+          case 'get':       return n8nHandlers.handleGetCredential(args, this.resolveContextFromArgs(args));
+          case 'create':    return n8nHandlers.handleCreateCredential(args, this.resolveContextFromArgs(args));
+          case 'update':    return n8nHandlers.handleUpdateCredential(args, this.resolveContextFromArgs(args));
+          case 'delete':    return n8nHandlers.handleDeleteCredential(args, this.resolveContextFromArgs(args));
+          case 'getSchema': return n8nHandlers.handleGetCredentialSchema(args, this.resolveContextFromArgs(args));
           default:
             throw new Error(`Unknown action: ${credAction}. Valid actions: list, get, create, update, delete, getSchema`);
         }
@@ -2117,7 +2117,7 @@ export class N8NDocumentationMCPServer {
 
       case 'n8n_audit_instance':
         // No required parameters - all are optional
-        return n8nHandlers.handleAuditInstance(args, this.instanceContext);
+        return n8nHandlers.handleAuditInstance(args, this.resolveContextFromArgs(args));
 
       default:
         throw new Error(`Unknown tool: ${name}`);
