@@ -106,6 +106,17 @@ const STDIO_MAX_BUFFER_SIZE = Math.max(
  * backtracking. We only ever want literal substring matching with word
  * boundaries, so escaping all regex metacharacters is the right fix.
  */
+/**
+ * Drop the routing-only `workspace` key before handing args to a handler whose
+ * Zod schema is strict (rejects unknown keys). The workspace has already been
+ * resolved into the InstanceContext by then.
+ */
+function withoutWorkspace<T extends Record<string, unknown> | undefined>(args: T): T {
+  if (!args || typeof args !== 'object' || !('workspace' in args)) return args;
+  const { workspace: _workspace, ...rest } = args as Record<string, unknown>;
+  return rest as T;
+}
+
 function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -1487,6 +1498,14 @@ export class N8NDocumentationMCPServer {
    * @throws Error if specified workspace is not found
    */
   private resolveContextFromArgs(args: any): InstanceContext | undefined {
+    // Multi-tenant HTTP: each request carries its own tenant context. Never
+    // route it to an operator workspace from env (by name or by default),
+    // matching the no-env-fallback rule in getN8nApiClient and
+    // resolveOfficialMcpConfig.
+    if (process.env.ENABLE_MULTI_TENANT === 'true') {
+      return this.instanceContext;
+    }
+
     const manager = getWorkspaceApiClientManager();
 
     // Explicit workspace parameter always wins
@@ -1502,7 +1521,7 @@ export class N8NDocumentationMCPServer {
     // credentials (multi-tenant HTTP) wins over the configured default
     // workspace; otherwise every tenant would be routed to the default one.
     const requestContext = this.instanceContext;
-    if (requestContext?.n8nApiUrl && requestContext?.n8nApiKey) {
+    if (requestContext?.n8nApiUrl && (requestContext?.n8nApiKey || requestContext?.n8nMcpAccessToken)) {
       return requestContext;
     }
 
@@ -2091,14 +2110,14 @@ export class N8NDocumentationMCPServer {
 
       case 'n8n_manage_agents':
         this.validateToolParams(name, args, ['action']);
-        return handleManageAgents(args, this.resolveContextFromArgs(args));
+        return handleManageAgents(withoutWorkspace(args), this.resolveContextFromArgs(args));
 
       case 'n8n_explore_node_resources':
-        return handleExploreNodeResources(args, this.resolveContextFromArgs(args));
+        return handleExploreNodeResources(withoutWorkspace(args), this.resolveContextFromArgs(args));
 
       case 'n8n_list_catalog':
         this.validateToolParams(name, args, ['kind']);
-        return handleListCatalog(args, this.resolveContextFromArgs(args));
+        return handleListCatalog(withoutWorkspace(args), this.resolveContextFromArgs(args));
 
       case 'n8n_manage_credentials': {
         this.validateToolParams(name, args, ['action']);

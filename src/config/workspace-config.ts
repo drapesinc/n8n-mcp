@@ -20,6 +20,8 @@ export interface WorkspaceConfig {
   token: string;
   urlEnvVar: string;
   tokenEnvVar: string;
+  /** Access token for n8n's own MCP server (N8N_MCP_TOKEN_<NAME>; N8N_MCP_ACCESS_TOKEN for "default") */
+  mcpToken?: string;
 }
 
 export interface MultiWorkspaceConfig {
@@ -32,6 +34,7 @@ export interface MultiWorkspaceConfig {
  *
  * Dynamically scans for N8N_URL_* and N8N_TOKEN_* env vars:
  * - N8N_URL_<NAME> and N8N_TOKEN_<NAME> → workspace "<name>" (lowercase)
+ * - N8N_MCP_TOKEN_<NAME> (optional) → that workspace's token for n8n's own MCP server
  *
  * Also supports:
  * - N8N_API_URL + N8N_API_KEY (fallback for single-instance mode, creates "default" workspace)
@@ -66,6 +69,7 @@ export function loadWorkspaceConfig(): MultiWorkspaceConfig {
         token,
         urlEnvVar: envVar,
         tokenEnvVar,
+        mcpToken: process.env[`N8N_MCP_TOKEN_${envVar.substring(urlPrefix.length)}`] || undefined,
       });
     }
   }
@@ -81,6 +85,7 @@ export function loadWorkspaceConfig(): MultiWorkspaceConfig {
         token: fallbackKey,
         urlEnvVar: 'N8N_API_URL',
         tokenEnvVar: 'N8N_API_KEY',
+        mcpToken: process.env.N8N_MCP_ACCESS_TOKEN || undefined,
       });
     }
   }
@@ -130,11 +135,16 @@ export function workspaceToInstanceContext(workspace: WorkspaceConfig): {
   n8nApiUrl: string;
   n8nApiKey: string;
   instanceId: string;
+  n8nMcpAccessToken?: string;
 } {
   return {
     n8nApiUrl: workspace.url,
     n8nApiKey: workspace.token,
     instanceId: `workspace-${workspace.name}`,
+    // Without this, tools backed by n8n's own MCP server (agents, explore,
+    // catalog, datatable columns) see a context with url + key but no MCP
+    // token and report "not configured" instead of using the env token.
+    ...(workspace.mcpToken ? { n8nMcpAccessToken: workspace.mcpToken } : {}),
   };
 }
 
