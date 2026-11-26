@@ -1521,7 +1521,7 @@ export class N8NDocumentationMCPServer {
     // credentials (multi-tenant HTTP) wins over the configured default
     // workspace; otherwise every tenant would be routed to the default one.
     const requestContext = this.instanceContext;
-    if (requestContext?.n8nApiUrl && (requestContext?.n8nApiKey || requestContext?.n8nMcpAccessToken)) {
+    if (requestContext?.n8nApiUrl && requestContext?.n8nApiKey) {
       return requestContext;
     }
 
@@ -1538,6 +1538,26 @@ export class N8NDocumentationMCPServer {
     }
 
     return this.instanceContext;
+  }
+
+  /**
+   * Context for tools served only by n8n's own MCP server (agents, explore,
+   * catalog). Those need url + MCP token, not an API key, so a request context
+   * carrying url + n8nMcpAccessToken is authoritative for them even without a
+   * key. Public API tools keep the url + key rule in resolveContextFromArgs,
+   * so a key-less context does not pull them away from the default workspace.
+   */
+  private resolveOfficialMcpContextFromArgs(args: any): InstanceContext | undefined {
+    const requestContext = this.instanceContext;
+    if (
+      process.env.ENABLE_MULTI_TENANT !== 'true' &&
+      !args?.workspace &&
+      requestContext?.n8nApiUrl &&
+      requestContext?.n8nMcpAccessToken
+    ) {
+      return requestContext;
+    }
+    return this.resolveContextFromArgs(args);
   }
 
   /**
@@ -2110,14 +2130,14 @@ export class N8NDocumentationMCPServer {
 
       case 'n8n_manage_agents':
         this.validateToolParams(name, args, ['action']);
-        return handleManageAgents(withoutWorkspace(args), this.resolveContextFromArgs(args));
+        return handleManageAgents(withoutWorkspace(args), this.resolveOfficialMcpContextFromArgs(args));
 
       case 'n8n_explore_node_resources':
-        return handleExploreNodeResources(withoutWorkspace(args), this.resolveContextFromArgs(args));
+        return handleExploreNodeResources(withoutWorkspace(args), this.resolveOfficialMcpContextFromArgs(args));
 
       case 'n8n_list_catalog':
         this.validateToolParams(name, args, ['kind']);
-        return handleListCatalog(withoutWorkspace(args), this.resolveContextFromArgs(args));
+        return handleListCatalog(withoutWorkspace(args), this.resolveOfficialMcpContextFromArgs(args));
 
       case 'n8n_manage_credentials': {
         this.validateToolParams(name, args, ['action']);

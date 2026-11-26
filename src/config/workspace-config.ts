@@ -29,6 +29,24 @@ export interface MultiWorkspaceConfig {
   defaultWorkspace: string | null;
 }
 
+function sameInstanceUrl(a: string, b: string): boolean {
+  const norm = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase();
+  return norm(a) === norm(b);
+}
+
+/**
+ * The documented single-instance token (N8N_MCP_ACCESS_TOKEN) belongs to
+ * N8N_API_URL. Reuse it for a named workspace only when that workspace points
+ * at the same instance, so existing setups keep official-MCP access without
+ * adding N8N_MCP_TOKEN_<NAME>, and a token is never sent to another instance.
+ */
+function legacyMcpTokenFor(workspaceUrl: string): string | undefined {
+  const token = process.env.N8N_MCP_ACCESS_TOKEN;
+  const legacyUrl = process.env.N8N_API_URL;
+  if (!token || !legacyUrl) return undefined;
+  return sameInstanceUrl(legacyUrl, workspaceUrl) ? token : undefined;
+}
+
 /**
  * Load workspace configuration from environment variables
  *
@@ -69,7 +87,8 @@ export function loadWorkspaceConfig(): MultiWorkspaceConfig {
         token,
         urlEnvVar: envVar,
         tokenEnvVar,
-        mcpToken: process.env[`N8N_MCP_TOKEN_${envVar.substring(urlPrefix.length)}`] || undefined,
+        mcpToken: process.env[`N8N_MCP_TOKEN_${envVar.substring(urlPrefix.length)}`]
+          || legacyMcpTokenFor(value),
       });
     }
   }

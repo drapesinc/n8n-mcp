@@ -128,7 +128,31 @@ describe('workspace argument routing for management tools', () => {
     expect(ctx).toMatchObject({ n8nApiUrl: 'https://single.example.invalid', n8nMcpAccessToken: 'single-mcp-token' });
   });
 
-  it('an injected context with url and MCP token wins over env workspaces', async () => {
+  it('reuses N8N_MCP_ACCESS_TOKEN for a named workspace on the same instance only', async () => {
+    const server = await makeServer({
+      N8N_URL_ALPHA: 'https://alpha.example.invalid/',
+      N8N_TOKEN_ALPHA: 'alpha-key',
+      N8N_URL_BETA: 'https://beta.example.invalid',
+      N8N_TOKEN_BETA: 'beta-key',
+      N8N_DEFAULT_WORKSPACE: 'alpha',
+      N8N_API_URL: 'https://alpha.example.invalid',
+      N8N_API_KEY: 'alpha-key',
+      N8N_MCP_ACCESS_TOKEN: 'legacy-mcp-token',
+    });
+    await server.executeTool('n8n_manage_agents', { action: 'list' });
+    expect(handlerMocks.handleManageAgents.mock.calls[0][1]).toMatchObject({ n8nMcpAccessToken: 'legacy-mcp-token' });
+    await server.executeTool('n8n_manage_agents', { action: 'list', workspace: 'beta' });
+    expect(handlerMocks.handleManageAgents.mock.calls[1][1].n8nMcpAccessToken).toBeUndefined();
+  });
+
+  it('a key-less injected context does not pull Public API tools off the default workspace', async () => {
+    const injected = { n8nApiUrl: 'https://tenant.example.invalid', n8nMcpAccessToken: 'tenant-mcp-token' };
+    const server = await makeServer(TWO_WORKSPACES, injected);
+    await server.executeTool('n8n_manage_credentials', { action: 'list' });
+    expect(handlerMocks.handleListCredentials.mock.calls[0][1]).toMatchObject({ n8nApiUrl: 'https://alpha.example.invalid' });
+  });
+
+  it('an injected context with url and MCP token wins for official-MCP tools', async () => {
     const injected = { n8nApiUrl: 'https://tenant.example.invalid', n8nMcpAccessToken: 'tenant-mcp-token' };
     const server = await makeServer(TWO_WORKSPACES, injected);
     await server.executeTool('n8n_list_catalog', { kind: 'projects' });
